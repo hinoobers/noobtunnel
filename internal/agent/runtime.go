@@ -72,7 +72,10 @@ func writeRuntime(stateDir string, st *RuntimeState) error {
 	}
 	path := RuntimePath(stateDir)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	// World readable on purpose: this file holds the mesh address, peers and
+	// counters, not secrets, and `noobtunnel status` should work without sudo.
+	// The machine's private key stays in identity.json, root only.
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

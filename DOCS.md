@@ -179,6 +179,13 @@ That one line installs `wireguard-tools`, downloads the agent, verifies the
 control node's certificate fingerprint, writes a systemd unit and starts it. No
 inbound ports are opened on the agent.
 
+The configuration (`/etc/noobtunnel/agent.env`) and the state directory
+(`/var/lib/noobtunnel`) are handed to the user that ran the command, so you can
+read your own settings and run `noobtunnel status` without `sudo`; that is why
+the status file is world readable. The machine's private key
+(`/var/lib/noobtunnel/identity.json`) stays root only, because the agent runs as
+root: it creates the WireGuard interface and its routes.
+
 The agent appears in the UI with its mesh address within seconds:
 
 ```sh
@@ -213,6 +220,11 @@ container is up:
 - The identity lives in `./noobtunnel-state` (mounted at `/var/lib/noobtunnel`),
   so `docker compose down` followed by `docker compose up -d` keeps the same mesh
   address.
+- **The files belong to you**, not to root: after the container is up, the
+  installer hands the `Dockerfile`, `docker-compose.yml`, `.env`, the binary and
+  `./noobtunnel-state` to the user that ran the command, and adds that user to the
+  `docker` group so `docker compose logs -f`, `restart` and `down` work without
+  `sudo` (log out and back in once for the group change to apply).
 - Advertising networks also needs the host to forward packets, which is not
   something a container can enable for the machine: the installer sets
   `net.ipv4.ip_forward=1` and persists it in

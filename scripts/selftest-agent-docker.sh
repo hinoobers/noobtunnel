@@ -45,8 +45,26 @@ make_fakes() {
 
 	cat > "${FAKE}/id" <<'EOF'
 #!/usr/bin/env bash
-[ "${1:-}" = "-u" ] && { echo 0; exit 0; }
-echo 0
+case "${1:-}" in
+	-u) [ -n "${2:-}" ] && { echo "${FAKE_UID:-1000}"; exit 0; }; echo 0 ;;
+	-g) echo "${FAKE_GID:-1000}" ;;
+	-nG) echo "${FAKE_GROUPS:-ubuntu}" ;;
+	*)  echo 0 ;;
+esac
+EOF
+
+	# chown and usermod are recorded: the installer hands its files to the user
+	# that ran it under sudo.
+	cat > "${FAKE}/chown" <<'EOF'
+#!/usr/bin/env bash
+echo "chown $*" >> "${FAKE_LOG:-/dev/null}"
+exit 0
+EOF
+
+	cat > "${FAKE}/usermod" <<'EOF'
+#!/usr/bin/env bash
+echo "usermod $*" >> "${FAKE_LOG:-/dev/null}"
+exit 0
 EOF
 
 	cat > "${FAKE}/uname" <<'EOF'
@@ -103,7 +121,12 @@ case "$*" in
 	"--version") echo "Docker version 27.0.0, build test" ;;
 	"info") ;;
 	"compose version") echo "Docker Compose version v2.29.0" ;;
-	"compose up -d --build") echo "Container noobtunnel-agent  Started" ;;
+	"compose up -d --build")
+		# Docker creates the bind mount source, as root, just like the real one.
+		mkdir -p ./noobtunnel-state
+		: > ./noobtunnel-state/identity.json
+		echo "Container noobtunnel-agent  Started"
+		;;
 	"ps --format {{.Names}}") echo "noobtunnel-agent" ;;
 	*) ;;
 esac
@@ -214,13 +237,47 @@ if grep -q 'run the agent as a systemd service (the default)' <(sh "${REPO}/inte
 else
 	fail "the systemd service method is still the default"
 fi
-if grep -q 'the scripts are POSIX sh' /dev/null 2>/dev/null || ! grep -q 'docker' <(sh "${REPO}/internal/install/install.sh" --help 2>&1); then
-	:
-fi
 if grep -q 'run the agent as a Docker container' <(sh "${REPO}/internal/install/install.sh" --help 2>&1); then
 	pass "docker is offered as another way in"
 else
 	fail "docker is offered as another way in"
+fi
+
+printf '\n6. files land in the name of the user who ran the installer\n'
+reset_env
+install_fake_docker
+OUT="$(cd "${TARGET}" && SUDO_USER=ubuntu SUDO_UID=1000 SUDO_GID=1000 run_installer "" --docker --server vpn.example.com:8443 --token nt_test_token)"
+for file in Dockerfile docker-compose.yml .env noobtunnel-state; do
+	if grep -q "chown -R 1000:1000 ${TARGET}/${file}" "${WORK}/log.txt"; then
+		pass "it gives ${file} to the user"
+	else
+		fail "it gives ${file} to the user"
+	fi
+done
+if grep -q "usermod -aG docker ubuntu" "${WORK}/log.txt"; then
+	pass "it adds the user to the docker group"
+else
+	fail "it adds the user to the docker group"
+fi
+if printf '%s' "${OUT}" | grep -q "belong to ubuntu"; then
+	pass "it says whose files they are"
+else
+	fail "it says whose files they are"
+fi
+
+printf '\n7. running as plain root does not touch ownership\n'
+reset_env
+install_fake_docker
+OUT="$(cd "${TARGET}" && run_installer "" --docker --server vpn.example.com:8443 --token nt_test_token)"
+if grep -q "chown" "${WORK}/log.txt"; then
+	fail "it changed ownership without a sudo user"
+else
+	pass "it leaves ownership alone when root ran it directly"
+fi
+if grep -q "usermod" "${WORK}/log.txt"; then
+	fail "it changed group membership without a sudo user"
+else
+	pass "it leaves group membership alone when root ran it directly"
 fi
 
 printf '\n%s passed, %s failed\n\n' "${PASS}" "${FAIL}"

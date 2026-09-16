@@ -46,7 +46,10 @@ func LoadIdentity(dir string) (*Identity, error) {
 	if !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	// 0755 so the machine's status file can be read (and `noobtunnel status` can
+	// run) without sudo; the private key itself is written 0600 and stays root
+	// only.
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("agent: create state directory: %w", err)
 	}
 	kp, err := wg.GenerateKeyPair()

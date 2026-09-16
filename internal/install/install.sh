@@ -33,6 +33,18 @@ BIN="/usr/local/bin/noobtunnel"
 SERVICE="noobtunnel-agent"
 UNIT="/etc/systemd/system/${SERVICE}.service"
 
+# The files this script writes in the current directory belong to the person who
+# ran it, not to root, so they can edit the compose file and run docker compose
+# without sudo afterwards. sudo passes the caller along in SUDO_USER.
+TARGET_USER="${SUDO_USER:-}"
+TARGET_UID="${SUDO_UID:-}"
+TARGET_GID="${SUDO_GID:-}"
+if [ -n "$TARGET_USER" ] && [ "$TARGET_USER" != "root" ] && [ -z "$TARGET_UID" ]; then
+	TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || echo "")"
+	TARGET_GID="$(id -g "$TARGET_USER" 2>/dev/null || echo "")"
+fi
+[ "$TARGET_USER" = "root" ] && TARGET_USER=""
+
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m!!\033[0m %s\n' "$*" >&2; exit 1; }
@@ -87,6 +99,36 @@ choose_method() {
 		2|d|D|docker) METHOD="docker" ;;
 		*) METHOD="service" ;;
 	esac
+}
+
+# give_to_caller hands files the installer created over to the user who ran it,
+# so they do not need sudo to read or edit them.
+give_to_caller() {
+	[ -n "$TARGET_UID" ] || return 0
+	for path in "$@"; do
+		[ -e "$path" ] || continue
+		if chown -R "$TARGET_UID:$TARGET_GID" "$path" 2>/dev/null; then
+			:
+		else
+			warn "could not give ${path} to ${TARGET_USER}, it stays owned by root"
+		fi
+	done
+}
+
+# allow_docker_for_caller adds the user to the docker group, so docker compose
+# works in that directory without sudo.
+allow_docker_for_caller() {
+	[ -n "$TARGET_USER" ] || return 0
+	command -v usermod >/dev/null 2>&1 || return 0
+	if id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+		return 0
+	fi
+	if usermod -aG docker "$TARGET_USER" 2>/dev/null; then
+		log "added ${TARGET_USER} to the docker group (log out and back in for it to take effect)"
+	else
+		warn "could not add ${TARGET_USER} to the docker group"
+		warn "run docker compose with sudo, or add it yourself: sudo usermod -aG docker ${TARGET_USER}"
+	fi
 }
 
 # compose_run runs docker compose, falling back to the standalone docker-compose.
@@ -396,8 +438,17 @@ COMPOSE_TAIL
 		die "the agent container did not stay up" "read the log lines above, then run: docker compose up -d"
 	fi
 
+	# The container writes its identity as root into the bind mount, and the files
+	# were written by root because the installer ran under sudo: hand both to the
+	# person who ran this, so nothing here needs sudo afterwards.
+	give_to_caller "${DIR}/Dockerfile" "${DIR}/docker-compose.yml" "${DIR}/.env" "${DIR}/noobtunnel" "${DIR}/noobtunnel-state"
+	allow_docker_for_caller
+
 	printf '\n'
 	log "the noobtunnel agent is running in Docker"
+	if [ -n "$TARGET_USER" ]; then
+		log "the files belong to ${TARGET_USER}, so docker compose and \".env\" need no sudo"
+	fi
 	cat <<EOF
 
   Directory   ${DIR}
@@ -532,6 +583,17 @@ else
 	sleep 2
 	log "started in the background, logs: /var/log/noobtunnel-agent.log"
 fi
+
+# The configuration and the state belong to whoever ran this command, so they can
+# read the settings and run `noobtunnel status` without sudo. The machine's
+# private key (identity.json) deliberately stays root only.
+mkdir -p "$STATE_DIR"
+give_to_caller "$CONF_DIR/agent.env" "$STATE_DIR"
+if [ -f "$STATE_DIR/identity.json" ]; then
+	chown 0:0 "$STATE_DIR/identity.json" 2>/dev/null || true
+	chmod 0600 "$STATE_DIR/identity.json" 2>/dev/null || true
+fi
+[ -n "$TARGET_USER" ] && log "configuration and state belong to ${TARGET_USER} (the private key stays root only)"
 
 printf '\n'
 log "installation complete"
