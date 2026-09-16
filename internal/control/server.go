@@ -117,16 +117,16 @@ type Server struct {
 	// agent, so the Errors view gets one entry per change rather than one per
 	// reconcile pass.
 	reportedErrors map[string]string
-	sessions   map[uint32]*Session
-	endpoints  map[uint32]string
-	pending    map[uint64]*pendingPing
-	hubStatus  wg.InterfaceStatus
-	hubErr     string
-	rejected   []topology.Rejected
-	peerStats  map[uint32]map[uint32]proto.PeerStat
-	peerDirty  bool
-	checks     []Check
-	checksAt   time.Time
+	sessions       map[uint32]*Session
+	endpoints      map[uint32]string
+	pending        map[uint64]*pendingPing
+	hubStatus      wg.InterfaceStatus
+	hubErr         string
+	rejected       []topology.Rejected
+	peerStats      map[uint32]map[uint32]proto.PeerStat
+	peerDirty      bool
+	checks         []Check
+	checksAt       time.Time
 }
 
 // pendingPing tracks an outstanding latency probe.
@@ -1236,6 +1236,16 @@ func (s *Server) recordResourceErrors() {
 			resource.Name+" is not listening", stat.LastError,
 			"the port may be taken by another service, or the exit node address may not be on this host")
 		for _, target := range resource.Targets {
+			// The mesh can only deliver a network to one agent: a target that
+			// another agent's advertisement would capture is reported here, with
+			// the store's explanation of which one wins. This is checked before
+			// the counters, because a target nobody has dialled yet has none.
+			if err := s.store.CheckTargetReachability(target.AgentID, target.Host); err != nil {
+				note(fmt.Sprintf("unreachable/%d/%d", resource.ID, target.ID), "target",
+					resource.Name+": target "+target.Target()+" would not reach that agent",
+					err.Error(),
+					"fix the advertised networks of the agents involved, then publish again")
+			}
 			ts, ok := stat.Targets[target.ID]
 			if !ok {
 				continue
@@ -1259,7 +1269,7 @@ func (s *Server) recordResourceErrors() {
 			handshake := false
 			if agent, err := s.store.Agent(target.AgentID); err == nil && agent.PublicKey != "" {
 				for _, peer := range hubPeers {
-						if peer.PublicKey == agent.PublicKey && !peer.LatestHandshake.IsZero() {
+					if peer.PublicKey == agent.PublicKey && !peer.LatestHandshake.IsZero() {
 						handshake = true
 					}
 				}

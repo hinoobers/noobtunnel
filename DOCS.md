@@ -271,12 +271,20 @@ host itself owns - its own Docker bridge on `172.18.0.0/16`, for example - alway
 wins, so adding an agent never takes a network away from the machine, and a bridge
 that comes up later is not blocked by a mesh route that is already there.
 
-Overlapping private ranges are still ambiguous by nature: when two machines both
-have `172.18.0.0/16` locally, each of them uses its *own* copy, and neither can
-reach the other's by that address alone. What always works is the published
-service: a resource whose target is a service on the agent's own network is
-dialled by the agent itself, so `172.18.0.1:4702` on one machine is reachable
-through that machine's resource no matter who else uses the same range.
+Advertising is a **grant of access, not ownership**: an agent still only owns its
+mesh address, and a network it advertises is one the mesh may reach *through* it.
+Targets follow that rule. An agent's own address always works; a service inside an
+advertised network works; a service outside every advertised network is refused,
+and the refusal says what the agent does advertise. Two agents advertising the
+same range is refused too, because the mesh can only route a network to one of
+them - the narrower advertisement wins, and an equal one is ambiguous. The error
+names both agents so you can drop the range from one of them.
+
+That last rule is what keeps `172.18.0.0/16`-style ranges honest: every Docker
+host has the same bridges locally, so two machines that *both* advertise them
+give the mesh no way to tell them apart. Advertise the networks you mean to share
+(`192.168.0.0/24` on the machine that can reach it) and the target is routed to
+that machine, and only to it.
 
 ### Publish services (Resources tab)
 

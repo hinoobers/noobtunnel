@@ -603,7 +603,9 @@ function openEditAgent(id) {
       h('label', { class: 'field' }, h('span', null, 'Name'),
         h('input', { name: 'name', value: agent.name, required: true })),
       h('label', { class: 'field' }, h('span', null, 'Advertised routes (comma separated CIDRs)'),
-        h('input', { name: 'advertise', value: (agent.advertise || []).join(', '), placeholder: '192.168.1.0/24' })),
+        h('input', { name: 'advertise', value: (agent.advertise || []).join(', '), placeholder: '192.168.1.0/24' }),
+        h('em', null, 'Access the mesh gets through this agent, not ownership of the network. ' +
+          'Two agents cannot offer the same range: the more specific one wins and an exact match is refused.')),
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'enabled', checked: agent.enabled }),
         h('span', null, h('strong', null, 'Enabled'),
@@ -672,10 +674,14 @@ function openAddAgent() {
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'advertiseAll' }),
         h('span', null, h('strong', null, 'Advertise everything'),
-          h('em', null, 'Route every network this machine can reach, instead of naming them below.'))),
+          h('em', null, 'Let the mesh use every network this machine can reach. This is access through ' +
+            'the agent; the machine keeps its own routes, and the same range is refused if another agent offers it.'))),
       h('label', { class: 'field', 'data-advertise-field': '' },
-        h('span', null, 'Advertise extra networks (optional, comma separated)'),
-        h('input', { name: 'advertise', placeholder: '192.168.1.0/24, 10.10.0.0/16', autocomplete: 'off' })),
+        h('span', null, 'Advertise networks (optional, comma separated)'),
+        h('input', { name: 'advertise', placeholder: '192.168.1.0/24, 10.10.0.0/16', autocomplete: 'off' }),
+        h('em', null, 'List what the mesh is allowed to reach through this agent, such as 192.168.1.0/24 ' +
+          'for a host on 192.168.1.5. Anything outside that list is not reachable through it, even if the ' +
+          'machine can route to it.')),
       h('label', { class: 'field' }, h('span', null, 'Enrollment link expires after'),
         h('select', { name: 'ttlHours' },
           h('option', { value: '0' }, 'never'),

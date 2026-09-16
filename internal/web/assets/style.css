@@ -403,6 +403,7 @@ p { margin: 0; }
 
 .field { display: grid; gap: 6px; }
 .field > span { font-size: .84rem; color: var(--muted); }
+.field > em { font-style: normal; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .fields { display: grid; gap: 13px; }
 
 input, select, textarea {

@@ -248,8 +248,8 @@ type ResourceInput struct {
 	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
 	// is to allow upgrades.
 	WebSockets *bool
-	Rules         []access.Rule
-	Notes         string
+	Rules      []access.Rule
+	Notes      string
 }
 
 // ProxyProtocolVersion is a PROXY protocol version selector.
@@ -515,9 +515,8 @@ func buildTargets(st *State, inputs []ResourceTargetInput) ([]ResourceTarget, er
 		if err != nil {
 			return nil, fmt.Errorf("target %d: %w", index+1, err)
 		}
-		if !targetReachable(agent, host) {
-			return nil, fmt.Errorf("%w: target %d (%s) is not reachable through %s. "+
-				"Use the agent's mesh address or a network it advertises", ErrBadResource, index+1, host, agent.Name)
+		if err := checkTargetReachability(st, agent, host); err != nil {
+			return nil, fmt.Errorf("target %d: %w", index+1, err)
 		}
 		if in.Port < 1 || in.Port > 65535 {
 			return nil, fmt.Errorf("%w: target %d needs a port between 1 and 65535", ErrBadResource, index+1)
@@ -650,22 +649,94 @@ func normaliseTargetHost(raw string) (string, error) {
 	return addr.String(), nil
 }
 
-// targetReachable reports whether the agent can plausibly route to host: either
-// its own overlay address, or a network it advertises.
-func targetReachable(agent *Agent, host string) bool {
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	if agent.Address == host {
-		return true
-	}
-	for _, raw := range agent.Advertise {
-		if prefix, err := netip.ParsePrefix(raw); err == nil && prefix.Contains(addr) {
-			return true
+// CheckTargetReachability reports whether the mesh would deliver traffic for a
+// target to the agent that hosts it. The control node calls it for resources that
+// already exist, so a conflicting advertisement shows up as an error instead of
+// silently routing to the wrong machine.
+func (s *Store) CheckTargetReachability(agentID uint32, host string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var agent *Agent
+	for _, candidate := range s.st.Agents {
+		if candidate.ID == agentID {
+			agent = candidate
+			break
 		}
 	}
-	return false
+	if agent == nil {
+		return fmt.Errorf("%w: no such agent", ErrBadResource)
+	}
+	return checkTargetReachability(s.st, agent, host)
+}
+
+// checkTargetReachability reports whether traffic to host really arrives at this
+// agent. An agent is reached either through its own mesh address, or through a
+// network it advertises for the mesh.
+//
+// Advertising is a grant of access, not ownership: a prefix can only be routed to
+// one agent, so when another agent advertises the same range the mesh sends the
+// traffic to whichever claim is more specific. A target that would be delivered
+// to a different agent is refused, with an explanation, instead of failing later
+// in a way nobody can explain.
+func checkTargetReachability(st *State, agent *Agent, host string) error {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("%w: %q is not an IP address", ErrBadResource, host)
+	}
+	if agent.Address == host {
+		return nil
+	}
+	mine := narrowestPrefixCovering(agent.Advertise, addr)
+	if mine == nil {
+		return fmt.Errorf("%w: %s is not reachable through %s, which advertises %s. "+
+			"Add the network it lives in to that agent's advertised networks",
+			ErrBadResource, host, agent.Name, describeAdvertised(agent))
+	}
+	for _, other := range st.Agents {
+		if other.ID == agent.ID || !other.Enabled {
+			continue
+		}
+		theirs := narrowestPrefixCovering(other.Advertise, addr)
+		if theirs == nil {
+			continue
+		}
+		// The mesh routes a prefix to the most specific claim, so ours has to be
+		// strictly narrower to be the one that wins.
+		if theirs.Bits() >= mine.Bits() {
+			return fmt.Errorf("%w: %s is advertised by %s (%s) as well as by %s (%s). "+
+				"The mesh can only send that network to one of them, so drop it from one agent's list or advertise the narrower network",
+				ErrBadResource, host, agent.Name, mine, other.Name, theirs)
+		}
+	}
+	return nil
+}
+
+// narrowestPrefixCovering returns the most specific advertised prefix that
+// contains addr: the longest match is the one the kernel routes by.
+func narrowestPrefixCovering(advertised []string, addr netip.Addr) *netip.Prefix {
+	var best *netip.Prefix
+	for _, raw := range advertised {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil || !prefix.Contains(addr) {
+			continue
+		}
+		if best == nil || prefix.Bits() > best.Bits() {
+			candidate := prefix
+			best = &candidate
+		}
+	}
+	return best
+}
+
+// describeAdvertised names an agent's networks for an error message.
+func describeAdvertised(agent *Agent) string {
+	if len(agent.Advertise) == 0 {
+		if agent.AdvertiseAll {
+			return "everything it can reach"
+		}
+		return "nothing yet"
+	}
+	return strings.Join(agent.Advertise, ", ")
 }
 
 // NormaliseHostname lowercases and validates a DNS name.
