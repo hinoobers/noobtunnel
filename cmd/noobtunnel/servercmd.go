@@ -159,9 +159,46 @@ func printServerInfo(server *control.Server) {
 	fmt.Printf("interface         %s\n", st.Settings.Interface)
 	fmt.Printf("hub public key    %s\n", st.Hub.PublicKey)
 	fmt.Printf("user accounts     %d (%d admin)\n", len(server.Auth().Users()), server.Auth().AdminCount())
+	// The hub's peers and handshakes are read from the kernel, so this works
+	// while the service is running and answers the one question a published
+	// service depends on: is there a live tunnel to the agent behind it?
+	names := map[string]string{}
+	for _, agent := range server.Store().Agents() {
+		if agent.PublicKey != "" {
+			names[agent.PublicKey] = agent.Name
+		}
+	}
+	status, err := server.BackendValue().Status(context.Background(), st.Settings.Interface)
+	switch {
+	case err != nil:
+		fmt.Printf("hub interface     unreadable: %v\n", err)
+	case !status.Exists:
+		fmt.Printf("hub interface     %s does not exist on this host\n", st.Settings.Interface)
+	default:
+		fmt.Printf("hub interface     %s is up, %d peer(s)\n", status.Name, len(status.Peers))
+		for _, peer := range status.Peers {
+			handshake := "no handshake yet"
+			if !peer.LatestHandshake.IsZero() {
+				handshake = "handshake " + time.Since(peer.LatestHandshake).Round(time.Second).String() + " ago"
+			}
+			name := names[peer.PublicKey]
+			if name == "" {
+				name = "unknown agent"
+			}
+			fmt.Printf("  %-20s %-24s %s\n", name, orDash(peer.Endpoint), handshake)
+		}
+	}
 	for _, check := range server.RunChecks(context.Background()) {
 		fmt.Printf("%-9s %-34s %s\n", check.Status, check.Title, check.Detail)
 	}
+}
+
+// orDash renders an empty string as a dash.
+func orDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
 }
 
 // printStartupBanner states plainly where the state lives, which URL to open and
