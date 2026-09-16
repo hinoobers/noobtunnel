@@ -275,16 +275,22 @@ Advertising is a **grant of access, not ownership**: an agent still only owns it
 mesh address, and a network it advertises is one the mesh may reach *through* it.
 Targets follow that rule. An agent's own address always works; a service inside an
 advertised network works; a service outside every advertised network is refused,
-and the refusal says what the agent does advertise. Two agents advertising the
-same range is refused too, because the mesh can only route a network to one of
-them - the narrower advertisement wins, and an equal one is ambiguous. The error
-names both agents so you can drop the range from one of them.
+and the refusal says what the agent does advertise.
+
+Exactly one agent can carry a given network: that is what keeps the relay fallback
+working on every node, because a prefix has to belong to a single peer entry.
+When two agents advertise overlapping ranges the mesh keeps one of them and drops
+the other, and the dropped claim is reported in **Logs -> Errors** with the agent
+and the range. A target behind the dropped claim is refused when it is published,
+and keeps reporting there, because the mesh would otherwise deliver it to the
+other machine. The fix is the same in both places: drop the range from one of the
+two agents.
 
 That last rule is what keeps `172.18.0.0/16`-style ranges honest: every Docker
 host has the same bridges locally, so two machines that *both* advertise them
-give the mesh no way to tell them apart. Advertise the networks you mean to share
-(`192.168.0.0/24` on the machine that can reach it) and the target is routed to
-that machine, and only to it.
+give the mesh no way to tell them apart, and only one of them ends up routed.
+Advertise the networks you mean to share (`192.168.0.0/24` on the machine that can
+reach it) and the target is routed to that machine, and only to it.
 
 ### Publish services (Resources tab)
 

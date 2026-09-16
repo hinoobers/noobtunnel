@@ -605,7 +605,8 @@ function openEditAgent(id) {
       h('label', { class: 'field' }, h('span', null, 'Advertised routes (comma separated CIDRs)'),
         h('input', { name: 'advertise', value: (agent.advertise || []).join(', '), placeholder: '192.168.1.0/24' }),
         h('em', null, 'Access the mesh gets through this agent, not ownership of the network. ' +
-          'Two agents cannot offer the same range: the more specific one wins and an exact match is refused.')),
+          'A network is routed to one agent only: if two agents offer the same range, one of them loses it ' +
+          'and the Errors tab under Logs says which.')),
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'enabled', checked: agent.enabled }),
         h('span', null, h('strong', null, 'Enabled'),
@@ -675,7 +676,7 @@ function openAddAgent() {
         h('input', { type: 'checkbox', name: 'advertiseAll' }),
         h('span', null, h('strong', null, 'Advertise everything'),
           h('em', null, 'Let the mesh use every network this machine can reach. This is access through ' +
-            'the agent; the machine keeps its own routes, and the same range is refused if another agent offers it.'))),
+            'the agent; the machine keeps its own routes, and a range another agent already carries is reported in Logs.'))),
       h('label', { class: 'field', 'data-advertise-field': '' },
         h('span', null, 'Advertise networks (optional, comma separated)'),
         h('input', { name: 'advertise', placeholder: '192.168.1.0/24, 10.10.0.0/16', autocomplete: 'off' }),

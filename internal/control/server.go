@@ -1313,6 +1313,23 @@ func (s *Server) recordResourceErrors() {
 			"check wireguard-tools, the kernel module and NET_ADMIN on that machine")
 	}
 
+	// An advertised network the hub refused to route belongs here too. It shows
+	// up as "no route to host" everywhere else, and a network nobody has
+	// published a target for yet would otherwise leave no trace at all.
+	s.mu.Lock()
+	rejected := append([]topology.Rejected(nil), s.rejected...)
+	s.mu.Unlock()
+	for _, entry := range rejected {
+		who := agents[entry.MemberID]
+		if who == "" {
+			who = fmt.Sprintf("agent %d", entry.MemberID)
+		}
+		note(fmt.Sprintf("advertise/%d/%s", entry.MemberID, entry.Prefix), "agent",
+			who+": advertised network "+entry.Prefix+" is not routed",
+			entry.Reason,
+			"a network is routed to one agent only: drop it from one of them, or advertise a range only that machine can reach")
+	}
+
 	// The hub is the thing every target is reached through: if the control node
 	// cannot program it, nothing is reachable no matter what the agents report.
 	s.mu.Lock()

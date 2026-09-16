@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/access"
+	"github.com/noobtunnel/noobtunnel/internal/topology"
 )
 
 // Protocol is how a resource is published on the control node.
@@ -673,11 +674,12 @@ func (s *Store) CheckTargetReachability(agentID uint32, host string) error {
 // agent. An agent is reached either through its own mesh address, or through a
 // network it advertises for the mesh.
 //
-// Advertising is a grant of access, not ownership: a prefix can only be routed to
-// one agent, so when another agent advertises the same range the mesh sends the
-// traffic to whichever claim is more specific. A target that would be delivered
-// to a different agent is refused, with an explanation, instead of failing later
-// in a way nobody can explain.
+// Advertising is a grant of access, not ownership: a network is one the mesh may
+// reach *through* the agent that offers it. Exactly one agent can carry any
+// given range, so the answer has to come from the same resolution the hub uses
+// when it programs its device - otherwise the control node would happily publish
+// a target that the mesh sends somewhere else, and it would fail as a plain "no
+// route to host" with nothing to act on.
 func checkTargetReachability(st *State, agent *Agent, host string) error {
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
@@ -686,46 +688,82 @@ func checkTargetReachability(st *State, agent *Agent, host string) error {
 	if agent.Address == host {
 		return nil
 	}
-	mine := narrowestPrefixCovering(agent.Advertise, addr)
-	if mine == nil {
-		return fmt.Errorf("%w: %s is not reachable through %s, which advertises %s. "+
-			"Add the network it lives in to that agent's advertised networks",
-			ErrBadResource, host, agent.Name, describeAdvertised(agent))
-	}
-	for _, other := range st.Agents {
-		if other.ID == agent.ID || !other.Enabled {
+	owners, rejected, names := resolveAdvertise(st)
+	// Another agent carries this address: the mesh sends it there, no matter
+	// which agent the resource names.
+	for id, prefixes := range owners {
+		if id == agent.ID {
 			continue
 		}
-		theirs := narrowestPrefixCovering(other.Advertise, addr)
-		if theirs == nil {
-			continue
-		}
-		// The mesh routes a prefix to the most specific claim, so ours has to be
-		// strictly narrower to be the one that wins.
-		if theirs.Bits() >= mine.Bits() {
-			return fmt.Errorf("%w: %s is advertised by %s (%s) as well as by %s (%s). "+
-				"The mesh can only send that network to one of them, so drop it from one agent's list or advertise the narrower network",
-				ErrBadResource, host, agent.Name, mine, other.Name, theirs)
+		for _, prefix := range prefixes {
+			if prefix.Contains(addr) {
+				return fmt.Errorf("%w: %s is inside %s, which the mesh routes to %s, not to %s. "+
+					"A network can only be routed to one agent, so drop it from one of them and publish again",
+					ErrBadResource, host, prefix, names[id], agent.Name)
+			}
 		}
 	}
-	return nil
-}
-
-// narrowestPrefixCovering returns the most specific advertised prefix that
-// contains addr: the longest match is the one the kernel routes by.
-func narrowestPrefixCovering(advertised []string, addr netip.Addr) *netip.Prefix {
-	var best *netip.Prefix
-	for _, raw := range advertised {
-		prefix, err := netip.ParsePrefix(raw)
+	// Our own claim was refused by the hub's resolution: say why, because the
+	// operator's advertised list looks right until you know the rule.
+	for _, entry := range rejected {
+		if entry.MemberID != agent.ID {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(entry.Prefix)
 		if err != nil || !prefix.Contains(addr) {
 			continue
 		}
-		if best == nil || prefix.Bits() > best.Bits() {
-			candidate := prefix
-			best = &candidate
+		return fmt.Errorf("%w: %s is inside %s, which the mesh does not route through %s: %s",
+			ErrBadResource, host, prefix, agent.Name, entry.Reason)
+	}
+	// The hub accepted one of our claims, so the mesh does deliver this address
+	// to us: that is the grant of access the operator asked for.
+	for _, prefix := range owners[agent.ID] {
+		if prefix.Contains(addr) {
+			return nil
 		}
 	}
-	return best
+	return fmt.Errorf("%w: %s is not reachable through %s, which advertises %s. "+
+		"Add the network it lives in to that agent's advertised networks",
+		ErrBadResource, host, agent.Name, describeAdvertised(agent))
+}
+
+// resolveAdvertise answers "which agent carries which network" with the same
+// resolution the hub programs: the enabled agents, their parsed mesh addresses,
+// and topology's deterministic handling of claims that cannot both be routed.
+// It returns the accepted prefixes per agent, the claims that were dropped, and
+// the agent names, for error messages a person can act on.
+func resolveAdvertise(st *State) (map[uint32][]netip.Prefix, []topology.Rejected, map[uint32]string) {
+	names := map[uint32]string{}
+	var members []topology.Member
+	seen := map[uint32]bool{}
+	for _, agent := range st.Agents {
+		names[agent.ID] = agent.Name
+		if !agent.Enabled || agent.PublicKey == "" || seen[agent.ID] {
+			continue
+		}
+		addr, err := netip.ParseAddr(agent.Address)
+		if err != nil {
+			continue
+		}
+		seen[agent.ID] = true
+		member := topology.Member{
+			ID:        agent.ID,
+			Name:      agent.Name,
+			Address:   addr,
+			PublicKey: agent.PublicKey,
+			Enabled:   true,
+		}
+		for _, raw := range agent.Advertise {
+			if prefix, err := netip.ParsePrefix(raw); err == nil {
+				member.Advertise = append(member.Advertise, prefix)
+			}
+		}
+		members = append(members, member)
+	}
+	meshCIDR, _ := netip.ParsePrefix(st.Settings.MeshCIDR)
+	owners, rejected := topology.Mesh{CIDR: meshCIDR}.ResolveAdvertise(members)
+	return owners, rejected, names
 }
 
 // describeAdvertised names an agent's networks for an error message.
