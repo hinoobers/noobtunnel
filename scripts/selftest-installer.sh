@@ -42,6 +42,18 @@ check() { # check "description" condition-command...
 }
 contains() { grep -qF -- "$2" "$1"; }
 
+# checksum is portable enough for both Linux and the Windows shell this test can
+# run under.
+checksum() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	elif command -v cksum >/dev/null 2>&1; then
+		cksum "$1" | awk '{print $1"-"$2}'
+	else
+		wc -c < "$1" | tr -d ' '
+	fi
+}
+
 # ------------------------------------------------------------- fake machine ---
 
 make_fakes() {
@@ -468,6 +480,80 @@ else
 	fail "the installation from the download completes"
 fi
 if [ "${DEBUG:-0}" != "0" ]; then printf '%s\n' "----- test 10 -----"; printf '%s\n' "${OUT}" | tail -n 16; fi
+
+printf '\n11. updating replaces the binaries and keeps the configuration\n'
+reset_state
+UPD="${WORK}/update-checkout"
+mkdir -p "${UPD}/scripts" "${UPD}/dist"
+cp "${REPO}/scripts/install-server.sh" "${UPD}/scripts/"
+for arch in amd64 arm64; do
+	printf '\177ELF\002\001\001\000original-build' > "${UPD}/dist/noobtunnel_linux_${arch}"
+done
+# A first install, at the "current" build.
+OUT="$(printf '%s\n' "noobtunnel.mydomain.com
+you@example.com
+y
+
+y" | env NOOBTUNNEL_SYSROOT="${SYSROOT}" NOOBTUNNEL_NO_TTY=1 PATH="${FAKE}:${PATH}" \
+	FAKE_IP=203.0.113.10 \
+	FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
+	FAKE_LOG="${WORK}/systemctl.log" \
+	bash "${UPD}/scripts/install-server.sh" 2>&1)"
+check "the first install completed" test -f "${SYSROOT}/etc/noobtunnel/server.env"
+ENV_BEFORE="$(checksum "${SYSROOT}/etc/noobtunnel/server.env")"
+BIN_BEFORE="$(checksum "${SYSROOT}/usr/local/bin/noobtunnel")"
+
+# A newer build: same name, different content.
+printf '\177ELF\002\001\001\000newer-build' > "${UPD}/dist/noobtunnel_linux_amd64"
+OUT="$(env NOOBTUNNEL_SYSROOT="${SYSROOT}" NOOBTUNNEL_UPDATE_ONLY=1 NOOBTUNNEL_NO_TTY=1 \
+	PATH="${FAKE}:${PATH}" \
+	FAKE_IP=203.0.113.10 \
+	FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
+	FAKE_LOG="${WORK}/systemctl.log" \
+	bash "${UPD}/scripts/install-server.sh" 2>&1)"
+if printf '%s' "${OUT}" | grep -q "Updating the noobtunnel control node"; then
+	pass "update mode says what it is doing"
+else
+	fail "update mode says what it is doing"
+fi
+if printf '%s' "${OUT}" | grep -q "noobtunnel updated"; then
+	pass "it reports the update"
+else
+	fail "it reports the update"
+fi
+check "the configuration was left alone" test "${ENV_BEFORE}" = "$(checksum "${SYSROOT}/etc/noobtunnel/server.env")"
+if [ "${BIN_BEFORE}" != "$(checksum "${SYSROOT}/usr/local/bin/noobtunnel")" ]; then
+	pass "the binary was replaced"
+else
+	fail "the binary was replaced"
+fi
+if printf '%s' "${OUT}" | grep -q "public hostname for this control node"; then
+	fail "update mode asked the install questions"
+else
+	pass "update mode asked nothing"
+fi
+if grep -q "restart noobtunnel-server" "${WORK}/systemctl.log"; then
+	pass "the service was restarted"
+else
+	fail "the service was restarted"
+fi
+
+printf '\n12. updating a machine with no control node explains itself\n'
+reset_state
+OUT="$(env NOOBTUNNEL_SYSROOT="${SYSROOT}" NOOBTUNNEL_UPDATE_ONLY=1 NOOBTUNNEL_NO_TTY=1 \
+	PATH="${FAKE}:${PATH}" \
+	FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
+	bash "${REPO}/scripts/install-server.sh" 2>&1)"
+if printf '%s' "${OUT}" | grep -q "no control node on this machine to update"; then
+	pass "it says there is nothing to update"
+else
+	fail "it says there is nothing to update"
+fi
+if printf '%s' "${OUT}" | grep -q "install-server.sh | sudo bash"; then
+	pass "it shows the install command"
+else
+	fail "it shows the install command"
+fi
 
 printf '\n%s passed, %s failed\n\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]

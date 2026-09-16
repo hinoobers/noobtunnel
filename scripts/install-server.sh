@@ -634,8 +634,8 @@ install_packages_if_needed() {
 	ok "tools ready: wg, ip, curl, openssl, iptables"
 }
 
-install_files() {
-	step "Installing the control node"
+install_binaries() {
+	step "Installing the binaries"
 	mkdir -p "${BIN_DIR}" "${AGENT_SHARE}" "${CONF_DIR}" "${STATE_DIR}" "${UNIT_DIR}"
 	install -m 0755 "${BINARY_DIR}/noobtunnel_linux_${ARCH}" "${BIN}"
 	cp -f "${BINARY_DIR}"/noobtunnel_linux_* "${AGENT_SHARE}/"
@@ -763,6 +763,94 @@ wait_for_certificate() {
 	return 1
 }
 
+# env_value reads KEY=value from the configuration file, so an update reuses the
+# settings the control node was installed with.
+env_value() {
+	local key="$1" file="${2:-${ENV_FILE}}"
+	[ -f "${file}" ] || return 0
+	sed -n "s/^${key}=//p" "${file}" | tail -n1
+}
+
+# health_version asks the running control node which version it is, for the
+# "updated 0.1.0 -> 0.1.1" line. Empty when it cannot be read.
+health_version() {
+	local port="$1" raw=""
+	raw="$(curl -fsSk --max-time 5 "https://127.0.0.1:${port}/api/health" 2>/dev/null || true)"
+	printf '%s' "${raw}" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
+}
+
+# update_existing replaces the binaries of an installed control node and restarts
+# it. The configuration, accounts, keys and certificates are left alone.
+update_existing() {
+	step "Updating the noobtunnel control node"
+	[ -f "${ENV_FILE}" ] ||
+		die "there is no control node on this machine to update" \
+			"install one first: curl -fsSL ${RAW_BASE}/scripts/install-server.sh | sudo bash"
+
+	# The configuration file is the source of truth, so a custom state directory
+	# or port keeps working across updates.
+	local listen before after
+	DOMAIN="$(env_value NOOBTUNNEL_DOMAIN)"
+	listen="$(env_value NOOBTUNNEL_LISTEN)"
+	if [ -n "${listen}" ]; then
+		CONTROL_PORT="${listen##*:}"
+	fi
+	[ -n "${CONTROL_PORT}" ] || CONTROL_PORT="8443"
+	STATE_DIR="$(env_value NOOBTUNNEL_STATE_DIR)"
+	STATE_DIR="${STATE_DIR:-${SYSROOT}/var/lib/noobtunnel}"
+	AGENT_SHARE="$(env_value NOOBTUNNEL_BINARY_DIR)"
+	AGENT_SHARE="${AGENT_SHARE:-${SYSROOT}/usr/local/share/noobtunnel}"
+	ok "configured for ${DOMAIN:-this machine} on port ${CONTROL_PORT}"
+
+	before="$(health_version "${CONTROL_PORT}")"
+	ok "running version: ${before:-unknown}"
+
+	ARCH="$(detect_arch)"
+	[ -n "${ARCH}" ] ||
+		die "unsupported CPU architecture: $(uname -m)" "noobtunnel ships binaries for amd64, arm64, armv7 and 386"
+	check_binaries
+	fetch_binaries
+	install_binaries
+
+	step "Restarting the control node"
+	systemctl daemon-reload
+	systemctl restart "${SERVICE}"
+	local tries=0
+	while [ "${tries}" -lt 40 ]; do
+		if curl -fsSk --max-time 5 "https://127.0.0.1:${CONTROL_PORT}/api/health" >/dev/null 2>&1; then
+			break
+		fi
+		if ! systemctl is-active --quiet "${SERVICE}"; then
+			journalctl -u "${SERVICE}" -n 20 --no-pager 2>/dev/null | sed 's/^/      /' || true
+			die "the control node did not come back up" "read the log lines above, then run the update again"
+		fi
+		tries=$((tries + 1))
+		sleep 1
+	done
+	if [ "${tries}" -ge 40 ]; then
+		journalctl -u "${SERVICE}" -n 20 --no-pager 2>/dev/null | sed 's/^/      /' || true
+		die "the control node did not answer after the update" "read the log lines above, fix the build and upload it again"
+	fi
+
+	after="$(health_version "${CONTROL_PORT}")"
+	ok "running version: ${after:-unknown}"
+	printf '\n'
+	if [ -n "${before}" ] && [ "${before}" = "${after}" ]; then
+		ok "noobtunnel is up to date (${before}); nothing else changed"
+	else
+		ok "noobtunnel updated${before:+ from ${before}}${after:+ to ${after}}"
+	fi
+	cat <<EOF
+
+  Unchanged: ${ENV_FILE}, accounts, mesh keys, certificates and published services.
+  Web UI:    https://${DOMAIN}
+
+Day to day:
+  systemctl status ${SERVICE}
+  journalctl -u ${SERVICE} -f
+EOF
+}
+
 # ------------------------------------------------------------------ main ------
 
 banner
@@ -770,9 +858,33 @@ if [ "$#" -gt 0 ]; then
 	warn "this installer takes no options: it asks for everything it needs"
 	warn "ignoring: $*"
 fi
+
+# Update mode (scripts/update-server.sh sets this): no questions, no
+# reconfiguration, just the new binaries and a restart.
+if [ "${NOOBTUNNEL_UPDATE_ONLY:-0}" = "1" ]; then
+	check_host
+	update_existing
+	exit 0
+fi
+
 setup_input
 check_host
 check_binaries
+
+# A control node that is already installed is updated instead of reinstalled:
+# same command, no questions, settings and accounts untouched.
+if [ -f "${ENV_FILE}" ]; then
+	step "A noobtunnel control node is already installed here"
+	ok "domain: $(env_value NOOBTUNNEL_DOMAIN)"
+	ok "configuration: ${ENV_FILE}"
+	if confirm "update it to this build?" "y"; then
+		update_existing
+		exit 0
+	fi
+	warn "continuing with a full install: the questions below replace the configuration"
+	warn "accounts, mesh keys and certificates are kept"
+fi
+
 ask_domain
 check_dns
 ask_email
@@ -797,7 +909,7 @@ fi
 
 install_packages_if_needed
 fetch_binaries
-install_files
+install_binaries
 write_config
 open_firewall
 start_service
