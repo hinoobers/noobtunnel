@@ -61,85 +61,126 @@ func TestAdvertisedNetworkGrantsAccessToItsTargets(t *testing.T) {
 	}
 }
 
-// TestUnadvertisedNetworkIsRefused is the other half: if the mesh has no way to
-// reach that network through this agent, the target is refused instead of failing
-// mysteriously later.
-func TestUnadvertisedNetworkIsRefused(t *testing.T) {
+// TestATargetNeedsNoAdvertisement is the other half, and the point of the model:
+// the address is reached by the agent that owns it, so it does not have to be
+// part of anything the agent advertises. 172.18.0.5 on a machine whose list says
+// nothing about 172.18.0.0/16 is still that machine's own 172.18.0.5.
+func TestATargetNeedsNoAdvertisement(t *testing.T) {
 	st, agent := resourceFixture(t)
 	advertise(t, st, agent.ID, "172.16.0.0/16")
 
-	_, err := st.AddResource(ResourceInput{
+	if _, err := st.AddResource(ResourceInput{
 		Name: "web", Protocol: ProtocolTCP, ListenPort: 8080,
 		Targets: oneTarget(agent.ID, "192.168.0.5", 80),
-	})
-	if !errors.Is(err, ErrBadResource) {
-		t.Fatalf("a service outside the advertised networks must be refused, got %v", err)
+	}); err != nil {
+		t.Fatalf("a service on the agent's own network should be allowed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "advertises 172.16.0.0/16") {
-		t.Fatalf("the refusal should say what the agent does advertise: %v", err)
+	pinned := st.PinnedHosts(agent.ID)
+	if len(pinned) != 1 || pinned[0].String() != "192.168.0.5/32" {
+		t.Fatalf("the target should be pinned to that agent, got %v", pinned)
 	}
 }
 
-// TestOverlappingAdvertisementIsRefused covers two machines that both offer the
-// same range. Exactly one of them can carry it, so the target on the other is
-// refused and the refusal names the agent the mesh actually routes to.
-func TestOverlappingAdvertisementIsRefused(t *testing.T) {
+// TestUnreachableAgentsAreStillRefused keeps what is left to refuse: the machine
+// has to be on the mesh, and a target cannot be an address of the mesh itself.
+func TestUnreachableAgentsAreStillRefused(t *testing.T) {
+	st, agent := resourceFixture(t)
+
+	_, err := st.AddResource(ResourceInput{
+		Name: "overlay", Protocol: ProtocolTCP, ListenPort: 8080,
+		Targets: oneTarget(agent.ID, "10.77.0.9", 80),
+	})
+	if !errors.Is(err, ErrBadResource) || !strings.Contains(err.Error(), "mesh range") {
+		t.Fatalf("an address of the overlay is not a target: %v", err)
+	}
+
+	stranger, err := st.AddAgent(AddAgentParams{Name: "not-enrolled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "early", Protocol: ProtocolTCP, ListenPort: 8081,
+		Targets: oneTarget(stranger.ID, "192.168.0.5", 80),
+	})
+	if !errors.Is(err, ErrBadResource) || !strings.Contains(err.Error(), "has not enrolled") {
+		t.Fatalf("a machine that never enrolled cannot carry a target: %v", err)
+	}
+
+	if err := st.UpdateAgent(agent.ID, func(a *Agent) error {
+		a.Enabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "disabled", Protocol: ProtocolTCP, ListenPort: 8082,
+		Targets: oneTarget(agent.ID, "192.168.0.5", 80),
+	})
+	if !errors.Is(err, ErrBadResource) || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("a disabled agent cannot carry a target: %v", err)
+	}
+}
+
+// TestTheSameRangeOnTwoMachinesIsTwoDifferentNetworks is the model an operator
+// actually has: 172.18.0.1 on one machine is not 172.18.0.1 on another, and a
+// target names the machine it means. Both resources have to be publishable, each
+// pinned to its own agent, or the second machine's containers are unreachable by
+// their own address.
+func TestTheSameRangeOnTwoMachinesIsTwoDifferentNetworks(t *testing.T) {
 	st, cassandra := resourceFixture(t)
 	lily := enrolled(t, st, "lily")
 	advertise(t, st, cassandra.ID, "172.18.0.0/16")
 	advertise(t, st, lily.ID, "172.18.0.0/16")
 
-	// The range is routed to one of the two, and that one keeps working: a
-	// target on the losing agent is what breaks, and it is what gets reported.
-	_, err := st.AddResource(ResourceInput{
-		Name: "ptero-lily", Protocol: ProtocolTCP, ListenPort: 4702,
-		Targets: oneTarget(lily.ID, "172.18.0.1", 4702),
-	})
-	if !errors.Is(err, ErrBadResource) {
-		t.Fatalf("an ambiguous network must be refused, got %v", err)
-	}
-	for _, want := range []string{cassandra.Name, "one of them"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("the refusal should mention %q: %v", want, err)
+	for _, tc := range []struct {
+		name   string
+		agent  *Agent
+		listen int
+	}{
+		{"cassandra-wings", cassandra, 4700},
+		{"lily-wings", lily, 4701},
+	} {
+		if _, err := st.AddResource(ResourceInput{
+			Name: tc.name, Protocol: ProtocolTCP, ListenPort: tc.listen,
+			Targets: oneTarget(tc.agent.ID, "172.18.0.1", 4700),
+		}); err != nil {
+			t.Fatalf("%s should be publishable through its own machine: %v", tc.name, err)
 		}
 	}
 
-	// Once only one agent offers the range, both sides stop complaining.
-	advertise(t, st, lily.ID, "10.10.0.0/16")
-	if _, err := st.AddResource(ResourceInput{
-		Name: "ptero", Protocol: ProtocolTCP, ListenPort: 4702,
-		Targets: oneTarget(cassandra.ID, "172.18.0.1", 4702),
-	}); err != nil {
-		t.Fatalf("the target should be allowed once the range is unambiguous: %v", err)
+	// Each address is delivered to the agent that owns it, whatever the range
+	// around it resolves to.
+	for _, tc := range []struct {
+		agent *Agent
+		want  string
+	}{{cassandra, "172.18.0.1/32"}, {lily, "172.18.0.1/32"}} {
+		pinned := st.PinnedHosts(tc.agent.ID)
+		if len(pinned) != 1 || pinned[0].String() != tc.want {
+			t.Fatalf("%s should have %s pinned to it, got %v", tc.agent.Name, tc.want, pinned)
+		}
 	}
 }
 
-// TestANarrowerClaimDoesNotCarveOutSomeoneElsesRange pins the rule that decides
-// overlaps. A network is routed to exactly one agent - that is what keeps the
-// relay fallback working on every node - so a /24 inside another agent's /16 is
-// not a carve out: the range stays with the agent that claimed it first, and the
-// other agent's target is refused with an explanation.
-func TestANarrowerClaimDoesNotCarveOutSomeoneElsesRange(t *testing.T) {
+// TestANarrowerClaimIsNotNeededForATarget keeps the advertised list out of the
+// way of a published target: the address is pinned by the resource, so an agent
+// does not have to win a claim over the range around it.
+func TestANarrowerClaimIsNotNeededForATarget(t *testing.T) {
 	st, cassandra := resourceFixture(t)
 	lily := enrolled(t, st, "lily")
 	advertise(t, st, cassandra.ID, "172.18.0.0/16")
 	advertise(t, st, lily.ID, "172.18.5.0/24")
-	_, err := st.AddResource(ResourceInput{
-		Name: "other", Protocol: ProtocolTCP, ListenPort: 4703,
-		Targets: oneTarget(lily.ID, "172.18.5.9", 4703),
-	})
-	if !errors.Is(err, ErrBadResource) {
-		t.Fatalf("a target inside another agent's range must be refused, got %v", err)
-	}
-	if !strings.Contains(err.Error(), cassandra.Name) {
-		t.Fatalf("the refusal should name the agent that carries the range: %v", err)
-	}
-	// The agent that carries the range can still publish a service inside it.
+
+	// lily's own 172.18.5.9 is its to publish even though cassandra advertises a
+	// broader range that contains it.
 	if _, err := st.AddResource(ResourceInput{
-		Name: "ptero", Protocol: ProtocolTCP, ListenPort: 4702,
-		Targets: oneTarget(cassandra.ID, "172.18.5.7", 4702),
+		Name: "ptero", Protocol: ProtocolTCP, ListenPort: 4703,
+		Targets: oneTarget(lily.ID, "172.18.5.9", 4703),
 	}); err != nil {
-		t.Fatalf("the carrier should be allowed to publish inside its own range: %v", err)
+		t.Fatalf("the target should be pinned to the agent it names: %v", err)
+	}
+	pinned := st.PinnedHosts(lily.ID)
+	if len(pinned) != 1 || pinned[0].String() != "172.18.5.9/32" {
+		t.Fatalf("the target should be pinned to lily, got %v", pinned)
 	}
 }
 

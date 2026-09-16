@@ -113,7 +113,9 @@ func TestResourceTargetValidation(t *testing.T) {
 	}{
 		{"none", nil, "at least one target"},
 		{"unknown agent", []ResourceTargetInput{{AgentID: 999, Host: agent.Address, Port: 80}}, "no agent"},
-		{"unreachable", oneTarget(agent.ID, "8.8.8.8", 80), "not reachable"},
+		// Any address on the agent's own network is its to publish; only an
+		// address of the overlay itself is not a target.
+		{"overlay address", oneTarget(agent.ID, "10.77.0.9", 80), "mesh range"},
 		{"bad host", oneTarget(agent.ID, "not-an-ip", 80), "IP address"},
 		{"host with a port", oneTarget(agent.ID, agent.Address+":4547", 4547), "port field"},
 		{"bad port", oneTarget(agent.ID, agent.Address, 0), "port"},

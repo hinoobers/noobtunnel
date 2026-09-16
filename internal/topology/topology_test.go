@@ -226,6 +226,47 @@ func TestAdvertiseConflictsResolvedDeterministically(t *testing.T) {
 	}
 }
 
+// TestPinnedAddressBeatsAnotherMachinesRange is the whole point of pinning: two
+// machines both have 172.18.0.5, one of them advertises 172.18.0.0/16, and a
+// published target on the other still has to be delivered to the machine that
+// owns it. The /32 is the most specific entry, so it wins - and the /16 keeps
+// carrying everything else.
+func TestPinnedAddressBeatsAnotherMachinesRange(t *testing.T) {
+	mesh := testMesh()
+	cassandra := stubAgent(1, "cassandra", "10.77.0.2")
+	cassandra.PublicKey = "KEY1"
+	cassandra.Pinned = []netip.Prefix{mustPrefix(t, "172.18.0.5/32")}
+	lily := stubAgent(2, "lily", "10.77.0.3", "172.18.0.0/16")
+	lily.PublicKey = "KEY2"
+
+	cfg, rejected := BuildHubConfig(HubInput{
+		Mesh:       mesh,
+		HubAddress: mustAddr(t, "10.77.0.1"),
+		PrivateKey: "HUBPRIV",
+		WGPort:     51820,
+		Members:    []Member{cassandra, lily},
+		HubPSKs:    map[uint32]string{1: "PSK1", 2: "PSK2"},
+	})
+	if len(rejected) != 0 {
+		t.Fatalf("unexpected rejections: %v", rejected)
+	}
+	byKey := map[string]wg.PeerConfig{}
+	for _, peer := range cfg.Peers {
+		byKey[peer.PublicKey] = peer
+	}
+	if !contains(byKey["KEY1"].AllowedIPs, "172.18.0.5/32") {
+		t.Fatalf("the pinned address should belong to the agent the resource names: %v", byKey["KEY1"].AllowedIPs)
+	}
+	if !contains(byKey["KEY2"].AllowedIPs, "172.18.0.0/16") {
+		t.Fatalf("the rest of the range should still belong to the other agent: %v", byKey["KEY2"].AllowedIPs)
+	}
+	// The route has to be there as well, or the kernel never sends the packet
+	// into the tunnel in the first place.
+	if !contains(cfg.Routes, "172.18.0.5/32") {
+		t.Fatalf("hub routes = %v", cfg.Routes)
+	}
+}
+
 func TestHubConfigCarriesAgentsAndPSKs(t *testing.T) {
 	mesh := testMesh()
 	agents := []Member{

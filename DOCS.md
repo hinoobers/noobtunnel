@@ -273,24 +273,28 @@ that comes up later is not blocked by a mesh route that is already there.
 
 Advertising is a **grant of access, not ownership**: an agent still only owns its
 mesh address, and a network it advertises is one the mesh may reach *through* it.
-Targets follow that rule. An agent's own address always works; a service inside an
-advertised network works; a service outside every advertised network is refused,
-and the refusal says what the agent does advertise.
-
 Exactly one agent can carry a given network: that is what keeps the relay fallback
 working on every node, because a prefix has to belong to a single peer entry.
 When two agents advertise overlapping ranges the mesh keeps one of them and drops
 the other, and the dropped claim is reported in **Logs -> Errors** with the agent
-and the range. A target behind the dropped claim is refused when it is published,
-and keeps reporting there, because the mesh would otherwise deliver it to the
-other machine. The fix is the same in both places: drop the range from one of the
-two agents.
+and the range. That is about the mesh reaching a network *between* machines; it
+does not decide which machine a published service runs on.
 
-That last rule is what keeps `172.18.0.0/16`-style ranges honest: every Docker
-host has the same bridges locally, so two machines that *both* advertise them
-give the mesh no way to tell them apart, and only one of them ends up routed.
-Advertise the networks you mean to share (`192.168.0.0/24` on the machine that can
-reach it) and the target is routed to that machine, and only to it.
+### The same private range on two machines
+
+Every Docker host has a `172.18.0.5`, and they are different services. A published
+target names the agent it belongs to, so that machine's own `172.18.0.5` is the
+one the resource means: the control node gives that address a host route to the
+agent it names, which is more specific than any advertised range and therefore
+wins for that one address. Two machines can both run containers on
+`172.18.0.0/16`, both can publish them, and each service is delivered to the
+machine it belongs to.
+
+So publishing does **not** require the target to be inside an advertised network:
+the agent connects to its own network, and anything your machine can reach is a
+valid target - including its own Docker bridges and even `127.0.0.1`. Advertising
+matters for the other direction: letting *other machines on the mesh* reach a
+whole network through that agent.
 
 ### Publish services (Resources tab)
 
@@ -550,7 +554,7 @@ sudo tcpdump -ni any port 4700
 
 | What the capture shows | What it means | Fix now, on that agent |
 | --- | --- | --- |
-| nothing on `noobtun` at all | the mesh is not sending it here: another agent carries that network, or the hub has no route | check `sudo wg show noobtun allowed-ips` on the control node, and the other Errors entries |
+| nothing on `noobtun` at all | the mesh is not sending it here: the address is pinned to another agent, or the hub has no route | check `sudo wg show noobtun allowed-ips` on the control node - the pinned address has to be listed for the agent the resource names |
 | a SYN arrives but nothing leaves for the container | forwarding is filtered | `sudo iptables -I FORWARD -i noobtun -j ACCEPT` and `sudo iptables -I FORWARD -o noobtun -j ACCEPT` |
 | the container answers, but the answer leaves with another address | host NAT rewrote it (Docker masquerade) | `sudo iptables -t nat -I POSTROUTING -d MESH_CIDR -j RETURN` |
 
@@ -561,11 +565,10 @@ update it on that machine:
 curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update
 ```
 
-Diagnose answers the first of those three by itself now: it resolves which agent
-carries the network the target is in, and when that is not the agent the resource
-names, it says so by name ("172.18.0.3 is inside 172.18.0.0/16, which the mesh
-routes to lily, not to cassandra"). That is the case a capture on the agent cannot
-explain, because nothing at all arrives there.
+Diagnose answers the first of those three by itself: it resolves which agent the
+target's address is delivered to, and when that is not the agent the resource
+names it says so by name. That is the case a capture on the agent cannot explain,
+because nothing at all arrives there.
 
 ## Slow connections
 

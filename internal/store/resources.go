@@ -652,9 +652,10 @@ func normaliseTargetHost(raw string) (string, error) {
 
 // CarriedPrefixes lists the networks the mesh actually routes through an agent:
 // the claims that were accepted for it, after the same resolution the hub
-// programs. It can differ from what the agent offered, because the operator can
-// edit the list here after the machine enrolled - and it is the control node's
-// answer that the agent has to forward for.
+// programs, plus the single addresses a published resource pins to it. It can
+// differ from what the agent offered, because the operator can edit the list here
+// after the machine enrolled - and it is the control node's answer that the agent
+// has to forward for.
 func (s *Store) CarriedPrefixes(agentID uint32) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -663,7 +664,52 @@ func (s *Store) CarriedPrefixes(agentID uint32) []string {
 	for _, prefix := range owners[agentID] {
 		out = append(out, prefix.String())
 	}
+	for _, prefix := range pinnedHosts(s.st, agentID) {
+		out = append(out, prefix.String())
+	}
 	sort.Strings(out)
+	return out
+}
+
+// PinnedHosts lists the single addresses the mesh must deliver to an agent,
+// because a published resource points at them through it.
+//
+// This is what makes two machines with the same private range work at once: a
+// target names its agent, so 172.18.0.5 through one agent and 172.18.0.5 through
+// another are two different services, and each one is delivered to the machine
+// that owns it instead of to whichever agent happened to claim the range.
+func (s *Store) PinnedHosts(agentID uint32) []netip.Prefix {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return pinnedHosts(s.st, agentID)
+}
+
+// pinnedHosts does the work under the caller's lock.
+func pinnedHosts(st *State, agentID uint32) []netip.Prefix {
+	mesh, _ := netip.ParsePrefix(st.Settings.MeshCIDR)
+	seen := map[netip.Prefix]bool{}
+	var out []netip.Prefix
+	for _, resource := range st.Resources {
+		if !resource.Enabled {
+			continue
+		}
+		for _, target := range resource.Targets {
+			if target.AgentID != agentID {
+				continue
+			}
+			addr, err := netip.ParseAddr(target.Host)
+			if err != nil || !addr.Is4() || mesh.Contains(addr) {
+				continue
+			}
+			prefix := netip.PrefixFrom(addr, 32)
+			if seen[prefix] {
+				continue
+			}
+			seen[prefix] = true
+			out = append(out, prefix)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].String() < out[j].String() })
 	return out
 }
 
@@ -705,44 +751,21 @@ func checkTargetReachability(st *State, agent *Agent, host string) error {
 	if agent.Address == host {
 		return nil
 	}
-	owners, rejected, names := resolveAdvertise(st)
-	// Another agent carries this address: the mesh sends it there, no matter
-	// which agent the resource names.
-	for id, prefixes := range owners {
-		if id == agent.ID {
-			continue
-		}
-		for _, prefix := range prefixes {
-			if prefix.Contains(addr) {
-				return fmt.Errorf("%w: %s is inside %s, which the mesh routes to %s, not to %s. "+
-					"A network can only be routed to one agent, so drop it from one of them and publish again",
-					ErrBadResource, host, prefix, names[id], agent.Name)
-			}
-		}
+	if !agent.Enabled {
+		return fmt.Errorf("%w: %s is disabled, so nothing can be reached through it", ErrBadResource, agent.Name)
 	}
-	// Our own claim was refused by the hub's resolution: say why, because the
-	// operator's advertised list looks right until you know the rule.
-	for _, entry := range rejected {
-		if entry.MemberID != agent.ID {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(entry.Prefix)
-		if err != nil || !prefix.Contains(addr) {
-			continue
-		}
-		return fmt.Errorf("%w: %s is inside %s, which the mesh does not route through %s: %s",
-			ErrBadResource, host, prefix, agent.Name, entry.Reason)
+	if agent.PublicKey == "" {
+		return fmt.Errorf("%w: %s has not enrolled yet, so nothing can be reached through it", ErrBadResource, agent.Name)
 	}
-	// The hub accepted one of our claims, so the mesh does deliver this address
-	// to us: that is the grant of access the operator asked for.
-	for _, prefix := range owners[agent.ID] {
-		if prefix.Contains(addr) {
-			return nil
-		}
+	// The target's agent is what scopes the address: it connects from its own
+	// machine, so its own 172.18.0.5 is the one this resource means. The only
+	// address that cannot work is one inside the mesh itself, which belongs to the
+	// overlay rather than to any machine's network.
+	if mesh, err := netip.ParsePrefix(st.Settings.MeshCIDR); err == nil && mesh.Contains(addr) {
+		return fmt.Errorf("%w: %s is inside the mesh range %s; a target has to be an address on the network of %s",
+			ErrBadResource, host, mesh, agent.Name)
 	}
-	return fmt.Errorf("%w: %s is not reachable through %s, which advertises %s. "+
-		"Add the network it lives in to that agent's advertised networks",
-		ErrBadResource, host, agent.Name, describeAdvertised(agent))
+	return nil
 }
 
 // resolveAdvertise answers "which agent carries which network" with the same

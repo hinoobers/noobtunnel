@@ -10,11 +10,14 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
-// TestConflictingAdvertisementsReachTheErrorsView covers a resource that was
-// published before another agent started advertising the same network: the mesh
-// can only route a network to one agent, so the resource quietly stops working.
-// The operator has to hear about that in the Errors view.
-func TestConflictingAdvertisementsReachTheErrorsView(t *testing.T) {
+// TestConflictingAdvertisementsDoNotBreakAPublishedTarget is the model in one
+// test: two machines both have 172.18.0.0/16, one of them ends up advertising it
+// mesh-wide, and a target published through the other one still works, because
+// the address is pinned to the machine the resource names.
+//
+// The mesh-wide claim that lost is still reported, so the operator knows the
+// range itself is not shared - but the published service is not collateral.
+func TestConflictingAdvertisementsDoNotBreakAPublishedTarget(t *testing.T) {
 	h := newHarness(t, true)
 	admin := h.login(t)
 	cassandra := h.enrolledAgent(t, "cassandra")
@@ -28,11 +31,11 @@ func TestConflictingAdvertisementsReachTheErrorsView(t *testing.T) {
 		t.Fatalf("publishing returned %d: %s", status, body)
 	}
 
-	// Now a second machine offers the same network, and the mesh can only route
-	// it to one of them, so the resource above no longer lands on lily.
+	// Now a second machine offers the same network. The mesh keeps one claim for
+	// its own routing, and the published target keeps working.
 	setAdvertise(t, h, cassandra.id, "172.18.0.0/16")
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var seen []string
 	for time.Now().Before(deadline) {
 		_, state, _ := h.api("GET", "/api/state", nil, admin)
@@ -47,19 +50,22 @@ func TestConflictingAdvertisementsReachTheErrorsView(t *testing.T) {
 			t.Fatal(err)
 		}
 		seen = seen[:0]
+		droppedClaim := false
 		for _, entry := range view.Errors {
 			seen = append(seen, entry.Message)
-			if !strings.Contains(entry.Detail, "routes to cassandra") {
-				continue
+			if strings.Contains(entry.Message, "advertised network 172.18.0.0/16 is not routed") {
+				droppedClaim = true
 			}
-			if entry.Source != "target" {
-				t.Fatalf("the error should be attributed to the target: %+v", entry)
+			if entry.Source == "target" && strings.Contains(entry.Message, "ptero") {
+				t.Fatalf("a published target must not be blamed for the range conflict: %+v", entry)
 			}
+		}
+		if droppedClaim {
 			return
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	t.Fatalf("the resource that lost its network was never reported, errors: %v", seen)
+	t.Fatalf("the dropped mesh-wide claim was never reported, errors: %v", seen)
 }
 
 // setAdvertise changes what an agent offers, the way the agent itself would when
@@ -74,11 +80,12 @@ func setAdvertise(t *testing.T, h *harness, id uint32, prefixes ...string) {
 	}
 }
 
-// TestDiagnoseNamesTheAgentThatCarriesTheNetwork covers the failure a capture
-// cannot explain: the target times out, the service is healthy on its own
-// machine, and nothing at all arrives on that machine's mesh interface because
-// the mesh routes the network to a different agent.
-func TestDiagnoseNamesTheAgentThatCarriesTheNetwork(t *testing.T) {
+// TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget is the regression guard
+// for the case that sent an operator hunting through captures: the range around a
+// target belongs to another agent, and the target itself is fine because it is
+// pinned to its own machine. The diagnosis must not report it as a routing
+// problem.
+func TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget(t *testing.T) {
 	h := newHarness(t, true)
 	admin := h.login(t)
 	// The lower id keeps a range when two agents claim it, so the one enrolled
@@ -127,16 +134,14 @@ func TestDiagnoseNamesTheAgentThatCarriesTheNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range result.Steps {
-		if step.Name != "Mesh routing" {
-			continue
+		if step.Name == "Mesh routing" {
+			t.Fatalf("the target is pinned to its own agent, so the range around it is not a routing problem: %+v", step)
 		}
-		if step.Status != "fail" {
-			t.Fatalf("the routing step should fail: %+v", step)
-		}
-		if !strings.Contains(step.Detail, "lily") || !strings.Contains(step.Detail, "172.18.0.0/16") {
-			t.Fatalf("the step should name the agent that carries the range: %+v", step)
-		}
-		return
 	}
-	t.Fatalf("the diagnosis should say who carries that network: %+v", result.Steps)
+	// The address is delivered to the agent the resource names, whatever the
+	// range around it resolves to.
+	pinned := h.server.Store().PinnedHosts(cassandra.id)
+	if len(pinned) != 1 || pinned[0].String() != "172.18.0.3/32" {
+		t.Fatalf("the target should be pinned to cassandra, got %v", pinned)
+	}
 }

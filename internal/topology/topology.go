@@ -31,8 +31,17 @@ type Member struct {
 	// member. An empty endpoint means "only reachable through the hub".
 	Endpoint  string
 	Advertise []netip.Prefix
-	Online    bool
-	Enabled   bool
+	// Pinned are host addresses the mesh must deliver to this member because a
+	// published resource names it as their owner.
+	//
+	// An address is only ambiguous while nothing says whose it is: two machines
+	// both have a 172.18.0.5, and each of their resources means its own. A
+	// published target does say whose it is, so its /32 is added as the most
+	// specific entry for that peer and wins over any advertised prefix - which is
+	// exactly the scoping the overlay cannot express by prefix alone.
+	Pinned  []netip.Prefix
+	Online  bool
+	Enabled bool
 }
 
 // HubMember is the control node itself.
@@ -205,6 +214,20 @@ func BuildHubConfig(in HubInput) (wg.Config, []Rejected) {
 			if !seenRoute[p.String()] {
 				seenRoute[p.String()] = true
 				cfg.Routes = append(cfg.Routes, p.String())
+			}
+		}
+		// Pinned addresses come after the advertised routes but beat them: the
+		// kernel and WireGuard both route by the most specific match.
+		for _, p := range mem.Pinned {
+			p = p.Masked()
+			if !p.Addr().IsValid() || !p.Addr().Is4() || p.Bits() != 32 || p.Overlaps(in.Mesh.CIDR) {
+				continue
+			}
+			entry := p.String()
+			allowed = append(allowed, entry)
+			if !seenRoute[entry] {
+				seenRoute[entry] = true
+				cfg.Routes = append(cfg.Routes, entry)
 			}
 		}
 		if len(allowed) == 0 {

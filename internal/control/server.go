@@ -901,6 +901,9 @@ func (s *Server) syncHub(ctx context.Context) error {
 			Address:   addr,
 			PublicKey: agent.PublicKey,
 			Enabled:   true,
+			// A published target names its agent, so the address goes to that
+			// machine no matter which agent advertised the range around it.
+			Pinned: s.store.PinnedHosts(agent.ID),
 		}
 		for _, raw := range agent.Advertise {
 			if prefix, err := netip.ParsePrefix(raw); err == nil {

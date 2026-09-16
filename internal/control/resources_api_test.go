@@ -207,7 +207,10 @@ func TestResourceValidationThroughTheAPI(t *testing.T) {
 		body map[string]any
 		want string
 	}{
-		{"unreachable target", resourceBody("x", "tcp", agent.id, "8.8.8.8", 22, freePort(t), nil), "not reachable"},
+		// An address on an agent's own network is its to publish, whoever else
+		// happens to use the same range; only an address of the overlay is not a
+		// target at all.
+		{"overlay address", resourceBody("x", "tcp", agent.id, "10.77.0.9", 22, freePort(t), nil), "mesh range"},
 		{"bad protocol", resourceBody("x", "gre", agent.id, address, 22, freePort(t), nil), "protocol"},
 		{"missing agent", resourceBody("x", "tcp", 4242, address, 22, freePort(t), nil), "no agent"},
 		{"tcp without a port", resourceBody("x", "tcp", agent.id, address, 22, 0, nil), "listen port"},
