@@ -605,7 +605,8 @@ function renderShell() {
     shell.requestsSub.textContent = requestLog.summary.total === 0
       ? 'Traffic through your published services'
       : requestLog.summary.total + ' requests · ' + requestLog.summary.allowed + ' allowed · ' +
-        requestLog.summary.blocked + ' blocked';
+        requestLog.summary.blocked + ' blocked' +
+        (requestLog.summary.avgMs ? ' · ' + requestLog.summary.avgMs + ' ms average inside the control node' : '');
   }
   renderServerInfo(shell.serverInfo, server, settings);
   renderUsers(shell.usersTable, shell.usersSub, state.users || []);

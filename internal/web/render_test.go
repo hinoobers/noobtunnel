@@ -233,14 +233,14 @@ renderRequests(requestsNode, [
 ]);
 const requestsTable = requestsNode.childNodes[0];
 const headers = textsOf(requestsTable.childNodes[0]).join(',');
-if (headers !== 'Timestamp,Host,Client,Country,Resource,Decision') {
+if (headers !== 'Timestamp,Took,Host,Client,Country,Resource,Decision') {
   throw new Error('the Requests table headers are wrong: ' + headers);
 }
 const rowClasses = requestsTable.childNodes[1].childNodes.map((row) => row.getAttribute('class'));
 if (rowClasses[0] !== 'is-allowed' || rowClasses[1] !== 'is-blocked') {
   throw new Error('each request row should carry its decision: ' + rowClasses.join(', '));
 }
-const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[5]);
+const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[6]);
 const decisionText = decisionCells.map((cell) => textsOf(cell).join(''));
 if (decisionText[0] !== 'allowed' || decisionText[1] !== 'blocked') {
   throw new Error('the decision should be plain text: ' + decisionText.join(', '));

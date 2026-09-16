@@ -112,6 +112,7 @@ func (h *httpResource) transportFor(candidate TargetSpec, proxyProtocol string) 
 // ServeHTTP routes by the Host header and forwards to one of the resource's
 // targets, trying the next one when a backend cannot be reached.
 func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	// ACME HTTP-01 challenges are answered by the control node itself.
 	if h.group.manager.ACMEChallenge != nil && strings.HasPrefix(r.URL.Path, acmeChallengePath) {
 		h.group.manager.ACMEChallenge.ServeHTTP(w, r)
@@ -141,6 +142,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Protocol: string(res.spec.Protocol), Allowed: false, Reason: "identity required",
 			Status: http.StatusUnauthorized, Path: r.URL.Path,
+			DurationMs: time.Since(started).Milliseconds(),
 		})
 		w.Header().Set("WWW-Authenticate", `Basic realm="`+h.group.manager.brand()+`", charset="UTF-8"`)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -162,6 +164,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 				Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: decision.Reason, Status: http.StatusForbidden, Path: r.URL.Path,
+				DurationMs: time.Since(started).Milliseconds(),
 			})
 			res.stat.setError(fmt.Errorf("blocked: %s", decision.Reason))
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -188,6 +191,12 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	response, chosen, err := h.roundTrip(res, r)
 	if err != nil {
 		res.stat.setError(err)
+		h.group.manager.observe(RequestEvent{
+			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
+			DurationMs: time.Since(started).Milliseconds(),
+		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
 		return
@@ -204,6 +213,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 		Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
+		DurationMs: time.Since(started).Milliseconds(),
 	})
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()

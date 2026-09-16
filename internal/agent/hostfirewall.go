@@ -139,6 +139,18 @@ func (a *Agent) iptablesAllow(ctx context.Context, iface string, advertises bool
 	if advertises {
 		ensure("FORWARD", "-i", iface, "-j", "ACCEPT")
 		ensure("FORWARD", "-o", iface, "-j", "ACCEPT")
+		// Clamp the TCP segment size for traffic that crosses between the mesh and
+		// the advertised networks: hosts on a 1500 byte LAN would otherwise send
+		// segments the tunnel silently drops, and the connection crawls.
+		clamp := []string{"FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+			"-j", "TCPMSS", "--clamp-mss-to-pmtu"}
+		check := append([]string{"-t", "mangle", "-C"}, clamp...)
+		if _, err := host.Run(ctx, iptables, check...); err != nil {
+			appendRule := append([]string{"-t", "mangle", "-A"}, clamp...)
+			if _, err := host.Run(ctx, iptables, appendRule...); err != nil {
+				problems = append(problems, fmt.Sprintf("iptables mangle TCPMSS clamping: %v", err))
+			}
+		}
 	}
 	return problems
 }

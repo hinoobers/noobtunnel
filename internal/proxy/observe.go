@@ -22,6 +22,10 @@ type RequestEvent struct {
 	Reason  string `json:"reason,omitempty"`
 	Status  int    `json:"status,omitempty"`
 	Path    string `json:"path,omitempty"`
+	// DurationMs is how long the request took inside the control node: the
+	// dial through the tunnel, the service's answer and the copy back. It is the
+	// number to look at when a published service feels slow.
+	DurationMs int64 `json:"durationMs,omitempty"`
 }
 
 // observe reports an event when the control node is listening for them.

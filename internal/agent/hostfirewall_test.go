@@ -37,11 +37,18 @@ func (f *fakeHost) Run(_ context.Context, name string, args ...string) (string, 
 	if name == "ufw" && len(args) > 0 && args[0] == "status" {
 		return "Status: active\n", nil
 	}
-	if name == "iptables" && len(args) > 0 && args[0] == "-C" {
-		if f.existingIP[strings.Join(args[1:], " ")] {
-			return "", nil
+	if name == "iptables" {
+		// The table may come first ("-t mangle"), so look for the check flag.
+		for i, arg := range args {
+			if arg != "-C" {
+				continue
+			}
+			if f.existingIP[strings.Join(args[i+1:], " ")] {
+				return "", nil
+			}
+			return "no such rule", errors.New("exit status 1")
 		}
-		return "no such rule", errors.New("exit status 1")
+		return "", nil
 	}
 	return "", nil
 }
@@ -116,6 +123,9 @@ func TestIptablesRulesAreInsertedOnce(t *testing.T) {
 	for _, want := range [][]string{
 		{"iptables", "-I", "FORWARD", "-i", "noobtun", "-j", "ACCEPT"},
 		{"iptables", "-I", "FORWARD", "-o", "noobtun", "-j", "ACCEPT"},
+		// Traffic between the mesh and a 1500 byte LAN needs its segment size
+		// clamped, or the tunnel drops the large packets and the link crawls.
+		{"iptables", "-t", "mangle", "-A", "FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN", "-j", "TCPMSS", "--clamp-mss-to-pmtu"},
 	} {
 		if !host.ran(want...) {
 			t.Fatalf("expected %q to run, calls: %v", strings.Join(want, " "), host.calls)

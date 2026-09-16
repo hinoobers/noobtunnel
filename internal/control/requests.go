@@ -25,6 +25,9 @@ type RequestEntry struct {
 	Reason   string `json:"reason,omitempty"`
 	Status   int    `json:"status,omitempty"`
 	Path     string `json:"path,omitempty"`
+	// DurationMs is how long the control node spent on the request, tunnel and
+	// service included.
+	DurationMs int64 `json:"durationMs,omitempty"`
 }
 
 // CountryStat aggregates requests by country or hostname.
@@ -36,10 +39,13 @@ type CountryStat struct {
 
 // RequestSummary is the aggregate view of recent traffic.
 type RequestSummary struct {
-	Total     int           `json:"total"`
-	Blocked   int           `json:"blocked"`
-	Allowed   int           `json:"allowed"`
-	Unknown   int           `json:"unknown"`
+	Total   int `json:"total"`
+	Blocked int `json:"blocked"`
+	Allowed int `json:"allowed"`
+	Unknown int `json:"unknown"`
+	// AvgMs is the average time the control node spent per request, which is the
+	// number that shows a slow tunnel or a slow service.
+	AvgMs     int           `json:"avgMs,omitempty"`
 	Countries []CountryStat `json:"countries"`
 	Hosts     []CountryStat `json:"hosts"`
 }
@@ -52,6 +58,10 @@ type requestLog struct {
 	byCountry map[string]*CountryStat
 	byHost    map[string]*CountryStat
 	summary   RequestSummary
+	// durationSumMs and timed count the requests that carried a duration, so the
+	// average stays meaningful.
+	durationSumMs int64
+	timed         int64
 }
 
 func newRequestLog() *requestLog {
@@ -64,17 +74,18 @@ func newRequestLog() *requestLog {
 // record adds one request.
 func (l *requestLog) record(event proxy.RequestEvent) {
 	entry := RequestEntry{
-		Time:     event.Time.UTC().Format(time.RFC3339),
-		Resource: event.Resource,
-		Host:     event.Host,
-		IP:       event.IPText,
-		Country:  event.Country,
-		Account:  event.Account,
-		Protocol: event.Protocol,
-		Allowed:  event.Allowed,
-		Reason:   event.Reason,
-		Status:   event.Status,
-		Path:     event.Path,
+		Time:       event.Time.UTC().Format(time.RFC3339),
+		Resource:   event.Resource,
+		Host:       event.Host,
+		IP:         event.IPText,
+		Country:    event.Country,
+		Account:    event.Account,
+		Protocol:   event.Protocol,
+		Allowed:    event.Allowed,
+		Reason:     event.Reason,
+		Status:     event.Status,
+		Path:       event.Path,
+		DurationMs: event.DurationMs,
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -84,6 +95,10 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		l.entries = l.entries[:requestLogSize]
 	}
 	l.summary.Total++
+	if entry.DurationMs > 0 || event.Status > 0 {
+		l.durationSumMs += entry.DurationMs
+		l.timed++
+	}
 	if entry.Allowed {
 		l.summary.Allowed++
 	} else {
@@ -119,6 +134,9 @@ func (l *requestLog) snapshot() (RequestSummary, []RequestEntry) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	summary := l.summary
+	if l.timed > 0 {
+		summary.AvgMs = int(l.durationSumMs / l.timed)
+	}
 	summary.Countries = topCounters(l.byCountry, 12)
 	summary.Hosts = topCounters(l.byHost, 8)
 	entries := append([]RequestEntry(nil), l.entries...)

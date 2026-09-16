@@ -17,6 +17,7 @@ security model and operations.
 - [Update](#update)
 - [Logs and errors](#logs-and-errors)
   - [When a target is unreachable](#when-a-target-is-unreachable)
+- [Slow connections](#slow-connections)
 - [Everyday use](#everyday-use)
 - [Accounts and roles](#accounts-and-roles-and-getting-back-in)
 - [Automation](#automation)
@@ -450,6 +451,31 @@ hub interface is up, whether it has a WireGuard handshake with the agent hosting
 that target, what route it has for the address, and whether a connection attempt
 succeeds — ending in one sentence that names the broken step. That replaces
 SSH'ing into the control node to guess.
+
+## Slow connections
+
+A published service always takes the path *client -> control node -> tunnel ->
+agent -> service*, so the control node's own numbers tell you which part is slow.
+**Logs -> Requests** shows how long the control node spent on each request and the
+average in the subtitle; compare it with the same request made on the agent
+machine itself (there it never enters the tunnel).
+
+Two things cause a tunnel that works but crawls, and both are fixable:
+
+- **TCP segment size.** Endpoints negotiate a segment size for their own link;
+  packets larger than the tunnel are dropped silently and retransmitted. The
+  control node clamps this itself at startup (`iptables -t mangle -A FORWARD -p
+  tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu`), and an agent does
+  it when it advertises networks, because hosts on a 1500 byte LAN would
+  otherwise push oversized segments into the tunnel.
+- **The tunnel MTU.** If the path under WireGuard is smaller than expected
+  (PPPoE, another tunnel), packets are lost the same way. Lower **Settings ->
+  MTU** a step at a time (1420 -> 1400 -> 1380 -> 1280) and measure again; 1280 is
+  the safe floor.
+
+If neither helps, the limit is the path itself: check `ping` on both sides of the
+tunnel (agent to control node, control node to `10.77.0.x`) and remember that a
+relayed service is bounded by the agent's *upload*.
 
 ## Logs and errors
 

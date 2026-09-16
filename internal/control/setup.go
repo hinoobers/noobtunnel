@@ -64,6 +64,19 @@ func enableIptablesForwarding(ctx context.Context, iptables, iface string) []str
 			problems = append(problems, "iptables "+direction+" "+iface+" -j ACCEPT failed")
 		}
 	}
+	// Clamp the TCP segment size to the path MTU. Without it, endpoints negotiate
+	// a size for their own link, the tunnel silently drops the packets that are
+	// too large for it, and the connection still works - slowly, through
+	// retransmissions. It is the usual reason a mesh tunnel feels slow.
+	clamp := []string{"FORWARD", "-p", "tcp", "--tcp-flags", "SYN,RST", "SYN",
+		"-j", "TCPMSS", "--clamp-mss-to-pmtu"}
+	check := append([]string{"-t", "mangle", "-C"}, clamp...)
+	if !runQuiet(ctx, iptables, check...) {
+		insert := append([]string{"-t", "mangle", "-A"}, clamp...)
+		if !runQuiet(ctx, iptables, insert...) {
+			problems = append(problems, "iptables mangle FORWARD TCPMSS clamping failed")
+		}
+	}
 	return problems
 }
 

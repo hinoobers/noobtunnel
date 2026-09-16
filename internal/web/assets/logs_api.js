@@ -47,6 +47,15 @@ function trafficChart(title, rows) {
   return chart;
 }
 
+// fmtMs renders a request duration: the difference between a slow tunnel and a
+// slow service is visible at a glance.
+function fmtMs(value) {
+  const ms = Number(value) || 0;
+  if (ms <= 0) return '—';
+  if (ms < 1000) return ms + ' ms';
+  return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
+}
+
 // renderRequests lists individual requests and their decision.
 function renderRequests(node, recent) {
   if (!node) return;
@@ -59,12 +68,13 @@ function renderRequests(node, recent) {
   }
   node.append(h('table', null,
     h('thead', null, h('tr', null,
-      h('th', null, 'Timestamp'), h('th', null, 'Host'), h('th', null, 'Client'), h('th', null, 'Country'),
-      h('th', null, 'Resource'), h('th', null, 'Decision'))),
+      h('th', null, 'Timestamp'), h('th', null, 'Took'), h('th', null, 'Host'), h('th', null, 'Client'),
+      h('th', null, 'Country'), h('th', null, 'Resource'), h('th', null, 'Decision'))),
     h('tbody', null, recent.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
       // The exact time, with the relative one on hover: a log is read by
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
+      h('td', { class: 'mono tiny', title: entry.durationMs ? entry.durationMs + ' ms inside the control node' : '' }, fmtMs(entry.durationMs)),
       h('td', { class: 'mono tiny' }, entry.host || '—'),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
       h('td', null, entry.country
