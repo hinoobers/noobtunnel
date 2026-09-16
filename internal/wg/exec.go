@@ -126,7 +126,10 @@ func (b *ExecBackend) setConf(ctx context.Context, iface string, cfg Config) err
 		_ = tmp.Close()
 		return err
 	}
-	if _, err := tmp.WriteString(cfg.Render()); err != nil {
+	// wg(8) only understands the keys it documents: Address and MTU are wg-quick
+	// extensions and make setconf fail with "Line unrecognized", so the kernel
+	// backend renders them out and applies both with `ip` in ensureInterface.
+	if _, err := tmp.WriteString(cfg.RenderSetConf()); err != nil {
 		_ = tmp.Close()
 		return err
 	}

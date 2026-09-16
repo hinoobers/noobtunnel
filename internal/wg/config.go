@@ -41,7 +41,9 @@ type Config struct {
 	Routes []string
 }
 
-// Render produces a wg(8) / wg-quick(8) compatible configuration file.
+// Render produces a wg-quick(8) compatible configuration file: what an operator
+// pastes into /etc/wireguard/*.conf, including the Address and MTU lines that
+// wg-quick applies with `ip`.
 func (c Config) Render() string {
 	var b strings.Builder
 	b.WriteString("[Interface]\n")
@@ -58,25 +60,46 @@ func (c Config) Render() string {
 	if c.Interface.FwMark != 0 {
 		fmt.Fprintf(&b, "FwMark = %#x\n", c.Interface.FwMark)
 	}
-	for _, p := range c.Peers {
-		b.WriteString("\n[Peer]\n")
-		fmt.Fprintf(&b, "PublicKey = %s\n", p.PublicKey)
-		if p.PresharedKey != "" {
-			fmt.Fprintf(&b, "PresharedKey = %s\n", p.PresharedKey)
-		}
-		if p.Endpoint != "" {
-			fmt.Fprintf(&b, "Endpoint = %s\n", p.Endpoint)
-		}
-		if len(p.AllowedIPs) > 0 {
-			fmt.Fprintf(&b, "AllowedIPs = %s\n", strings.Join(p.AllowedIPs, ", "))
-		}
-		if p.PersistentKeepalive > 0 {
-			fmt.Fprintf(&b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
-		}
-	}
+	writePeers(&b, c.Peers)
 	return b.String()
 }
 
+// RenderSetConf produces what `wg setconf` accepts. Address and MTU are
+// wg-quick(8) extensions that wg(8) rejects with "Line unrecognized", so they are
+// left out here; the backend applies them with `ip` instead.
+func (c Config) RenderSetConf() string {
+	var b strings.Builder
+	b.WriteString("[Interface]\n")
+	fmt.Fprintf(&b, "PrivateKey = %s\n", c.Interface.PrivateKey)
+	if c.Interface.ListenPort > 0 {
+		fmt.Fprintf(&b, "ListenPort = %d\n", c.Interface.ListenPort)
+	}
+	if c.Interface.FwMark != 0 {
+		fmt.Fprintf(&b, "FwMark = %#x\n", c.Interface.FwMark)
+	}
+	writePeers(&b, c.Peers)
+	return b.String()
+}
+
+// writePeers renders the [Peer] sections shared by both forms.
+func writePeers(b *strings.Builder, peers []PeerConfig) {
+	for _, p := range peers {
+		b.WriteString("\n[Peer]\n")
+		fmt.Fprintf(b, "PublicKey = %s\n", p.PublicKey)
+		if p.PresharedKey != "" {
+			fmt.Fprintf(b, "PresharedKey = %s\n", p.PresharedKey)
+		}
+		if p.Endpoint != "" {
+			fmt.Fprintf(b, "Endpoint = %s\n", p.Endpoint)
+		}
+		if len(p.AllowedIPs) > 0 {
+			fmt.Fprintf(b, "AllowedIPs = %s\n", strings.Join(p.AllowedIPs, ", "))
+		}
+		if p.PersistentKeepalive > 0 {
+			fmt.Fprintf(b, "PersistentKeepalive = %d\n", p.PersistentKeepalive)
+		}
+	}
+}
 // Redacted renders the configuration with all key material replaced by
 // placeholders, for display in the UI and in logs.
 func (c Config) Redacted() string {
