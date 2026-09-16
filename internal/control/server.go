@@ -350,13 +350,14 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startGeoIP(ctx)
 
 	s.reconcileResources()
-	s.wg.Add(6)
+	s.wg.Add(7)
 	go func() { defer s.wg.Done(); s.discoveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.peerPushLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.latencyLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.resourceLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.dnsLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.checkLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.routeLoop(ctx) }()
 	// When the control node issues certificates it must answer the HTTP-01
 	// challenge on port 80, even if no HTTP resource is published there yet.
 	if s.proxies.ACMEChallenge != nil {
@@ -872,11 +873,34 @@ func (s *Server) syncHub(ctx context.Context) error {
 	if s.opts.DisableWGHub {
 		return nil
 	}
+	cfg, err := s.hubConfig()
+	if err != nil {
+		return err
+	}
+	settings := s.store.Settings()
+
+	if err := s.backend.Sync(ctx, settings.Interface, cfg); err != nil {
+		s.mu.Lock()
+		s.hubErr = err.Error()
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Lock()
+	s.hubErr = ""
+	s.mu.Unlock()
+	return nil
+}
+
+// hubConfig renders everything the control node's own device should hold: the
+// agents, the networks they offer and the addresses published resources pin to
+// them. It is also what the periodic route re-assertion uses, so both always
+// describe the same mesh.
+func (s *Server) hubConfig() (wg.Config, error) {
 	st := s.store.View()
 	settings := st.Settings
 	pool, err := ipam.New(settings.MeshCIDR)
 	if err != nil {
-		return err
+		return wg.Config{}, err
 	}
 	s.mu.Lock()
 	endpoints := make(map[uint32]string, len(s.endpoints))
@@ -932,17 +956,7 @@ func (s *Server) syncHub(ctx context.Context) error {
 	s.mu.Lock()
 	s.rejected = rejected
 	s.mu.Unlock()
-
-	if err := s.backend.Sync(ctx, settings.Interface, cfg); err != nil {
-		s.mu.Lock()
-		s.hubErr = err.Error()
-		s.mu.Unlock()
-		return err
-	}
-	s.mu.Lock()
-	s.hubErr = ""
-	s.mu.Unlock()
-	return nil
+	return cfg, nil
 }
 
 // discoveryLoop reads the hub device to learn real endpoints and traffic.

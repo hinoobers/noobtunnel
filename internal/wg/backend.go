@@ -56,6 +56,11 @@ type Backend interface {
 	// Sync makes the live device match cfg exactly: it creates the interface if
 	// needed, applies keys and peers, assigns addresses and installs routes.
 	Sync(ctx context.Context, iface string, cfg Config) error
+	// EnsureRoutes re-asserts the kernel routes for an interface without touching
+	// the device. It exists so a running node can repair a routing table that
+	// changed underneath it, which is otherwise invisible: the tunnel still
+	// handshakes while every answer goes out of the default gateway.
+	EnsureRoutes(ctx context.Context, iface string, routes []string) error
 	// Status reads the live device state.
 	Status(ctx context.Context, iface string) (InterfaceStatus, error)
 	// Down removes the interface.

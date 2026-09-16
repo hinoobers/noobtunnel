@@ -394,6 +394,7 @@ func (a *Agent) controlSession(ctx context.Context) error {
 				a.log.Debug("reconcile failed", "error", err)
 			}
 		case <-natTicker.C:
+			a.ensureRoutes(ctx)
 			if runtime.GOOS == "linux" {
 				a.meshNATExempt(ctx, a.meshCIDR())
 			}
@@ -418,6 +419,24 @@ func (a *Agent) currentAddress() string {
 		return ""
 	}
 	return prefixString(a.session.welcome.Address, a.session.welcome.Prefix)
+}
+
+// ensureRoutes re-asserts the kernel routes the tunnel needs.
+//
+// A device can be up, handshaking and carrying traffic and still have no route
+// for the mesh range: the table can be rewritten by another tool, and an install
+// that failed once must not be remembered as done. Without the route, every
+// answer the tunnel receives is sent out of this machine's default gateway, so
+// the far end sees a healthy tunnel and a service that never replies.
+func (a *Agent) ensureRoutes(ctx context.Context) {
+	cfg, err := a.desiredConfig()
+	if err != nil || len(cfg.Routes) == 0 {
+		return
+	}
+	if err := a.backend.EnsureRoutes(ctx, a.opts.Interface, cfg.Routes); err != nil {
+		a.setLastError(err.Error())
+		a.log.Warn("could not install the mesh routes", "error", err)
+	}
 }
 
 // meshCIDR is the overlay range, as announced by the control node. Empty until

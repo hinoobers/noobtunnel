@@ -587,6 +587,20 @@ target's address is delivered to, and when that is not the agent the resource
 names it says so by name. That is the case a capture on the agent cannot explain,
 because nothing at all arrives there.
 
+The third thing to check is the machine's own routing table:
+
+```sh
+docker compose exec noobtunnel-agent ip route | grep noobtun   # a docker agent
+```
+
+There has to be a route for the mesh range (`10.77.0.0/16 dev noobtun`). A tunnel
+can be up, handshaking and carrying traffic while that route is missing on one
+side - the table rewritten by another tool, or an install that failed once - and
+then every answer the tunnel receives leaves through the default gateway instead
+of back through it. The far end sees a healthy tunnel and a service that never
+replies. Both the agent and the control node re-assert their mesh routes on a
+timer now, and report it when they cannot install them.
+
 ## Slow connections
 
 A published service always takes the path *client -> control node -> tunnel ->

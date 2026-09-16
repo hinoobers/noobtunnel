@@ -181,6 +181,22 @@ func (f *FakeBackend) PublicKey() string {
 	return f.publicKey
 }
 
+// EnsureRoutes implements Backend: the simulated device keeps its routes from the
+// last Sync, and re-asserting them is a no-op it records honestly.
+func (f *FakeBackend) EnsureRoutes(ctx context.Context, iface string, routes []string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range routes {
+		if !f.routes[r] {
+			return fmt.Errorf("wg: %s has no route for %s", iface, r)
+		}
+	}
+	return nil
+}
+
 // Sync implements Backend.
 func (f *FakeBackend) Sync(ctx context.Context, iface string, cfg Config) error {
 	if err := ctx.Err(); err != nil {

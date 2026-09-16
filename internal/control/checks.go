@@ -34,6 +34,41 @@ const (
 // place), so a result computed once at startup describes the machine as it was
 // then: an interface that appeared later, or a port that was busy during a
 // restart, would keep showing the old answer until someone hit refresh.
+// routeLoop re-asserts the hub's kernel routes.
+//
+// A device can be up with the right peers and still have no route for the mesh,
+// and then every answer to an agent leaves through this machine's default
+// gateway instead of the tunnel - the tunnel looks healthy while nothing that
+// arrives through it is ever answered. Re-asserting the routes is idempotent, so
+// it is done on a timer rather than trusted once.
+func (s *Server) routeLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.reassertRoutes(ctx)
+		}
+	}
+}
+
+// reassertRoutes re-applies the mesh routes to the live hub device.
+func (s *Server) reassertRoutes(ctx context.Context) {
+	if s.opts.DisableWGHub {
+		return
+	}
+	settings := s.store.Settings()
+	cfg, err := s.hubConfig()
+	if err != nil || len(cfg.Routes) == 0 {
+		return
+	}
+	if err := s.backend.EnsureRoutes(ctx, settings.Interface, cfg.Routes); err != nil {
+		s.log.Warn("could not re-assert the mesh routes", "error", err)
+	}
+}
+
 func (s *Server) checkLoop(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

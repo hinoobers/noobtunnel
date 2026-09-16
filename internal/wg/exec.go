@@ -170,12 +170,17 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 	b.routes[iface] = want
 	b.mu.Unlock()
 
+	var problems []string
 	for r := range want {
-		if prev != nil && prev[r] {
-			continue
-		}
+		// Always re-assert: installing a route is idempotent, and a route that is
+		// in the bookkeeping is not proof that it is in the kernel. An interface
+		// recreated by another tool, a network manager rewriting the table, or an
+		// install that failed once all leave the machine without the route while
+		// the agent believes it is configured - and a missing mesh route sends the
+		// tunnel's answers out of the default gateway instead of back to the hub.
 		if _, err := run.Run(ctx, "ip", "route", "replace", r, "dev", iface, "metric", tunnelRouteMetric); err != nil {
-			return err
+			problems = append(problems, "ip route replace "+r+" dev "+iface+" metric "+tunnelRouteMetric+": "+err.Error())
+			continue
 		}
 		// An older version installed the route without a metric, which means
 		// priority 0: on a host that owns the same prefix that stale route still
@@ -195,7 +200,20 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 			}
 		}
 	}
+	if len(problems) > 0 {
+		return fmt.Errorf("routes for %s: %s", iface, strings.Join(problems, "; "))
+	}
 	return nil
+}
+
+// EnsureRoutes re-asserts the kernel routes for an interface without touching the
+// device itself, so a long-running agent can repair a routing table that changed
+// underneath it.
+func (b *ExecBackend) EnsureRoutes(ctx context.Context, iface string, routes []string) error {
+	if err := ValidateInterfaceName(iface); err != nil {
+		return err
+	}
+	return b.syncRoutes(ctx, iface, routes)
 }
 
 // Status implements Backend.
