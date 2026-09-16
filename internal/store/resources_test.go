@@ -150,6 +150,37 @@ func TestResourceTargetValidation(t *testing.T) {
 	}
 }
 
+// TestALoopbackTargetIsKeptForTheAgentToCarry covers the address a service bound
+// to localhost has. It is not routed anywhere - the kernel resolves 127.0.0.0/8
+// locally before any route - so the agent carries it instead, and nothing pins it
+// to a peer.
+func TestALoopbackTargetIsKeptForTheAgentToCarry(t *testing.T) {
+	st, agent := resourceFixture(t)
+	if _, err := st.AddResource(ResourceInput{
+		Name: "mysql", Protocol: ProtocolTCP, ListenPort: 3306,
+		Targets: oneTarget(agent.ID, "127.0.0.1", 3306),
+	}); err != nil {
+		t.Fatalf("a service on the agent's own loopback should be publishable: %v", err)
+	}
+	if pinned := st.PinnedHosts(agent.ID); len(pinned) != 0 {
+		t.Fatalf("a loopback address is not routed to a peer, got %v", pinned)
+	}
+}
+
+// TestALoopbackUDPTargetIsRefusedForNow says what is not supported, instead of
+// publishing something that cannot work: only TCP services are carried from an
+// agent's loopback so far.
+func TestALoopbackUDPTargetIsRefusedForNow(t *testing.T) {
+	st, agent := resourceFixture(t)
+	_, err := st.AddResource(ResourceInput{
+		Name: "dns", Protocol: ProtocolUDP, ListenPort: 5353,
+		Targets: oneTarget(agent.ID, "127.0.0.1", 53),
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be carried yet") {
+		t.Fatalf("a udp loopback target should be refused with the reason, got %v", err)
+	}
+}
+
 func boolPtr(v bool) *bool { return &v }
 
 // TestADomainOnATCPResourceIsAllowed covers the name an operator expects to be

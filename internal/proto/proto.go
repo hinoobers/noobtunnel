@@ -115,6 +115,9 @@ type Welcome struct {
 	// Carry is what the mesh routes through this agent, as resolved by the
 	// control node (see Peers.Carry).
 	Carry []string `json:"carry,omitempty"`
+	// Forwards are loopback services on this machine that the control node
+	// reaches through the agent (see Peers.Forwards).
+	Forwards []Forward `json:"forwards,omitempty"`
 	// Tuning values the agent needs so both ends agree on timing.
 	StatsIntervalSec int `json:"statsIntervalSec"`
 	DirectFreshSec   int `json:"directFreshSec"`
@@ -131,6 +134,18 @@ type Peers struct {
 	// necessarily what the agent offered - the operator can change the list here
 	// after the machine enrolled, and the control node is the one that decides.
 	Carry []string `json:"carry,omitempty"`
+	// Forwards are services on this agent's own loopback that the control node
+	// reaches by dialling the agent instead. A loopback address means "this
+	// machine" to whoever dials it, so only the agent can reach it.
+	Forwards []Forward `json:"forwards,omitempty"`
+}
+
+// Forward is one loopback service an agent carries for the control node: it
+// listens on its own mesh address and passes the connection to a service that
+// only listens on that machine's loopback.
+type Forward struct {
+	Port   int    `json:"port"`
+	Target string `json:"target"`
 }
 
 // Ping asks the agent to answer with a Pong.

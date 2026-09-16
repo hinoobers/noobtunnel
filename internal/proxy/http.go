@@ -456,8 +456,11 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 			outbound.ContentLength = int64(len(buffered))
 		}
 		outbound.URL = &url.URL{
-			Scheme:   "http",
-			Host:     candidate.Address(),
+			Scheme: "http",
+			// The URL host is only what the transport dials; the Host header sent
+			// to the service is the client's own (below), so a rewritten dial
+			// address must not leak into the request.
+			Host:     candidate.Published(),
 			Path:     r.URL.Path,
 			RawPath:  r.URL.RawPath,
 			RawQuery: r.URL.RawQuery,
@@ -473,7 +476,7 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 		}
 		lastErr = err
 		res.stat.targetFor(candidate.ID).setError(err)
-		res.stat.setError(fmt.Errorf("target %s: %w", candidate.Address(), err))
+		res.stat.setError(fmt.Errorf("target %s: %w", candidate.Published(), err))
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no targets are configured")

@@ -401,6 +401,14 @@ container on the same address. See
 A target inside the mesh range itself is refused, because that belongs to the
 overlay rather than to any machine's network.
 
+A service that only listens on its own machine's loopback is publishable too:
+`127.0.0.1:3306` on an agent means *that machine's* MySQL, because the agent is
+what dials it. The agent listens on its own mesh address for that service and
+passes the connection through, so a database that is bound to localhost - the
+normal, safe configuration - does not have to be exposed to anything else. This
+is TCP only for now; a UDP service on loopback is refused with that reason rather
+than published and left broken.
+
 **Domains** are the hostnames resources answer on. **HTTP** and **HTTPS** are
 routed by name - the `Host` header, or the server name for a TLS passthrough
 resource - which is why they need one, and why several of them can share port 443.

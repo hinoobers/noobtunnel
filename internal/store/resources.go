@@ -429,6 +429,16 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 	if in.Protocol == ProtocolHTTPSPassthrough && domain == "" {
 		return Resource{}, fmt.Errorf("%w: a TLS passthrough resource needs a domain, because the connection is routed by its server name", ErrBadResource)
 	}
+	// A loopback target is carried by its agent over TCP. There is no such thing
+	// for UDP yet, so say so rather than publishing something that cannot work.
+	if in.Protocol == ProtocolUDP {
+		for _, target := range targets {
+			if addr, err := netip.ParseAddr(target.Host); err == nil && addr.IsLoopback() {
+				return Resource{}, fmt.Errorf("%w: a UDP service on the agent's own loopback cannot be carried yet; "+
+					"point the target at an address the mesh can reach", ErrBadResource)
+			}
+		}
+	}
 	if in.Identity && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",
 			ErrBadResource, in.Protocol)
@@ -698,7 +708,9 @@ func pinnedHosts(st *State, agentID uint32) []netip.Prefix {
 				continue
 			}
 			addr, err := netip.ParseAddr(target.Host)
-			if err != nil || !addr.Is4() || mesh.Contains(addr) {
+			// A loopback address is never routed: the agent carries it instead, and
+			// the kernel resolves 127.0.0.0/8 locally before any route we install.
+			if err != nil || !addr.Is4() || addr.IsLoopback() || mesh.Contains(addr) {
 				continue
 			}
 			prefix := netip.PrefixFrom(addr, 32)

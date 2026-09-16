@@ -48,10 +48,25 @@ type TargetSpec struct {
 	ID   uint32
 	Host string
 	Port int
+	// DialAddr overrides where the connection is made. It is set for a service
+	// that only listens on its agent's loopback: `127.0.0.1` means the machine
+	// that dials it, so the agent carries it on its mesh address instead.
+	DialAddr string
+	// AgentID is the agent the target belongs to.
+	AgentID uint32
 }
 
-// Address renders the backend address.
+// Address renders the address a connection to this backend is made to.
 func (t TargetSpec) Address() string {
+	if t.DialAddr != "" {
+		return t.DialAddr
+	}
+	return net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
+}
+
+// Published is how the backend is described to an operator: the address they
+// configured, not the one the control node dials on their behalf.
+func (t TargetSpec) Published() string {
 	return net.JoinHostPort(t.Host, strconv.Itoa(t.Port))
 }
 

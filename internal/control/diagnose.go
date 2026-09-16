@@ -156,6 +156,16 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		add("Route from the control node", "ok", firstLine(strings.TrimSpace(out)), "")
 	}
 
+	// A loopback target is carried by its agent: `127.0.0.1` means the machine
+	// that dials it, so the control node reaches the agent's mesh address instead
+	// and the agent passes the connection to the service on its own loopback.
+	if target, ok := loopbackTargetOf(s, agentID, address); ok {
+		add("Loopback target", "ok",
+			address+" is carried by "+agentName+": the control node dials "+target,
+			"")
+		address = target
+	}
+
 	if resource.Protocol == store.ProtocolUDP {
 		// A UDP service has no handshake to test, so the tunnel, the route and the
 		// agent's own view are the whole diagnosis.

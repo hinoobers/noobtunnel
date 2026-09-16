@@ -71,10 +71,37 @@ func resourceBody(name, protocol string, agentID uint32, host string, port, list
 	return body
 }
 
+// localIPv4 is this machine's own address, which a test can use as a target that
+// is not loopback: publishing through an agent reaches it the way a service on
+// that machine's network is reached.
+func localIPv4(t *testing.T) string {
+	t.Helper()
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipNet.IP.To4()
+		if ip4 == nil || ipNet.IP.IsLoopback() || ipNet.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		return ip4.String()
+	}
+	t.Skip("this machine has no address to publish a service on")
+	return ""
+}
+
 // tcpEchoService starts a service that answers "service:<payload>".
 func tcpEchoService(t *testing.T) (string, int) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	// Bound to every interface and addressed by this machine's own address: a
+	// loopback target is carried by its agent now, so a target used to stand in
+	// for "a service on the agent's network" has to be a normal address.
+	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +124,9 @@ func tcpEchoService(t *testing.T) (string, int) {
 		}
 	}()
 	host, portStr, _ := net.SplitHostPort(ln.Addr().String())
+	if host == "" || host == "::" || host == "0.0.0.0" {
+		host = localIPv4(t)
+	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {
 		t.Fatal(err)

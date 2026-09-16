@@ -237,7 +237,7 @@ func dialCandidates(r *resource, timeout time.Duration) (net.Conn, TargetSpec, e
 		}
 		lastErr = err
 		r.stat.targetFor(candidate.ID).setError(err)
-		r.stat.setError(fmt.Errorf("target %s: %w", candidate.Address(), err))
+		r.stat.setError(fmt.Errorf("target %s: %w", candidate.Published(), err))
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no targets are configured")

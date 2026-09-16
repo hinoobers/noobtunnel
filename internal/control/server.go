@@ -746,6 +746,8 @@ func (s *Server) buildWelcome(agentID uint32, hello proto.Hello, localAddr strin
 	// machine enrolled, and without this the agent would never open forwarding
 	// for them.
 	welcome.Carry = s.store.CarriedPrefixes(agentID)
+	// What this agent has to carry for services that only listen on its loopback.
+	welcome.Forwards = s.forwardsFor(agentID)
 	return welcome, nil
 }
 
@@ -1052,7 +1054,11 @@ func (s *Server) peerPushLoop(ctx context.Context) {
 					continue
 				}
 				carry := s.store.CarriedPrefixes(sess.ID)
-				if err := sess.send(proto.Peers{T: proto.TPeers, Generation: generation, Peers: peers, Carry: carry}); err != nil {
+				forwards := s.forwardsFor(sess.ID)
+				if err := sess.send(proto.Peers{
+					T: proto.TPeers, Generation: generation, Peers: peers,
+					Carry: carry, Forwards: forwards,
+				}); err != nil {
 					s.log.Debug("failed to push peers", "agent", sess.Hello.Name, "error", err)
 				}
 			}
@@ -1610,7 +1616,12 @@ func (s *Server) ResourceSpecs() []proxy.Spec {
 			if !t.Enabled {
 				continue
 			}
-			targets = append(targets, proxy.TargetSpec{ID: t.ID, Host: t.Host, Port: t.Port})
+			// A loopback target is reached through its agent's mesh address, which
+			// the agent listens on for exactly that service.
+			targets = append(targets, proxy.TargetSpec{
+				ID: t.ID, Host: t.Host, Port: t.Port,
+				DialAddr: s.DialAddress(t), AgentID: t.AgentID,
+			})
 		}
 		specs = append(specs, proxy.Spec{
 			ID:            r.ID,

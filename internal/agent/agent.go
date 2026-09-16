@@ -96,6 +96,7 @@ type Agent struct {
 
 	mu          sync.Mutex
 	session     *sessionState
+	forwards    map[int]*forwarder
 	direct      map[uint32]bool
 	candidate   map[uint32]time.Time
 	lastApplied string
@@ -515,8 +516,13 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 		// through the tunnel.
 		if runtime.GOOS == "linux" {
 			a.meshNATExempt(context.Background(), welcome.MeshCIDR)
+			a.meshRawExempt(context.Background(), a.opts.Interface, a.carriedPrefixes())
 			a.syncCarriedForwarding(context.Background())
 		}
+		// Services that only listen on this machine's loopback are carried by this
+		// agent, because a loopback address means "this machine" to whoever dials
+		// it.
+		a.syncForwards(context.Background(), welcome.Forwards)
 		return a.applyDevice(context.Background(), true)
 	case proto.TError:
 		var e proto.Error
@@ -543,6 +549,7 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 		if a.setCarry(p.Carry) && runtime.GOOS == "linux" {
 			go a.syncCarriedForwarding(context.Background())
 		}
+		a.syncForwards(context.Background(), p.Forwards)
 		return a.reconcile(context.Background())
 	case proto.TPing:
 		var ping proto.Ping
