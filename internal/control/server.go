@@ -121,6 +121,7 @@ type Server struct {
 	endpoints      map[uint32]string
 	pending        map[uint64]*pendingPing
 	pendingProbes  map[uint64]chan proto.ProbeResult
+	pendingCounts  map[uint64]chan proto.CounterResult
 	probeSeq       atomic.Uint64
 	hubStatus      wg.InterfaceStatus
 	hubErr         string
@@ -255,6 +256,7 @@ func New(opts Options) (*Server, error) {
 		endpoints:     map[uint32]string{},
 		pending:       map[uint64]*pendingPing{},
 		pendingProbes: map[uint64]chan proto.ProbeResult{},
+		pendingCounts: map[uint64]chan proto.CounterResult{},
 		peerStats:     map[uint32]map[uint32]proto.PeerStat{},
 		startedAt:     time.Now(),
 	}, nil
@@ -618,6 +620,12 @@ func (s *Server) serveAgent(conn net.Conn) error {
 				continue
 			}
 			s.resolveProbe(probe)
+		case proto.TCounters:
+			var counters proto.CounterResult
+			if err := json.Unmarshal(raw, &counters); err != nil {
+				continue
+			}
+			s.resolveCounters(counters)
 		case proto.TLog:
 			var entry proto.Log
 			if err := json.Unmarshal(raw, &entry); err != nil {
@@ -1183,6 +1191,57 @@ func (s *Server) ProbeTargets(ctx context.Context, agentID uint32, targets []str
 		return proto.ProbeResult{}, errors.New("control: the agent did not answer the probe; update the agent on that machine")
 	case result := <-ch:
 		return result, nil
+	}
+}
+
+// FirewallCounters asks an agent for its host firewall's packet counters.
+//
+// Two of these around a failing connection are the only way to see which rule
+// consumed a packet: a firewall that drops silently leaves nothing in a capture
+// and nothing in a log, but the counter of the rule that matched always moves.
+func (s *Server) FirewallCounters(ctx context.Context, agentID uint32) ([]string, error) {
+	s.mu.Lock()
+	sess, ok := s.sessions[agentID]
+	s.mu.Unlock()
+	if !ok {
+		return nil, errors.New("control: the agent is not connected")
+	}
+	seq := s.probeSeq.Add(1)
+	ch := make(chan proto.CounterResult, 1)
+	s.mu.Lock()
+	s.pendingCounts[seq] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pendingCounts, seq)
+		s.mu.Unlock()
+	}()
+	if err := sess.send(proto.Command{T: proto.TCommand, Seq: seq, Action: proto.ActionCounters}); err != nil {
+		return nil, err
+	}
+	timer := time.NewTimer(probeWait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, errors.New("control: the agent did not answer; update the agent on that machine")
+	case result := <-ch:
+		return result.Rules, nil
+	}
+}
+
+func (s *Server) resolveCounters(result proto.CounterResult) {
+	s.mu.Lock()
+	ch, ok := s.pendingCounts[result.Seq]
+	delete(s.pendingCounts, result.Seq)
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- result:
+	default:
 	}
 }
 

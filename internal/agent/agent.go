@@ -567,6 +567,8 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 			// Probing means making connections, which must not hold up the read
 			// loop that keeps the rest of the mesh in sync.
 			go a.probeTargets(cmd, writer)
+		case proto.ActionCounters:
+			go a.sendCounters(cmd, writer)
 		}
 		return nil
 	case proto.TRevoked:

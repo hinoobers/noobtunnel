@@ -38,18 +38,19 @@ const MaxMessageSize = 1 << 20
 
 // Control channel message types.
 const (
-	THello   = "hello"
-	TWelcome = "welcome"
-	TPeers   = "peers"
-	TPing    = "ping"
-	TPong    = "pong"
-	TStats   = "stats"
-	TLog     = "log"
-	TError   = "error"
-	TRevoked = "revoked"
-	TCommand = "command"
-	TProbe   = "probeResult"
-	TBye     = "bye"
+	THello    = "hello"
+	TWelcome  = "welcome"
+	TPeers    = "peers"
+	TPing     = "ping"
+	TPong     = "pong"
+	TStats    = "stats"
+	TLog      = "log"
+	TError    = "error"
+	TRevoked  = "revoked"
+	TCommand  = "command"
+	TProbe    = "probeResult"
+	TCounters = "counterResult"
+	TBye      = "bye"
 )
 
 // Hub describes how an agent reaches the control node's WireGuard interface.
@@ -211,7 +212,18 @@ const (
 	// ActionProbe asks the agent to try reaching the targets from its own
 	// machine and to describe the path it would take.
 	ActionProbe = "probe"
+	// ActionCounters asks the agent for the packet counters of its host's
+	// firewall, so the control node can see which rule consumed a packet.
+	ActionCounters = "counters"
 )
+
+// CounterResult answers a counters command: one entry per firewall rule, as
+// "<packets> <table> <rule>", so two snapshots can be diffed.
+type CounterResult struct {
+	T     string   `json:"t"`
+	Seq   uint64   `json:"seq"`
+	Rules []string `json:"rules"`
+}
 
 // ProbeEntry is one connection an agent attempted on the control node's behalf.
 type ProbeEntry struct {

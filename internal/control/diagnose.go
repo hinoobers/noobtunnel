@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,6 +87,10 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 
 	settings := s.store.Settings()
+	agentName := "the agent"
+	if agent, err := s.store.Agent(agentID); err == nil {
+		agentName = agent.Name
+	}
 	// The connection this node makes is answered into its own INPUT chain, so a
 	// host firewall that rejects the mesh interface breaks every target here while
 	// the agent side looks perfect.
@@ -162,6 +168,13 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 
 	host := routeTarget
+	// The agent's firewall counters, taken around the connection attempt below: a
+	// firewall that drops silently leaves nothing in a capture and nothing in a
+	// log, while the counter of the rule that matched always moves.
+	var countersBefore []string
+	if !strings.HasPrefix(s.backend.Name(), "fake") {
+		countersBefore, _ = s.FirewallCounters(ctx, agentID)
+	}
 	// Whose traffic is this? A network is routed to exactly one agent, so a
 	// target that another agent carries never arrives where the resource thinks
 	// it is going - and nothing on this side of the tunnel can see that, because
@@ -235,6 +248,15 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 				add("Route on the agent", "ok", firstLine(route), "")
 			}
 		}
+		// Which rule on that machine consumed the packet: the counters around the
+		// attempt name it, which is the one thing neither a capture nor a log can
+		// show.
+		if countersBefore != nil {
+			if countersAfter, err := s.FirewallCounters(ctx, agentID); err == nil {
+				status, detail, hint := firewallVerdict(countersBefore, countersAfter, agentName, settings.Interface)
+				add("Where the packet died on "+agentName, status, detail, hint)
+			}
+		}
 	default:
 		_ = conn.Close()
 		add("Connect to the target", "ok", "connected to "+address, "")
@@ -267,6 +289,85 @@ func firstLine(raw string) string {
 // refused" is nothing listening, and a silent timeout is the case that sends
 // operators hunting for a healthy service - the packets arrive, the answers do
 // not come back.
+// firewallVerdict reads two snapshots of the agent's firewall counters, taken
+// around a failed connection, and says what happened to the packet.
+//
+// This is the question nothing else can answer: a capture shows the packet
+// arriving and stopping, a log shows nothing at all, and only the counters say
+// which rule consumed it.
+func firewallVerdict(before, after []string, agent, iface string) (status, detail, hint string) {
+	previous := parseFirewallCounters(before)
+	type moved struct {
+		rule  string
+		count uint64
+	}
+	var grew []moved
+	for _, entry := range after {
+		packets, rule, ok := splitFirewallCounter(entry)
+		if !ok {
+			continue
+		}
+		was, seen := previous[rule]
+		if !seen || packets <= was {
+			continue
+		}
+		grew = append(grew, moved{rule: rule, count: packets - was})
+	}
+	if len(grew) == 0 {
+		return "warn",
+			"no firewall rule on " + agent + " counted a single packet: it was refused before iptables, " +
+				"which is the routing decision or the reverse-path filter on the interface the packet arrived on",
+			"check `sysctl net.ipv4.conf." + iface + ".rp_filter` and that the route to the target is the local network behind that machine"
+	}
+	sort.Slice(grew, func(i, j int) bool { return grew[i].count > grew[j].count })
+	var lines []string
+	for i, entry := range grew {
+		if i == 3 {
+			break
+		}
+		lines = append(lines, fmt.Sprintf("%d packet(s): %s", entry.count, entry.rule))
+	}
+	for _, entry := range grew {
+		// A rule that accepted the mesh interface means iptables let the packet
+		// through, so whatever dropped it happens after the filter: the bridge,
+		// the neighbour lookup, or the machine behind it.
+		if strings.Contains(entry.rule, iface) && strings.Contains(entry.rule, "ACCEPT") {
+			return "warn",
+				"the firewall accepted the packet on " + iface + " (" + strings.Join(lines, "; ") + "), " +
+					"so it was dropped after the filter: the bridge, the neighbour lookup, or the machine behind it",
+				"compare with a capture on " + agent + ": a packet on " + iface + " that never appears on the target's network is a forwarding or neighbour problem there"
+		}
+	}
+	return "fail",
+		"this is what consumed the packet on " + agent + ": " + strings.Join(lines, "; "),
+		"open the mesh interface there, in whichever firewall the rule belongs to (ufw route allow in/out on " +
+			iface + ", or iptables -I FORWARD -i " + iface + " -j ACCEPT)"
+}
+
+// parseFirewallCounters turns a snapshot into rule → packets.
+func parseFirewallCounters(entries []string) map[string]uint64 {
+	out := make(map[string]uint64, len(entries))
+	for _, entry := range entries {
+		if packets, rule, ok := splitFirewallCounter(entry); ok {
+			out[rule] = packets
+		}
+	}
+	return out
+}
+
+// splitFirewallCounter reads one "<packets> <table> <rule>" entry.
+func splitFirewallCounter(entry string) (uint64, string, bool) {
+	packets, rest, found := strings.Cut(entry, " ")
+	if !found || rest == "" {
+		return 0, "", false
+	}
+	value, err := strconv.ParseUint(packets, 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return value, rest, true
+}
+
 // probeReading is the control node's half of a probe: whether the target answers
 // on the machine that hosts it, whether it answers a connection whose source is
 // the mesh address, and which source the agent actually used.

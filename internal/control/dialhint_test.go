@@ -16,6 +16,54 @@ func (timeoutError) Temporary() bool { return true }
 
 var _ net.Error = timeoutError{}
 
+// TestFirewallVerdictNamesTheRuleThatAteThePacket covers the only evidence a
+// silent firewall drop leaves: the counter of the rule that matched.
+func TestFirewallVerdictNamesTheRuleThatAteThePacket(t *testing.T) {
+	before := []string{
+		"0 filter -A FORWARD -i noobtun -j ACCEPT",
+		"10 filter -A FORWARD -j DOCKER-USER",
+	}
+	after := []string{
+		"5 filter -A FORWARD -i noobtun -j ACCEPT",
+		"10 filter -A FORWARD -j DOCKER-USER",
+	}
+	status, detail, _ := firewallVerdict(before, after, "cassandra", "noobtun")
+	if !strings.Contains(detail, "5 packet(s)") || !strings.Contains(detail, "FORWARD -i noobtun") {
+		t.Fatalf("the rule that matched has to be named: %s / %s", status, detail)
+	}
+	// A rule that accepted the mesh interface means the drop is later, so this is
+	// not a firewall verdict even though a rule counted.
+	if status != "warn" || !strings.Contains(detail, "after the filter") {
+		t.Fatalf("an accepted packet should not be blamed on the firewall: %s / %s", status, detail)
+	}
+}
+
+func TestFirewallVerdictBlamesADropRule(t *testing.T) {
+	before := []string{"0 filter -A ufw-before-forward -j DROP"}
+	after := []string{"5 filter -A ufw-before-forward -j DROP"}
+	status, detail, hint := firewallVerdict(before, after, "cassandra", "noobtun")
+	if status != "fail" || !strings.Contains(detail, "ufw-before-forward") {
+		t.Fatalf("the drop rule should be named: %s / %s", status, detail)
+	}
+	if !strings.Contains(hint, "noobtun") {
+		t.Fatalf("the fix should mention the mesh interface: %s", hint)
+	}
+}
+
+// TestFirewallVerdictSaysWhenNothingCounted is the other answer: the packet never
+// reached the firewall at all, which points at the routing decision or the
+// reverse-path filter rather than at a rule.
+func TestFirewallVerdictSaysWhenNothingCounted(t *testing.T) {
+	snapshot := []string{"3 mangle -A PREROUTING -j MARK"}
+	_, detail, hint := firewallVerdict(snapshot, snapshot, "cassandra", "noobtun")
+	if !strings.Contains(detail, "before iptables") {
+		t.Fatalf("nothing counted means the filter never saw it: %s", detail)
+	}
+	if !strings.Contains(hint, "rp_filter") {
+		t.Fatalf("the check should name the reverse-path filter: %s", hint)
+	}
+}
+
 // TestDialHintNamesTheSilentTimeout covers the failure that sends operators
 // hunting for a healthy service: the packet goes out, the answer never comes
 // back, and the reason is on the agent's side.
