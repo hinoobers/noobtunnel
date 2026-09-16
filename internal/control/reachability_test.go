@@ -73,3 +73,70 @@ func setAdvertise(t *testing.T, h *harness, id uint32, prefixes ...string) {
 		t.Fatal(err)
 	}
 }
+
+// TestDiagnoseNamesTheAgentThatCarriesTheNetwork covers the failure a capture
+// cannot explain: the target times out, the service is healthy on its own
+// machine, and nothing at all arrives on that machine's mesh interface because
+// the mesh routes the network to a different agent.
+func TestDiagnoseNamesTheAgentThatCarriesTheNetwork(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	// The lower id keeps a range when two agents claim it, so the one enrolled
+	// first is the one that ends up carrying it.
+	lily := h.enrolledAgent(t, "lily")
+	cassandra := h.enrolledAgent(t, "cassandra")
+	setAdvertise(t, h, lily.id, "10.10.0.0/16")
+	setAdvertise(t, h, cassandra.id, "172.18.0.0/16")
+
+	status, body, _ := h.api("POST", "/api/resources", resourceBody(
+		"cassandra-wings", "tcp", cassandra.id, "172.18.0.3", 4700, freePort(t), nil), admin)
+	if status != http.StatusOK {
+		t.Fatalf("publishing returned %d: %s", status, body)
+	}
+	var created struct {
+		Resource struct {
+			ID      uint32 `json:"id"`
+			Targets []struct {
+				ID uint32 `json:"id"`
+			} `json:"targets"`
+		} `json:"resource"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now the other machine offers the same range, and the mesh keeps its claim.
+	setAdvertise(t, h, lily.id, "172.18.0.0/16")
+
+	status, body, _ = h.api("POST", "/api/diagnose", map[string]any{
+		"resourceId": created.Resource.ID,
+		"targetId":   created.Resource.Targets[0].ID,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("diagnose returned %d: %s", status, body)
+	}
+	var result struct {
+		Verdict string `json:"verdict"`
+		Steps   []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range result.Steps {
+		if step.Name != "Mesh routing" {
+			continue
+		}
+		if step.Status != "fail" {
+			t.Fatalf("the routing step should fail: %+v", step)
+		}
+		if !strings.Contains(step.Detail, "lily") || !strings.Contains(step.Detail, "172.18.0.0/16") {
+			t.Fatalf("the step should name the agent that carries the range: %+v", step)
+		}
+		return
+	}
+	t.Fatalf("the diagnosis should say who carries that network: %+v", result.Steps)
+}

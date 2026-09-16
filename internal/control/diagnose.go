@@ -162,6 +162,18 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 
 	host := routeTarget
+	// Whose traffic is this? A network is routed to exactly one agent, so a
+	// target that another agent carries never arrives where the resource thinks
+	// it is going - and nothing on this side of the tunnel can see that, because
+	// nothing arrives at all.
+	routingBroken := false
+	if err := s.store.CheckTargetReachability(agentID, host); err != nil {
+		routingBroken = true
+		add("Mesh routing", "fail", err.Error(),
+			"a network is routed to one agent only: drop it from one of them, or advertise a range only that machine can reach")
+		result.Verdict = err.Error()
+		result.VerdictStatus = "fail"
+	}
 	// Anything that already failed before the connection attempt is the cause,
 	// and the agent's answer is only a consequence of it: a control node whose own
 	// hub is not up cannot reach anything, no matter what the agent sees.
@@ -173,7 +185,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 	// Set when the agent's own answer explains the failure: it knows more about
 	// that side than any step the control node can run on itself.
-	verdictFromProbe := false
+	verdictFromProbe := routingBroken
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)

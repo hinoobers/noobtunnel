@@ -561,6 +561,12 @@ update it on that machine:
 curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update
 ```
 
+Diagnose answers the first of those three by itself now: it resolves which agent
+carries the network the target is in, and when that is not the agent the resource
+names, it says so by name ("172.18.0.3 is inside 172.18.0.0/16, which the mesh
+routes to lily, not to cassandra"). That is the case a capture on the agent cannot
+explain, because nothing at all arrives there.
+
 ## Slow connections
 
 A published service always takes the path *client -> control node -> tunnel ->
