@@ -182,7 +182,12 @@ func (a *Agent) iptablesAllow(ctx context.Context, iface string, advertises bool
 		// missing" is not enough: Docker puts its own jumps at the top of FORWARD
 		// whenever a container or a network is created, which pushes our rules
 		// below them - and a packet that Docker's chains drop never reaches ours.
-		_, _ = host.Run(ctx, iptables, append([]string{"-D"}, args...)...)
+		// Repeated deletes collapse copies left behind by earlier runs or by hand.
+		for attempts := 0; attempts < 4; attempts++ {
+			if _, err := host.Run(ctx, iptables, append([]string{"-D"}, args...)...); err != nil {
+				break
+			}
+		}
 		insert := append([]string{"-I"}, args...)
 		if _, err := host.Run(ctx, iptables, insert...); err != nil {
 			problems = append(problems, fmt.Sprintf("iptables %s: %v", strings.Join(args, " "), err))
