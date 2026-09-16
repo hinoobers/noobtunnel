@@ -376,6 +376,11 @@ the full configuration again instead.
 `dial tcp ADDRESS:PORT: connect: no route to host` means the control node has no
 route for that address, so the packet never enters a tunnel. In order:
 
+Before anything else, check **which build is running**: `noobtunnel version`, and
+in the UI Settings -> Control node -> *Built*. An update only takes effect after
+the service is restarted, and a control node from before a fix behaves exactly
+like the bug it fixes.
+
 1. **Is this control node running a real mesh?** Settings -> Control node shows
    the backend. `fake:...` means it was started with the demo flags
    (`--backend fake`, and a simulated mesh): agents enrol and get addresses, but

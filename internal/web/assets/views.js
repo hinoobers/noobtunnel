@@ -297,6 +297,9 @@ function renderServerInfo(node, server, settings) {
     ['Certificate fingerprint', server.fingerprint],
     ['Backend', server.backend],
     ['Version', server.version + ' · ' + server.platform],
+    // The build date is what tells an operator whether a running control node is
+    // the build they just installed.
+    server.buildDate ? ['Built', server.buildDate + (server.commit && server.commit !== 'unknown' ? ' · ' + server.commit : '')] : null,
     ['Uptime', fmtDuration(server.uptimeSec)],
   ].filter(Boolean);
   rows.forEach(([label, value]) => {

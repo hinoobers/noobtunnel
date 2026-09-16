@@ -1398,6 +1398,8 @@ func (s *Server) RuntimeInfo() map[string]any {
 	s.mu.Unlock()
 	return map[string]any{
 		"version":        version.Version,
+		"buildDate":      version.BuildDate,
+		"commit":         version.Commit,
 		"goVersion":      runtime.Version(),
 		"platform":       runtime.GOOS + "/" + runtime.GOARCH,
 		"uptimeSec":      int64(s.now().Sub(s.startedAt).Seconds()),
