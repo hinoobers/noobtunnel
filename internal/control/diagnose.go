@@ -206,10 +206,11 @@ func dialHint(dialErr error, address, host string) string {
 		if _, p, err := net.SplitHostPort(address); err == nil {
 			port = p
 		}
-		return "the packets go out and nothing answers. On the agent run `tcpdump -ni noobtun port " + port + "` while " +
-			"this check runs: a SYN with no answer means forwarding is filtered, and an answer arriving from an address " +
-			"other than " + host + " means host NAT is rewriting it - which is what Docker masquerade does to a container. " +
-			"Update the agent, it keeps the mesh out of host NAT."
+		return "the packets go out and nothing answers, so the service may still be healthy. Start " +
+			"`sudo tcpdump -ni any port " + port + "` on the agent, leave it running, then run this diagnose again: " +
+			"a SYN with no answer means the host is not forwarding to that network, and an answer arriving from an " +
+			"address other than " + host + " means host NAT rewrote it (Docker masquerade). " +
+			"An agent that has been updated keeps the mesh out of host NAT by itself."
 	default:
 		return "check that the service listens on " + host + " on the agent's side, and that the agent's firewall allows it"
 	}

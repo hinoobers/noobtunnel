@@ -1294,10 +1294,9 @@ func (s *Server) recordResourceErrors() {
 				if _, p, err := net.SplitHostPort(target.Target()); err == nil {
 					port = p
 				}
-				detail = strings.TrimSpace(detail + "\nthe packet reached the agent but nothing answered")
-				hint = "on " + who + " run `tcpdump -ni noobtun port " + port + "` while you retry: an answer arriving from a different " +
-					"address means host NAT rewrote it (Docker masquerade does this to containers), and no answer at all means the host " +
-					"is not forwarding between the mesh and that network. Update that agent, its firewall setup keeps the mesh out of host NAT."
+				settings := s.store.Settings()
+				detail = strings.TrimSpace(detail + "\n" + silentTimeoutDetail(who, port, settings.Interface, settings.MeshCIDR))
+				hint = "run the lines in the error column on " + who + ", in that order"
 				explained = true
 			}
 			if !explained {
@@ -1381,6 +1380,55 @@ func (s *Server) recordResourceErrors() {
 	for _, entry := range fresh {
 		s.errors.record(entry.Source, entry.Message, entry.Detail, entry.Hint)
 	}
+}
+
+// silentTimeoutDetail is what an operator needs when a target times out: the
+// packet left, nothing valid came back, and a service that answers on the agent
+// itself can still be perfectly healthy - a plain curl there never uses the
+// forwarding and NAT path the tunnel does.
+//
+// It is written as an ordered procedure rather than a description, because the
+// question it has to answer is "so what do I do now": start the capture (it
+// waits for packets, nothing can be missed), press Diagnose, then read which of
+// the two answers arrived.
+func silentTimeoutDetail(who, port, iface, meshCIDR string) string {
+	if iface == "" {
+		iface = "noobtun"
+	}
+	lines := []string{
+		"the packet left the control node and nothing valid came back",
+		"the service on that machine can still be healthy: a curl there never uses this path",
+		"",
+		"1. on " + who + ", start this and leave it running:",
+		"       sudo tcpdump -ni any port " + port,
+		"2. now press Diagnose on this target, and read what arrived:",
+	}
+	lines = append(lines, strings.Split(silentTimeoutBranches(iface, meshCIDR), "\n")...)
+	lines = append(lines, "3. update the agent on that machine:  install.sh --update",
+		"       it applies these forwarding and NAT rules itself, and keeps them in place")
+	return strings.Join(lines, "\n")
+}
+
+// silentTimeoutBranches is the reading of the capture: three shapes, each with
+// the command that fixes it there and then.
+func silentTimeoutBranches(iface, meshCIDR string) string {
+	nat := "cannot be fixed without a mesh range"
+	if meshCIDR != "" {
+		nat = "sudo iptables -t nat -I POSTROUTING -d " + meshCIDR + " -j RETURN"
+	}
+	return strings.Join([]string{
+		"       nothing arrives on " + iface + " at all",
+		"           the mesh is not sending it here: another agent carries that network (see the other",
+		"           Errors entries), or the hub has no route - check both from the control node with",
+		"           sudo wg show " + iface + " allowed-ips",
+		"       a SYN arrives, nothing leaves for the container",
+		"           forwarding is filtered; fix it now with",
+		"               sudo iptables -I FORWARD -i " + iface + " -j ACCEPT",
+		"               sudo iptables -I FORWARD -o " + iface + " -j ACCEPT",
+		"       the container answers, but the answer leaves with another address",
+		"           host NAT rewrote it (Docker masquerade does this to a container); fix it now with",
+		"               " + nat,
+	}, "\n")
 }
 
 // ResourceSpecs renders the store's resources for the proxy manager.

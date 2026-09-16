@@ -513,17 +513,26 @@ re-asserts the rule while it runs, because Docker puts its own back at the top o
 that chain whenever its daemon or a network is created. If the rule cannot be
 installed, the agent reports it and **Logs -> Errors** says so.
 
-To confirm it by hand on the agent, while the control node retries the target:
+To find out which of the three it is, on the agent start the capture and leave it
+running, then press **Diagnose** on that target (the capture waits for packets,
+so nothing can be missed) and read what arrived:
 
 ```sh
-sudo tcpdump -ni noobtun port 4700        # SYN out, and what comes back
-sudo iptables -t nat -S POSTROUTING | head
+sudo tcpdump -ni any port 4700
 ```
 
-A SYN-ACK arriving from an address other than the target's, or a `MASQUERADE`
-rule above the mesh `RETURN`, is this problem. Update the agent on that machine
-(`curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update`) and
-it fixes itself.
+| What the capture shows | What it means | Fix now, on that agent |
+| --- | --- | --- |
+| nothing on `noobtun` at all | the mesh is not sending it here: another agent carries that network, or the hub has no route | check `sudo wg show noobtun allowed-ips` on the control node, and the other Errors entries |
+| a SYN arrives but nothing leaves for the container | forwarding is filtered | `sudo iptables -I FORWARD -i noobtun -j ACCEPT` and `sudo iptables -I FORWARD -o noobtun -j ACCEPT` |
+| the container answers, but the answer leaves with another address | host NAT rewrote it (Docker masquerade) | `sudo iptables -t nat -I POSTROUTING -d MESH_CIDR -j RETURN` |
+
+Those commands are the ones the agent applies by itself, so the durable fix is to
+update it on that machine:
+
+```sh
+curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update
+```
 
 ## Slow connections
 
@@ -578,7 +587,9 @@ Errors are recorded for the things an operator can act on:
   agent behind that target is connected, its own WireGuard state is quoted in the
   entry, because "the service answers on the machine itself, but nothing arrives
   through the tunnel" is exactly what a device that could not be programmed looks
-  like from the control node;
+  like from the control node. A silent timeout (`i/o timeout`) carries the ordered
+  procedure to read on the agent instead of a description, because that is the
+  failure that looks like a healthy service from every other angle;
 - **agent** - a machine cannot program its WireGuard device (missing
   `wireguard-tools`, no `NET_ADMIN`, a kernel module that will not load).
 
