@@ -133,10 +133,21 @@ func TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget(t *testing.T) {
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
+	sawRouting := false
 	for _, step := range result.Steps {
-		if step.Name == "Mesh routing" {
+		if step.Name != "Mesh routing" {
+			continue
+		}
+		sawRouting = true
+		if step.Status != "ok" {
 			t.Fatalf("the target is pinned to its own agent, so the range around it is not a routing problem: %+v", step)
 		}
+		if !strings.Contains(step.Detail, "cassandra") {
+			t.Fatalf("the step should say which machine carries the address: %+v", step)
+		}
+	}
+	if !sawRouting {
+		t.Fatalf("the diagnosis should say where the address is delivered: %+v", result.Steps)
 	}
 	// The address is delivered to the agent the resource names, whatever the
 	// range around it resolves to.

@@ -302,6 +302,13 @@ valid target - including its own Docker bridges and even `127.0.0.1`. Advertisin
 only matters for the networks you want the control node to reach as a whole,
 outside of the addresses that published resources already cover.
 
+Publishing, editing or removing a target re-programs both sides immediately: the
+address appears in the control node's peer list as a host route to that agent, and
+the agent is told that it carries it so it opens forwarding for it. Diagnose shows
+this as a **Mesh routing** step ("`172.18.0.3/32` is delivered to cassandra, the
+agent this target names"), which is the one thing a capture on the machine itself
+cannot tell you.
+
 ### Publish services (Resources tab)
 
 **Resources** expose something running behind an agent on the control node's

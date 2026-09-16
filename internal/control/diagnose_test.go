@@ -64,7 +64,10 @@ func TestDiagnoseExplainsAnUnreachableTarget(t *testing.T) {
 	}
 	// Every step the operator needs to see is there, in the order a connection
 	// takes them.
-	wanted := []string{"WireGuard backend", "Hub interface", "Tunnel handshake", "Route from the control node", "Connect to the target"}
+	// "Mesh routing" sits between the route and the connection: it says whose
+	// address this is, which is what makes two machines with the same private
+	// range work at once.
+	wanted := []string{"WireGuard backend", "Hub interface", "Tunnel handshake", "Route from the control node", "Mesh routing", "Connect to the target"}
 	// The agent is asked about its own side too: that is the half the control
 	// node cannot see, and the answer decides what the operator does next.
 	wanted = append(wanted, "Reach the target from the agent")

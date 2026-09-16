@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -46,14 +47,14 @@ type ResourceView struct {
 	// Rules are the access rules, in evaluation order.
 	Rules []access.Rule `json:"rules,omitempty"`
 	// Identity means a control node account is required to reach the resource.
-	Identity  bool   `json:"identity"`
+	Identity bool `json:"identity"`
 	// WebSockets says whether protocol upgrades pass through.
-	WebSockets bool  `json:"websockets"`
-	Active    int64  `json:"active"`
-	Total     uint64 `json:"total"`
-	RxBytes   uint64 `json:"rxBytes"`
-	TxBytes   uint64 `json:"txBytes"`
-	CreatedAt string `json:"createdAt"`
+	WebSockets bool   `json:"websockets"`
+	Active     int64  `json:"active"`
+	Total      uint64 `json:"total"`
+	RxBytes    uint64 `json:"rxBytes"`
+	TxBytes    uint64 `json:"txBytes"`
+	CreatedAt  string `json:"createdAt"`
 }
 
 // DomainView is a hostname and what uses it.
@@ -323,6 +324,7 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
+		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
 		s.recordEvent("resource", "published "+resource.Name+" ("+string(resource.Protocol)+")")
 		s.broadcastState()
@@ -368,6 +370,7 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
+		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
 		s.recordEvent("resource", "updated "+resource.Name)
 		s.broadcastState()
@@ -381,12 +384,27 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, errBody("no such resource"))
 			return
 		}
+		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
 		s.recordEvent("resource", "removed "+name)
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("unsupported operation"))
+	}
+}
+
+// syncMeshAfterResourceChange re-programs what a published target changes.
+//
+// A target's address is pinned to its agent in the hub's configuration, and the
+// agent is told that it carries that address so it opens forwarding for it.
+// Publishing, editing or removing a target therefore has to reach both. Without
+// this, a service published after the machines enrolled is routed nowhere and its
+// packets are dropped where they should have been carried - which looks exactly
+// like a dead service.
+func (s *Server) syncMeshAfterResourceChange() {
+	if err := s.Sync(context.Background()); err != nil {
+		s.log.Warn("could not update the mesh after a resource change", "error", err)
 	}
 }
 

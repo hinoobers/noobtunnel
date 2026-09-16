@@ -173,6 +173,14 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 			"a network is routed to one agent only: drop it from one of them, or advertise a range only that machine can reach")
 		result.Verdict = err.Error()
 		result.VerdictStatus = "fail"
+	} else if agent, err := s.store.Agent(agentID); err == nil {
+		// Say out loud where the address goes: it is pinned to the agent the
+		// resource names, which is what makes two machines with the same private
+		// range work at once, and the one thing a capture on that machine cannot
+		// show.
+		add("Mesh routing", "ok",
+			host+"/32 is delivered to "+agent.Name+", the agent this target names",
+			"")
 	}
 	// Anything that already failed before the connection attempt is the cause,
 	// and the agent's answer is only a consequence of it: a control node whose own
