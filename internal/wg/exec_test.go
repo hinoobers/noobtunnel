@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -13,6 +14,9 @@ import (
 type recordingRunner struct {
 	calls  [][]string
 	staged string
+	// routes is the table the runner answers `ip route show` with, which is what
+	// makes it behave like a kernel that keeps what it is given.
+	routes map[string]bool
 }
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (string, error) {
@@ -20,6 +24,42 @@ func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (s
 	if name == "wg" && len(args) >= 3 && args[0] == "setconf" {
 		if raw, err := os.ReadFile(args[2]); err == nil {
 			r.staged = string(raw)
+		}
+	}
+	if name == "ip" {
+		// The backend writes routes as `ip route replace …` and reads them back as
+		// `ip -4 route show`, so find the subcommand rather than assuming a
+		// position.
+		at := -1
+		for i, arg := range args {
+			if arg == "route" {
+				at = i
+				break
+			}
+		}
+		if at < 0 || at+1 >= len(args) {
+			return "", nil
+		}
+		switch args[at+1] {
+		case "replace":
+			if r.routes == nil {
+				r.routes = map[string]bool{}
+			}
+			r.routes[args[at+2]] = true
+		case "del":
+			// The backend also clears metric 0 leftovers from older builds; this
+			// fake never installed those, so only the real deletions count.
+			if strings.Contains(strings.Join(args, " "), "metric 0") {
+				return "", nil
+			}
+			delete(r.routes, args[at+2])
+		case "show":
+			var lines []string
+			for prefix := range r.routes {
+				lines = append(lines, prefix+" dev noobtun metric 1000")
+			}
+			sort.Strings(lines)
+			return strings.Join(lines, "\n"), nil
 		}
 	}
 	return "", nil

@@ -200,10 +200,43 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 			}
 		}
 	}
+	// Read the table back. An install that returned success is not proof the
+	// route is there, and a route that never lands is invisible everywhere else:
+	// the tunnel still handshakes, the service still answers on its own machine,
+	// and every reply goes out of the default gateway. Saying so is the only way
+	// this failure gets noticed from the outside.
+	if len(want) > 0 {
+		if out, err := run.Run(ctx, "ip", "-4", "route", "show"); err == nil {
+			for r := range want {
+				if !routePresent(out, r, iface) {
+					problems = append(problems, "the kernel has no route for "+r+" dev "+iface+" after installing it")
+				}
+			}
+		} else {
+			problems = append(problems, "could not read the routing table back: "+err.Error())
+		}
+	}
 	if len(problems) > 0 {
 		return fmt.Errorf("routes for %s: %s", iface, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// routePresent reports whether a prefix is in a `ip route show` listing for an
+// interface.
+func routePresent(table, prefix, iface string) bool {
+	for _, line := range strings.Split(table, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != prefix {
+			continue
+		}
+		for i, f := range fields {
+			if f == "dev" && i+1 < len(fields) && fields[i+1] == iface {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // EnsureRoutes re-asserts the kernel routes for an interface without touching the
