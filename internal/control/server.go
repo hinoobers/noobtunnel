@@ -1243,10 +1243,26 @@ func (s *Server) recordResourceErrors() {
 			if who == "" {
 				who = "the agent"
 			}
+			// The dial error alone is not enough: a connected agent that cannot
+			// program its WireGuard device answers on its own machine while the
+			// tunnel is dead, which looks like "the service is down" from here.
+			detail := ts.LastError
+			hint := "check that the service listens on that address behind the agent and that the agent is online"
+			if sess, ok := sessions[target.AgentID]; ok && sess != nil {
+				agentStats, _, _, _, _ := sess.snapshot()
+				switch {
+				case agentStats.LastError != "":
+					detail = strings.TrimSpace(detail + "\nthe agent reports: " + agentStats.LastError)
+					hint = "the agent is connected but its WireGuard device is not in sync, so nothing reaches it through the tunnel"
+				case len(agentStats.Routes) == 0:
+					detail = strings.TrimSpace(detail + "\nthe agent has not programmed any routes")
+				}
+			} else if ts.LastError != "" {
+				hint = "the agent is not connected right now, so the tunnel to it is down"
+			}
 			note(fmt.Sprintf("target/%d/%d", resource.ID, target.ID), "target",
 				resource.Name+": target "+target.Target()+" ("+who+") is not reachable",
-				ts.LastError,
-				"check that the service listens on that address behind the agent and that the agent is online")
+				detail, hint)
 		}
 	}
 

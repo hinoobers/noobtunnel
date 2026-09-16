@@ -390,7 +390,11 @@ Errors are recorded for the things an operator can act on:
 - **resource** - a published service is not listening (port taken, exit node
   address missing);
 - **target** - one backend of a published service cannot be reached while the
-  others answer, so the Resources tab shows it next to that target;
+  others answer, so the Resources tab shows it next to that target. When the
+  agent behind that target is connected, its own WireGuard state is quoted in the
+  entry, because "the service answers on the machine itself, but nothing arrives
+  through the tunnel" is exactly what a device that could not be programmed looks
+  like from the control node;
 - **agent** - a machine cannot program its WireGuard device (missing
   `wireguard-tools`, no `NET_ADMIN`, a kernel module that will not load).
 
