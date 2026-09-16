@@ -422,12 +422,12 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		if err != nil {
 			return Resource{}, err
 		}
-		if in.Protocol == ProtocolTCP || in.Protocol == ProtocolUDP {
-			return Resource{}, fmt.Errorf("%w: domains only apply to http and https resources", ErrBadResource)
-		}
 	}
 	if in.Protocol == ProtocolHTTPS && domain == "" {
 		return Resource{}, fmt.Errorf("%w: an https resource needs a domain, because the control node issues the certificate for it", ErrBadResource)
+	}
+	if in.Protocol == ProtocolHTTPSPassthrough && domain == "" {
+		return Resource{}, fmt.Errorf("%w: a TLS passthrough resource needs a domain, because the connection is routed by its server name", ErrBadResource)
 	}
 	if in.Identity && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",

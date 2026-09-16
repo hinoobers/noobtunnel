@@ -401,6 +401,15 @@ container on the same address. See
 A target inside the mesh range itself is refused, because that belongs to the
 overlay rather than to any machine's network.
 
+**Domains** are the hostnames resources answer on. **HTTP** and **HTTPS** are
+routed by name - the `Host` header, or the server name for a TLS passthrough
+resource - which is why they need one, and why several of them can share port 443.
+**TCP** and **UDP** have no name inside the stream: the client connects to a port,
+so a domain there does not route anything. It is still useful and allowed - the
+domain gets a DNS record, so you can hand out `mail.example.com:2525` instead of
+an address - and the form says as much when you pick TCP or UDP. Leave the field
+on *no name* to publish on the port only.
+
 **Domains** are the hostnames resources answer on. Adding one shows the A record
 to create and which resources use it; a domain that is still in use cannot be
 deleted. Traffic, open connections and listener errors for every resource are

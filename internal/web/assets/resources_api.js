@@ -191,6 +191,13 @@ function renderResources(node, subNode, resources) {
     h('tbody', null, rows)));
 }
 
+// protocolIsByDomain reports whether a client reaches this kind of resource by
+// name: http and https are routed by the Host header, TLS passthrough by the
+// server name, and everything else by its port.
+function protocolIsByDomain(protocol) {
+  return protocol === 'http' || protocol === 'https' || protocol === 'https-passthrough';
+}
+
 function renderDomains(node, subNode, domains) {
   if (!node) return;
   domains = domains || [];
@@ -468,7 +475,58 @@ function resourceEditorPage(existing) {
   let subdomainTouched = isEdit;
   // The publish preview: exactly what the resource will answer on.
   const domainPreview = h('div', { class: 'callout' });
-  const selectedDomain = () => domains.find((d) => d.value === domainSelect.value) || domains[0];
+  // A name is optional for everything that is not routed by name, so the choice
+  // to publish it on a port only is explicit rather than implied.
+  const noNameOption = h('option', { value: '' }, '(no name - reachable on the port only)');
+  // An empty choice means "no name", which a tcp or udp resource is allowed to
+  // have: the port carries the traffic either way. Without that option the select
+  // shows its first domain, which is what a resource routed by name wants.
+  const selectedDomain = () => {
+    const found = domains.find((d) => d.value === domainSelect.value);
+    if (found) return found;
+    if (domainSelect.contains(noNameOption) && domainSelect.value === '') return null;
+    return domains[0] || null;
+  };
+  const syncDomainOptions = () => {
+    const byDomain = protocolIsByDomain(type.value);
+    const present = domainSelect.contains(noNameOption);
+    if (byDomain) {
+      if (present) noNameOption.remove();
+      return;
+    }
+    if (!present) domainSelect.append(noNameOption);
+    // A new tcp or udp resource starts without a name; editing one keeps whatever
+    // it already has.
+    if (!isEdit && domains.some((d) => d.value === domainSelect.value)) {
+      domainSelect.value = '';
+    }
+  };
+  // listenPort is what a tcp or udp resource answers on: the port field, or the
+  // protocol's default when it is left empty.
+  const listenPort = () => String(listenInput.value || listenInput.placeholder || '').trim();
+  // The note under the domain field says what the name does for this protocol:
+  // routing for http and https, a DNS record and a name to show for the rest.
+  const syncDomainNote = () => {
+    const protocol = type.value;
+    const byDomain = protocolIsByDomain(protocol);
+    domainNote.hidden = false;
+    if (!domains.length) {
+      domainNote.textContent = 'No domains configured yet. Add one in the Domains tab to reach this by name, ' +
+        'or publish it on a port instead.';
+    } else if (!byDomain && !domainSelect.value) {
+      domainNote.textContent = 'No name: this ' + protocol.toUpperCase() + ' service is reachable on its port only. ' +
+        'Give it a domain to create a DNS record for it as well.';
+    } else if (protocol === 'https') {
+      domainNote.textContent = 'The control node serves this on port 443 with a certificate for the domain' +
+        ' (self-signed unless --acme-email is set), then proxies to your service over plain HTTP.';
+    } else if (!byDomain) {
+      domainNote.textContent = 'A name for this service: the domain gets a DNS record, and people reach it at ' +
+        domainSelect.value + ':' + listenPort() + '. ' + protocol.toUpperCase() +
+        ' has no name inside the stream, so the port is what carries it.';
+    } else {
+      domainNote.textContent = 'Requests are routed by the Host header.';
+    }
+  };
   const refreshPreview = () => {
     const domain = selectedDomain();
     // Each option shows the name the resource will actually get, so it follows
@@ -486,7 +544,9 @@ function resourceEditorPage(existing) {
       h('strong', null, 'Will be published at'),
       h('span', { class: 'mono', text: type.value === 'http' || type.value === 'https'
         ? scheme + '://' + hostname
-        : hostname }),
+        // A name for a tcp or udp service is still reached on its port: there is
+        // no host header or server name inside the stream to route by.
+        : hostname + (listenPort() ? ':' + listenPort() : '') }),
     ];
     if (domain.kind === 'wildcard') {
       lines.push(h('span', { class: 'muted tiny', text: 'from the wildcard domain ' + domain.value +
@@ -524,6 +584,11 @@ function resourceEditorPage(existing) {
   });
   domainSelect.addEventListener('change', () => {
     syncSubdomainField();
+    syncDomainNote();
+    refreshPreview();
+  });
+  listenInput.addEventListener('input', () => {
+    syncDomainNote();
     refreshPreview();
   });
 
@@ -591,7 +656,8 @@ function resourceEditorPage(existing) {
       ? 'Leave empty for port ' + fallback + '. Several ' + protocol.toUpperCase() +
         ' resources can share it when each has its own domain.'
       : 'Required: ' + protocol.toUpperCase() + ' resources each need their own port.';
-    const byDomain = protocol === 'http' || protocol === 'https';
+    syncDomainOptions();
+    const byDomain = protocolIsByDomain(protocol);
     // HTTPS is always 443: the control node answers with its own certificate, so
     // there is no port for the operator to pick.
     const fixedPort = protocol === 'https';
@@ -601,20 +667,15 @@ function resourceEditorPage(existing) {
     listenHint.hidden = fixedPort;
     if (fixedPort) listenInput.setAttribute('disabled', '');
     else listenInput.removeAttribute('disabled');
-    const usableDomain = byDomain && domains.length > 0;
+    // A domain is a name for any resource. For http and https it is also how the
+    // control node routes requests; for tcp and udp there is no name inside the
+    // stream, so it is the DNS record and the name to show, and the port still
+    // carries the traffic.
+    const usableDomain = domains.length > 0;
     domainField.hidden = !usableDomain;
     if (usableDomain) domainSelect.removeAttribute('disabled');
     else domainSelect.setAttribute('disabled', '');
-    domainNote.hidden = !byDomain;
-    if (byDomain && !domains.length) {
-      domainNote.textContent = 'No domains configured yet. Add one in the Domains tab to reach this by name, ' +
-        'or publish it on a port instead.';
-    } else if (protocol === 'https') {
-      domainNote.textContent = 'The control node serves this on port 443 with a certificate for the domain' +
-        ' (self-signed unless --acme-email is set), then proxies to your service over plain HTTP.';
-    } else {
-      domainNote.textContent = 'Requests are routed by the Host header.';
-    }
+    syncDomainNote();
     syncProxy();
     refreshPreview();
   }

@@ -152,6 +152,39 @@ func TestResourceTargetValidation(t *testing.T) {
 
 func boolPtr(v bool) *bool { return &v }
 
+// TestADomainOnATCPResourceIsAllowed covers the name an operator expects to be
+// able to give any published service. For http and https the domain decides how
+// requests are routed; for tcp and udp there is no name inside the stream, so it
+// is what the domain is used for instead: the DNS record, and a name to show.
+func TestADomainOnATCPResourceIsAllowed(t *testing.T) {
+	st, agent := resourceFixture(t)
+	resource, err := st.AddResource(ResourceInput{
+		Name: "mail", Protocol: ProtocolTCP, ListenPort: 2525,
+		Domain:  "mail.example.com",
+		Targets: oneTarget(agent.ID, agent.Address, 25),
+	})
+	if err != nil {
+		t.Fatalf("a tcp resource with a domain should be allowed: %v", err)
+	}
+	if resource.Domain != "mail.example.com" {
+		t.Fatalf("the domain should be kept, got %q", resource.Domain)
+	}
+	// The name is registered like any other, so the Domains tab offers it and the
+	// DNS automation can create the record.
+	if !containsDomain(st.Domains(), "mail.example.com") {
+		t.Fatalf("the domain should be registered: %v", st.Domains())
+	}
+}
+
+func containsDomain(domains []Domain, hostname string) bool {
+	for _, domain := range domains {
+		if domain.Hostname == hostname {
+			return true
+		}
+	}
+	return false
+}
+
 func TestResourceValidation(t *testing.T) {
 	st, agent := resourceFixture(t)
 	cases := []struct {
@@ -162,7 +195,7 @@ func TestResourceValidation(t *testing.T) {
 		{"bad protocol", ResourceInput{Protocol: "smtp", Targets: oneTarget(agent.ID, agent.Address, 25), ListenPort: 2525}, "protocol"},
 		{"bad strategy", ResourceInput{Protocol: ProtocolTCP, Strategy: "random", Targets: oneTarget(agent.ID, agent.Address, 25), ListenPort: 2525}, "strategy"},
 		{"tcp needs a port", ResourceInput{Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 25)}, "listen port"},
-		{"domain on tcp", ResourceInput{Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 25), ListenPort: 2525, Domain: "mail.example.com"}, "domains only apply"},
+		{"passthrough needs a domain", ResourceInput{Protocol: ProtocolHTTPSPassthrough, Targets: oneTarget(agent.ID, agent.Address, 443), ListenPort: 8443}, "needs a domain"},
 		{"bad domain", ResourceInput{Protocol: ProtocolHTTP, Targets: oneTarget(agent.ID, agent.Address, 80), Domain: "not a domain"}, "domain"},
 		{"wireguard port", ResourceInput{Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 25), ListenPort: 51820}, "WireGuard"},
 		{"unknown exit node", ResourceInput{Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 25), ListenPort: 2525, ExitNodeID: "nope"}, "exit node"},
