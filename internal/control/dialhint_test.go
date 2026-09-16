@@ -16,6 +16,33 @@ func (timeoutError) Temporary() bool { return true }
 
 var _ net.Error = timeoutError{}
 
+// TestFirewallVerdictIgnoresThisMachinesOwnTraffic covers the answer that sent us
+// looking at OUTPUT chains: the diagnosis makes the agent open connections of its
+// own, so those counters move too, and only the chains a routed packet passes
+// through say anything about the packet that never arrived.
+func TestFirewallVerdictIgnoresThisMachinesOwnTraffic(t *testing.T) {
+	before := []string{
+		"0 filter -A OUTPUT -j ufw-before-output",
+		"0 filter -A INPUT -j ufw-before-input",
+		"0 filter -A FORWARD -i noobtun -j ACCEPT",
+	}
+	after := []string{
+		"64 filter -A OUTPUT -j ufw-before-output",
+		"59 filter -A INPUT -j ufw-before-input",
+		"0 filter -A FORWARD -i noobtun -j ACCEPT",
+	}
+	_, detail, hint := firewallVerdict(before, after, "cassandra", "noobtun")
+	if strings.Contains(detail, "OUTPUT") || strings.Contains(detail, "INPUT -j") {
+		t.Fatalf("the agent's own traffic is not evidence about a forwarded packet: %s", detail)
+	}
+	if !strings.Contains(detail, "before iptables") {
+		t.Fatalf("nothing on the routed path counted it: %s", detail)
+	}
+	if !strings.Contains(hint, "rp_filter") {
+		t.Fatalf("the check should point at the reverse-path filter: %s", hint)
+	}
+}
+
 // TestFirewallVerdictNamesTheRuleThatAteThePacket covers the only evidence a
 // silent firewall drop leaves: the counter of the rule that matched.
 func TestFirewallVerdictNamesTheRuleThatAteThePacket(t *testing.T) {

@@ -307,6 +307,13 @@ func firewallVerdict(before, after []string, agent, iface string) (status, detai
 		if !ok {
 			continue
 		}
+		// Only the chains a routed packet passes through. A diagnosis makes the
+		// agent open connections of its own, and those move the INPUT and OUTPUT
+		// counters - blaming them for a packet that never left the tunnel is how
+		// this step pointed at the wrong thing.
+		if isLocalChain(ruleChain(rule)) {
+			continue
+		}
 		was, seen := previous[rule]
 		if !seen || packets <= was {
 			continue
@@ -342,6 +349,24 @@ func firewallVerdict(before, after []string, agent, iface string) (status, detai
 		"this is what consumed the packet on " + agent + ": " + strings.Join(lines, "; "),
 		"open the mesh interface there, in whichever firewall the rule belongs to (ufw route allow in/out on " +
 			iface + ", or iptables -I FORWARD -i " + iface + " -j ACCEPT)"
+}
+
+// ruleChain is the chain a counter line belongs to: "-A FORWARD -i x" → FORWARD.
+func ruleChain(rule string) string {
+	fields := strings.Fields(rule)
+	for i, field := range fields {
+		if field == "-A" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+// isLocalChain reports whether a chain carries traffic this machine sends or
+// receives itself, rather than traffic routed through it.
+func isLocalChain(chain string) bool {
+	upper := strings.ToUpper(chain)
+	return strings.Contains(upper, "INPUT") || strings.Contains(upper, "OUTPUT")
 }
 
 // parseFirewallCounters turns a snapshot into rule → packets.
