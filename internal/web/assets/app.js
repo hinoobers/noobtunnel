@@ -582,13 +582,17 @@ function renderShell() {
     panel.hidden = !active;
   });
 
-  renderStats(shell.stats, summary, settings, server);
-  renderHealth(shell.healthPanel, state.data.health);
-  renderTopology(shell.topology, shell.topologySub, state.data.agents, summary);
-  const filtered = filterAgents(state.data.agents);
+  // The server sends empty lists, but never trust that: a missing or null list
+  // must not take the whole page down. Delete an agent and the next snapshot is
+  // the one that used to arrive as null.
+  const agents = state.data.agents || [];
+  renderStats(shell.stats, summary, settings, server, agents);
+  renderHealth(shell.healthPanel, state.data.health || []);
+  renderTopology(shell.topology, shell.topologySub, agents, summary);
+  const filtered = filterAgents(agents);
   renderAgentGrid(shell.agentGrid, filtered, summary);
   shell.agentsSub.textContent = describeAgents(summary);
-  renderEvents(shell.events, state.data.events);
+  renderEvents(shell.events, state.data.events || []);
   const requestLog = requestData();
   renderCharts(shell.requestCharts, requestLog.summary);
   renderRequests(shell.requestTable, requestLog.recent);

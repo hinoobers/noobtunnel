@@ -85,6 +85,17 @@ type StateView struct {
 	DNSProviders []DNSProviderView   `json:"dnsProviders"`
 }
 
+// notNil turns a nil slice into an empty one. A nil slice marshals to JSON null,
+// and the web UI reads these fields as arrays, so an empty mesh must arrive as
+// [] rather than null (a mesh with no agents left used to break the whole page
+// with "cannot read properties of null").
+func notNil[T any](in []T) []T {
+	if in == nil {
+		return []T{}
+	}
+	return in
+}
+
 // StateSnapshot builds the current view of the mesh.
 func (s *Server) StateSnapshot() *StateView {
 	st := s.store.View()
@@ -119,14 +130,15 @@ func (s *Server) StateSnapshot() *StateView {
 	view := &StateView{
 		Server:       s.RuntimeInfo(),
 		Settings:     settings,
-		Health:       s.Checks(),
-		Events:       s.events.recent(),
-		Tokens:       s.auth.APITokens(),
-		Rejected:     rejected,
-		Resources:    s.resourceViews(),
-		Domains:      s.domainViews(),
-		ExitNodes:    s.exitNodeViews(),
-		DNSProviders: s.dnsProviderViews(),
+		Agents:       []AgentView{},
+		Health:       notNil(s.Checks()),
+		Events:       notNil(s.events.recent()),
+		Tokens:       notNil(s.auth.APITokens()),
+		Rejected:     notNil(rejected),
+		Resources:    notNil(s.resourceViews()),
+		Domains:      notNil(s.domainViews()),
+		ExitNodes:    notNil(s.exitNodeViews()),
+		DNSProviders: notNil(s.dnsProviderViews()),
 	}
 
 	byKey := map[string]uint32{}

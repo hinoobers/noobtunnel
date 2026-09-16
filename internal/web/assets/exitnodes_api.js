@@ -23,6 +23,7 @@ function exitStatusChip(node) {
 
 function renderExitNodes(node, subNode, nodes) {
   if (!node) return;
+  nodes = nodes || [];
   clear(node);
   if (shell && shell.exitNodesAdd) {
     // The list always has at least the built-in node, so there is no empty state

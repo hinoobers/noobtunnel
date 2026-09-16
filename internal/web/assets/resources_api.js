@@ -110,6 +110,7 @@ function resourceStatus(resource) {
 
 function renderResources(node, subNode, resources) {
   if (!node) return;
+  resources = resources || [];
   clear(node);
   // One button only: the header keeps its button while there is a table to act
   // on, and the empty state owns it when there is nothing to show.
@@ -186,6 +187,7 @@ function renderResources(node, subNode, resources) {
 
 function renderDomains(node, subNode, domains) {
   if (!node) return;
+  domains = domains || [];
   clear(node);
   // Same single-button rule as resources.
   if (shell && shell.domainsAdd) {

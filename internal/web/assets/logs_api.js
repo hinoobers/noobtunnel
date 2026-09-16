@@ -48,6 +48,7 @@ function trafficChart(title, rows) {
 // renderRequests lists individual requests and their decision.
 function renderRequests(node, recent) {
   if (!node) return;
+  recent = recent || [];
   clear(node);
   if (!recent.length) {
     node.append(h('div', { class: 'empty' },

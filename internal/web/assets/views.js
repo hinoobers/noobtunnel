@@ -33,14 +33,14 @@ function hubAddress(cidr) {
 }
 
 function totalTraffic(agents) {
-  return agents.reduce((acc, a) => ({ rx: acc.rx + (a.rxBytes || 0), tx: acc.tx + (a.txBytes || 0) }), { rx: 0, tx: 0 });
+  return (agents || []).reduce((acc, a) => ({ rx: acc.rx + (a.rxBytes || 0), tx: acc.tx + (a.txBytes || 0) }), { rx: 0, tx: 0 });
 }
 
 /* ---------- stats ---------- */
 
-function renderStats(node, summary, settings, server) {
+function renderStats(node, summary, settings, server, agents) {
   clear(node);
-  const traffic = totalTraffic(state.data.agents);
+  const traffic = totalTraffic(agents || (state.data ? state.data.agents : []));
   const cards = [
     h('div', { class: 'stat' },
       h('div', { class: 'label', text: 'Agents connected' }),
@@ -100,6 +100,7 @@ async function refreshChecks() {
 
 function renderTopology(node, subNode, agents, summary) {
   clear(node);
+  agents = agents || [];
   if (subNode) {
     subNode.textContent = summary.agents === 0
       ? 'No agents yet'
@@ -227,6 +228,7 @@ function agentChips(agent) {
 
 function renderAgentGrid(node, agents, summary) {
   clear(node);
+  agents = agents || [];
   if (!agents.length) {
     node.append(h('div', { class: 'empty' },
       h('h3', { text: state.filter ? 'No agent matches that filter' : 'No agents yet' }),
@@ -323,6 +325,7 @@ function fillSettingsForm(form, settings) {
 
 function renderTokens(node, tokens) {
   clear(node);
+  tokens = tokens || [];
   if (!tokens.length) {
     node.append(h('li', null, h('span', { class: 'muted', text: 'No API tokens yet.' })));
     return;
@@ -341,6 +344,7 @@ function renderTokens(node, tokens) {
 
 function renderUsers(node, subNode, users) {
   if (!node) return;
+  users = users || [];
   clear(node);
   if (subNode) {
     const admins = users.filter((u) => u.role === 'admin' && !u.disabled).length;

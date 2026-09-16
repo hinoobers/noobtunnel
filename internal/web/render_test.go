@@ -179,6 +179,30 @@ renderHealth(node, state.data.health);
 renderTopology(node, node, state.data.agents, state.data.summary);
 renderAgentGrid(node, state.data.agents, state.data.summary);
 renderEvents(node, state.data.events);
+
+// An empty mesh, the way the control node reports it when the operator deletes
+// the last (inactive) agent. The lists used to arrive as null, and the render
+// that followed threw "Cannot read properties of null (reading 'reduce')",
+// which left the whole page frozen.
+const empty = JSON.parse(JSON.stringify(state.data));
+for (const field of ['agents', 'events', 'health', 'resources', 'domains', 'exitNodes', 'apiTokens', 'rejected']) {
+  empty[field] = null;
+}
+empty.summary = Object.assign({}, empty.summary, { agents: 0, online: 0, reachable: 0, directLinks: 0, relayedLinks: 0 });
+const withAgents = state.data;
+state.data = empty;
+renderStats(node, empty.summary, empty.settings, empty.server);
+renderHealth(node, empty.health);
+renderTopology(node, node, empty.agents, empty.summary);
+renderAgentGrid(node, empty.agents, empty.summary);
+renderEvents(node, empty.events);
+renderTokens(node, empty.apiTokens);
+renderResources(node, node, empty.resources);
+renderDomains(node, node, empty.domains);
+renderExitNodes(node, node, empty.exitNodes);
+renderCharts(node, { total: 0, allowed: 0, blocked: 0, countries: null, hosts: null });
+renderRequests(node, null);
+state.data = withAgents;
 renderServerInfo(node, state.data.server, state.data.settings);
 renderTokens(node, state.data.apiTokens);
 renderUsers(node, node, state.data.users);
