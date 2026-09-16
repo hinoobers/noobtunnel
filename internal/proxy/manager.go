@@ -71,6 +71,9 @@ type Spec struct {
 	ProxyProtocol string
 	// Identity requires a control node account before a request is forwarded.
 	Identity bool
+	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
+	// resource.
+	WebSockets bool
 	// Rules decide who may reach the resource, evaluated in order.
 	Rules []access.Rule
 	// Control marks the control node's own UI route. Requests for it are answered

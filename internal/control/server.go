@@ -1370,6 +1370,7 @@ func (s *Server) ResourceSpecs() []proxy.Spec {
 			Enabled:       r.Enabled && len(targets) > 0 && exitEnabled,
 			ProxyProtocol: r.ProxyProtocol,
 			Identity:      r.Identity,
+			WebSockets:    r.AllowsWebSockets(),
 		})
 	}
 	return specs

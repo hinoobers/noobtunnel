@@ -243,6 +243,45 @@ func TestResourcePortConflicts(t *testing.T) {
 	}
 }
 
+// TestWebSocketsDefaultAndToggle covers the switch: resources allow protocol
+// upgrades unless they turn them off, and the setting is meaningless for the
+// protocols that cannot carry one.
+func TestWebSocketsDefaultAndToggle(t *testing.T) {
+	st, agent := resourceFixture(t)
+	off := false
+	chat, err := st.AddResource(ResourceInput{
+		Name: "chat", Protocol: ProtocolHTTP, Domain: "chat.example.com", ListenPort: 80,
+		Targets: oneTarget(agent.ID, agent.Address, 3000), WebSockets: &off,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat.AllowsWebSockets() {
+		t.Fatal("an explicit false should disable upgrades")
+	}
+	plain, err := st.AddResource(ResourceInput{
+		Name: "plain", Protocol: ProtocolHTTP, Domain: "plain.example.com", ListenPort: 80,
+		Targets: oneTarget(agent.ID, agent.Address, 3001),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plain.AllowsWebSockets() {
+		t.Fatal("a resource that does not mention it should allow upgrades")
+	}
+	on := true
+	ssh, err := st.AddResource(ResourceInput{
+		Name: "ssh", Protocol: ProtocolTCP, ListenPort: 2222,
+		Targets: oneTarget(agent.ID, agent.Address, 22), WebSockets: &on,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ssh.WebSockets != nil {
+		t.Fatal("a tcp resource has no upgrade to allow, so nothing should be stored")
+	}
+}
+
 func TestResourceUpdateAndRemove(t *testing.T) {
 	st, agent := resourceFixture(t)
 	resource, err := st.AddResource(ResourceInput{

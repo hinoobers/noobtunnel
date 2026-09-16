@@ -539,6 +539,12 @@ function resourceEditorPage(existing) {
     h('input', { type: 'checkbox', name: 'identity', checked: isEdit && existing.identity ? true : null }),
     h('span', null, h('strong', null, 'Identity controlled'),
       h('em', null, 'Require a control node account (HTTP Basic) before a request is forwarded.')));
+  // WebSockets: on for every existing resource, and the switch is only shown for
+  // the protocols that can carry an upgrade.
+  const websocketField = h('label', { class: 'switch' },
+    h('input', { type: 'checkbox', name: 'websockets', checked: !isEdit || existing.websockets ? true : null }),
+    h('span', null, h('strong', null, 'WebSockets'),
+      h('em', null, 'Let a browser upgrade the connection, for chat, live updates and terminals.')));
   const enabledField = h('label', { class: 'switch' },
     h('input', { type: 'checkbox', name: 'enabled', checked: !isEdit || existing.enabled ? true : null }),
     h('span', null, h('strong', null, 'Published'),
@@ -561,10 +567,12 @@ function resourceEditorPage(existing) {
       setCardEnabled(proxyCards, false);
       proxyHint.textContent = 'The PROXY protocol is a TCP extension, so UDP resources do not use it.';
       identityField.hidden = true;
+      websocketField.hidden = true;
       return;
     }
     setCardEnabled(proxyCards, true);
     identityField.hidden = false;
+    websocketField.hidden = false;
     proxyHint.textContent = type.value === 'http'
       ? 'Adds the header for services that expect it. With it off, HTTP backends still see the client in X-Forwarded-For.'
       : 'Tells the service the real client address, for software that trusts a reverse proxy.';
@@ -633,6 +641,7 @@ function resourceEditorPage(existing) {
       enabledField),
     h('div', { class: 'fields' },
       identityField,
+      websocketField,
       rulesBox,
       error),
   ];
@@ -730,6 +739,8 @@ function resourceEditorPage(existing) {
       domain: domainField.hidden ? '' : resolvedHostname(),
       proxyProtocol: type.value === 'udp' ? '' : proxyProtocol.value,
       rules: type.value === 'http' || type.value === 'https' ? readRules(ruleList) : [],
+      identity: data.get('identity') !== null,
+      websockets: data.get('websockets') !== null,
       enabled: data.get('enabled') !== null,
     };
     try {
@@ -774,6 +785,11 @@ function resourceBody(resource, overrides) {
     listenPort: resource.listenPort,
     domain: resource.domain || '',
     proxyProtocol: resource.proxyProtocol || '',
+    // Carried through every edit, so toggling a resource cannot silently change
+    // what it forwards.
+    identity: !!resource.identity,
+    websockets: resource.websockets !== false,
+    rules: resource.rules || [],
     enabled: resource.enabled,
   };
   return Object.assign(body, overrides || {});

@@ -294,6 +294,15 @@ server needs to log or block by address. It is not applicable to UDP, and for
 HTTP resources each request gets its own backend connection so the header is
 always accurate.
 
+**WebSockets** work through HTTP and HTTPS resources: the upgrade is answered by
+the service, and from that moment the control node copies bytes both ways until
+either side closes, exactly like a TCP resource. The **WebSockets** switch in the
+publish form turns it off per resource (chat over an ordinary request/response
+proxy is not something you want to allow by accident); resources that do not
+mention it allow upgrades, and a refused upgrade gets a readable
+`501` instead of a broken socket. Identity control and access rules are evaluated
+*before* the upgrade, so a rule can still refuse the connection.
+
 ### Extra public addresses (exit nodes)
 
 By default resources listen on every address of the control node, so they answer

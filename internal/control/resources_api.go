@@ -47,6 +47,8 @@ type ResourceView struct {
 	Rules []access.Rule `json:"rules,omitempty"`
 	// Identity means a control node account is required to reach the resource.
 	Identity  bool   `json:"identity"`
+	// WebSockets says whether protocol upgrades pass through.
+	WebSockets bool  `json:"websockets"`
 	Active    int64  `json:"active"`
 	Total     uint64 `json:"total"`
 	RxBytes   uint64 `json:"rxBytes"`
@@ -141,6 +143,7 @@ func (s *Server) resourceViews() []ResourceView {
 			ProxyProtocol: r.ProxyProtocol,
 			Rules:         r.Rules,
 			Identity:      r.Identity,
+			WebSockets:    r.AllowsWebSockets(),
 			CreatedAt:     r.CreatedAt.UTC().Format(timeLayout),
 		}
 		if node, ok := nodes[r.ExitNodeID]; ok && node.Kind != store.ExitNodeControl {
@@ -409,6 +412,9 @@ type resourcePayload struct {
 	ProxyProtocol string          `json:"proxyProtocol"`
 	Rules         []access.Rule   `json:"rules"`
 	Identity      bool            `json:"identity"`
+	// WebSockets is a pointer: omitting it keeps the default, which allows
+	// protocol upgrades.
+	WebSockets *bool `json:"websockets"`
 }
 
 // targetPayload is one backend on the wire.
@@ -441,6 +447,7 @@ func (p resourcePayload) input() store.ResourceInput {
 		ProxyProtocol: p.ProxyProtocol,
 		Rules:         p.Rules,
 		Identity:      p.Identity,
+		WebSockets:    p.WebSockets,
 	}
 }
 

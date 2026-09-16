@@ -173,6 +173,25 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A protocol upgrade (WebSocket) becomes a tunnel between the client and the
+	// service, not a request and a response.
+	if isUpgrade(r) {
+		if !res.spec.WebSockets {
+			h.group.manager.observe(RequestEvent{
+				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+				Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+				Allowed: false, Reason: "websockets are disabled for this resource",
+				Status: http.StatusNotImplemented, Path: r.URL.Path,
+				DurationMs: time.Since(started).Milliseconds(),
+			})
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusNotImplemented)
+			_, _ = w.Write([]byte(h.group.manager.brand() + ": websockets are disabled for this resource\n"))
+			return
+		}
+		h.serveUpgrade(w, r, res, started)
+		return
+	}
 	res.stat.set.active.Add(1)
 	res.stat.set.total.Add(1)
 	defer res.stat.set.active.Add(-1)
@@ -217,6 +236,117 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+// isUpgrade reports whether the request asks to change protocol, which is how a
+// WebSocket connection starts.
+func isUpgrade(r *http.Request) bool {
+	if strings.TrimSpace(r.Header.Get("Upgrade")) == "" {
+		return false
+	}
+	for _, value := range r.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// serveUpgrade hands the client's connection to the service and copies bytes both
+// ways until either side closes. Everything before the upgrade - the identity
+// check and the access rules - has already run, so a rule can still refuse it.
+func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res *resource, started time.Time) {
+	response, chosen, err := h.roundTrip(res, r)
+	if err != nil {
+		res.stat.setError(err)
+		h.group.manager.observe(RequestEvent{
+			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
+			DurationMs: time.Since(started).Milliseconds(),
+		})
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
+		return
+	}
+	defer response.Body.Close()
+	res.stat.setError(nil)
+
+	// The service did not upgrade (an ordinary request, or it refused): relay the
+	// answer as usual so the client sees why.
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		copyHeader(w.Header(), response.Header)
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(w, response.Body)
+		h.group.manager.observe(RequestEvent{
+			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
+			DurationMs: time.Since(started).Milliseconds(),
+		})
+		return
+	}
+
+	upstream, ok := response.Body.(io.ReadWriteCloser)
+	if !ok {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(h.group.manager.brand() + ": the service upgraded, but the connection is not usable\n"))
+		return
+	}
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(h.group.manager.brand() + ": this connection cannot be upgraded\n"))
+		return
+	}
+	client, buffered, err := hijacker.Hijack()
+	if err != nil {
+		res.stat.setError(err)
+		return
+	}
+	defer client.Close()
+	defer upstream.Close()
+
+	// Replay the handshake the service sent, and then step aside.
+	_, _ = buffered.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+	_ = response.Header.Write(buffered)
+	_, _ = buffered.WriteString("\r\n")
+	if err := buffered.Flush(); err != nil {
+		return
+	}
+	h.group.manager.observe(RequestEvent{
+		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+		Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+		Allowed: true, Status: http.StatusSwitchingProtocols, Path: r.URL.Path,
+		DurationMs: time.Since(started).Milliseconds(),
+	})
+
+	// Count the bytes the same way a TCP resource does, so the counters stay
+	// meaningful for a socket that can live for hours.
+	sets := []*counters{&res.stat.set, &res.stat.targetFor(chosen.ID).set}
+	for _, set := range sets {
+		set.active.Add(1)
+		set.total.Add(1)
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(upstream, io.TeeReader(buffered, countWriter{sets}))
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, io.TeeReader(upstream, reverseWriter{sets}))
+		done <- struct{}{}
+	}()
+	<-done
+	// Closing both ends unblocks the other direction.
+	_ = client.Close()
+	_ = upstream.Close()
+	<-done
+	for _, set := range sets {
+		set.active.Add(-1)
 	}
 }
 

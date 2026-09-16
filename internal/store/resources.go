@@ -130,6 +130,9 @@ type Resource struct {
 	ProxyProtocol string `json:"proxyProtocol,omitempty"`
 	// Identity requires a control node account before a request is forwarded.
 	Identity bool `json:"identity,omitempty"`
+	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
+	// resource. Unset means yes: it is what a reverse proxy is expected to do.
+	WebSockets *bool `json:"websockets,omitempty"`
 	// Rules decide who may reach the resource, evaluated in order.
 	Rules     []access.Rule `json:"rules,omitempty"`
 	CreatedAt time.Time     `json:"createdAt"`
@@ -140,6 +143,16 @@ type Resource struct {
 	AgentID    uint32 `json:"agentId,omitempty"`
 	TargetHost string `json:"targetHost,omitempty"`
 	TargetPort int    `json:"targetPort,omitempty"`
+}
+
+// AllowsWebSockets reports whether protocol upgrades may pass through. Resources
+// created before the option existed, and every new one that does not turn it off,
+// allow them.
+func (r Resource) AllowsWebSockets() bool {
+	if r.WebSockets == nil {
+		return true
+	}
+	return *r.WebSockets
 }
 
 // EffectiveListenPort is the port the resource actually listens on.
@@ -232,6 +245,9 @@ type ResourceInput struct {
 	Enabled       *bool
 	ProxyProtocol string
 	Identity      bool
+	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
+	// is to allow upgrades.
+	WebSockets *bool
 	Rules         []access.Rule
 	Notes         string
 }
@@ -420,6 +436,12 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		return Resource{}, fmt.Errorf("%w: access rules need http or https, because %s cannot read a country or hostname",
 			ErrBadResource, in.Protocol)
 	}
+	// Only HTTP and HTTPS can carry an upgrade, so the setting means nothing for
+	// the other protocols and is not stored for them.
+	websockets := in.WebSockets
+	if !in.Protocol.ByName() {
+		websockets = nil
+	}
 	rules := append([]access.Rule(nil), in.Rules...)
 	for i := range rules {
 		if err := rules[i].Validate(); err != nil {
@@ -436,6 +458,7 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		Domain:     domain,
 		Enabled:    true,
 		Identity:   in.Identity,
+		WebSockets: websockets,
 		Rules:      rules,
 		Notes:      strings.TrimSpace(in.Notes),
 	}
