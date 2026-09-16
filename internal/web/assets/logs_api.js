@@ -34,7 +34,9 @@ function trafficChart(title, rows) {
       class: 'bar-row',
       title: row.total + ' requests, ' + row.blocked + ' blocked',
     },
-      h('span', { class: 'code', text: label.length > 10 ? label.slice(0, 10) + '…' : label }),
+      // The stylesheet clips a long label, so pass the whole name through: the
+      // row's title carries the numbers and the span its name.
+      h('span', { class: 'code', title: label, text: label }),
       h('div', { class: 'bar-track' },
         h('div', {
           class: 'bar-fill' + (row.blocked === row.total ? ' is-blocked' : ''),
@@ -57,19 +59,19 @@ function renderRequests(node, recent) {
   }
   node.append(h('table', null,
     h('thead', null, h('tr', null,
-      h('th', null, 'Time'), h('th', null, 'Host'), h('th', null, 'Client'), h('th', null, 'Country'),
-      h('th', null, 'Decision'), h('th', null, 'Resource'))),
-    h('tbody', null, recent.map((entry) => h('tr', null,
-      h('td', { title: absTime(entry.time) }, relTime(entry.time)),
+      h('th', null, 'Timestamp'), h('th', null, 'Host'), h('th', null, 'Client'), h('th', null, 'Country'),
+      h('th', null, 'Resource'), h('th', null, 'Decision'))),
+    h('tbody', null, recent.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
+      // The exact time, with the relative one on hover: a log is read by
+      // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
+      h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
       h('td', { class: 'mono tiny' }, entry.host || '—'),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
       h('td', null, entry.country
         ? h('span', { class: 'chip chip-quiet' }, entry.country)
         : h('span', { class: 'muted tiny' }, 'unknown')),
-      h('td', null, entry.allowed
-        ? h('span', { class: 'chip chip-direct' }, 'allowed')
-        : h('span', { class: 'chip chip-fail', title: entry.reason || '' }, 'blocked')),
-      h('td', { class: 'muted tiny' }, entry.resource || '—'))))));
+      h('td', { class: 'muted tiny' }, entry.resource || '—'),
+      h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
 }
 
 // renderErrors lists everything that went wrong: DNS automation, certificate

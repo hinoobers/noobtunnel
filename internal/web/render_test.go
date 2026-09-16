@@ -48,17 +48,29 @@ class Node {}
 
 function fakeEl(tag = 'div') {
   const el = new Node();
+  // Text children become text nodes, the way a browser does it, so the tests can
+  // read what a cell or a label actually says.
+  const asNode = (kid) => {
+    if (kid && typeof kid === 'object') return kid;
+    const textNode = new Node();
+    textNode.textContent = String(kid);
+    return textNode;
+  };
   Object.assign(el, {
     tagName: String(tag).toUpperCase(),
     childNodes: [], dataset: {}, style: {}, files: [],
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     hidden: false, value: '', textContent: '', innerHTML: '', checked: false,
     required: false, placeholder: '', src: '', disabled: false,
-    append(...kids) { el.childNodes.push(...kids.flat()); kids.flat().forEach((k) => { if (k && typeof k === 'object') k.parentElement = el; }); },
-    appendChild(kid) { el.childNodes.push(kid); if (kid && typeof kid === 'object') kid.parentElement = el; return kid; },
-    replaceChildren(...kids) { el.childNodes = kids.flat(); el.childNodes.forEach((k) => { if (k && typeof k === 'object') k.parentElement = el; }); },
+    append(...kids) { kids.flat().map(asNode).forEach((k) => { k.parentElement = el; el.childNodes.push(k); }); },
+    appendChild(kid) { const node = asNode(kid); node.parentElement = el; el.childNodes.push(node); return node; },
+    replaceChildren(...kids) { el.childNodes = kids.flat().map(asNode); el.childNodes.forEach((k) => { k.parentElement = el; }); },
     remove() {}, focus() {}, blur() {}, select() {}, reset() {},
-    setAttribute() {}, removeAttribute() {}, getAttribute() { return null; },
+    // Attributes are recorded: the tests check the classes the renderers set.
+    attrs: {},
+    setAttribute(name, value) { el.attrs[name] = String(value); if (name === 'class') el.className = String(value); },
+    removeAttribute(name) { delete el.attrs[name]; },
+    getAttribute(name) { return name in el.attrs ? el.attrs[name] : null; },
     addEventListener() {}, removeEventListener() {}, contains() { return false; },
     scrollIntoView() {}, querySelector() { return fakeEl('div'); },
     querySelectorAll() { return []; }, closest() { return null; },
@@ -211,6 +223,40 @@ renderDomains(node, node, state.data.domains);
 renderExitNodes(node, node, state.data.exitNodes);
 renderCharts(node, { total: 3, allowed: 2, blocked: 1, countries: [{ country: 'EE', total: 2, blocked: 1 }], hosts: [] });
 renderRequests(node, [{ time: new Date().toISOString(), host: 'a.example.com', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' }]);
+
+// The Requests table: timestamps rather than "2m ago", the resource before the
+// decision, and the decision said in the row colour rather than in a pill.
+const requestsNode = document.createElement('div');
+renderRequests(requestsNode, [
+  { time: new Date().toISOString(), host: 'a.example.com', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' },
+  { time: new Date().toISOString(), host: 'b.example.com', ip: '203.0.113.2', country: 'RU', allowed: false, reason: 'country rule', resource: 'web' },
+]);
+const requestsTable = requestsNode.childNodes[0];
+const headers = textsOf(requestsTable.childNodes[0]).join(',');
+if (headers !== 'Timestamp,Host,Client,Country,Resource,Decision') {
+  throw new Error('the Requests table headers are wrong: ' + headers);
+}
+const rowClasses = requestsTable.childNodes[1].childNodes.map((row) => row.getAttribute('class'));
+if (rowClasses[0] !== 'is-allowed' || rowClasses[1] !== 'is-blocked') {
+  throw new Error('each request row should carry its decision: ' + rowClasses.join(', '));
+}
+const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[5]);
+const decisionText = decisionCells.map((cell) => textsOf(cell).join(''));
+if (decisionText[0] !== 'allowed' || decisionText[1] !== 'blocked') {
+  throw new Error('the decision should be plain text: ' + decisionText.join(', '));
+}
+if (decisionCells.some((cell) => cell.childNodes.some((kid) =>
+  typeof kid.getAttribute === 'function' && (kid.getAttribute('class') || '').includes('chip')))) {
+  throw new Error('the decision cell should not hold a pill any more');
+}
+
+// The chart keeps the whole label and lets the stylesheet clip it; a hostname
+// used to run into its own bar.
+const hostChart = trafficChart('Requests by hostname', [{ country: 'phpmyadmin', total: 4, blocked: 0 }]);
+const labelSpan = hostChart.childNodes[1].childNodes[0];
+if (labelSpan.textContent !== 'phpmyadmin') {
+  throw new Error('the chart label was truncated in the markup: ' + labelSpan.textContent);
+}
 installTabs(node);
 drawerBody(agent);
 resourceEditorPage(null);
