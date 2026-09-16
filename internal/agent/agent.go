@@ -54,8 +54,11 @@ type Options struct {
 	Direct bool
 	// KeepInterface leaves the WireGuard device up when the agent exits.
 	KeepInterface bool
-	Logger        *slog.Logger
-	Backend       wg.Backend
+	// SetupSystem opens the host firewall for the mesh interface at startup. It is
+	// on by default in the CLI; false leaves the firewall completely alone.
+	SetupSystem bool
+	Logger      *slog.Logger
+	Backend     wg.Backend
 	// DialTimeout bounds a single control connection attempt.
 	DialTimeout time.Duration
 }
@@ -84,6 +87,8 @@ type Agent struct {
 	identity  *Identity
 	backend   wg.Backend
 	advertise []string
+	// hostRunner runs host commands (the firewall setup); injectable for tests.
+	hostRunner hostRunner
 
 	mu          sync.Mutex
 	session     *sessionState
@@ -251,6 +256,13 @@ func (a *Agent) lastError() string {
 // or the control node revokes this agent.
 func (a *Agent) Run(ctx context.Context) error {
 	defer a.shutdown()
+	// The mesh interface is this machine's, so the host firewall has to accept
+	// traffic on it: a default-deny firewall answers every packet from the tunnel
+	// with ICMP host-prohibited, which looks like "no route to host" on the
+	// control node while the service here is fine.
+	if runtime.GOOS == "linux" {
+		a.setupHost(ctx)
+	}
 	backoff := minBackoff
 	for {
 		start := time.Now()

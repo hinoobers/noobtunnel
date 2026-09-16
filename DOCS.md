@@ -414,7 +414,21 @@ like the bug it fixes.
    the control node, and the checklist on the dashboard. Missing `wg`,
    `wireguard-tools` or root shows up in **Logs -> Errors** as "the control node
    cannot program its WireGuard hub".
-3. **Is the agent's device configured?** The agent must show
+3. **Does the agent's firewall accept the traffic?** This is the one that looks
+   like a broken service and is not: with a default-deny firewall the tunnel
+   handshakes and the service answers on the machine itself, but every packet
+   from the mesh is answered with ICMP host-prohibited — which the control node
+   reports as `connect: no route to host`. The agent opens this itself at
+   startup: `ufw allow in on noobtun` (plus `ufw route allow in/out on noobtun`
+   when it advertises networks), or the equivalent `iptables -I INPUT/FORWARD`
+   rules when ufw is not in use, and `net.ipv4.ip_forward=1` for advertised
+   networks. `--setup-system=false` (or `NOOBTUNNEL_SETUP_SYSTEM=false`) turns
+   that off for operators who manage their own firewall; failures are logged and
+   reported to the control node. Check it by hand with `sudo iptables -S INPUT |
+   head` (a trailing `-j REJECT --reject-with icmp-host-prohibited` is the trap)
+   and `sudo tcpdump -ni noobtun port <port>` while connecting from the control
+   node.
+4. **Is the agent's device configured?** The agent must show
    `wireguard device in sync` in its log, and `wg show` on the machine (or in the
    container) must list a peer. An agent whose earlier sync failed keeps its
    interface and address — which is why the service still answers when you curl

@@ -26,6 +26,7 @@ func runAgent(args []string) error {
 		advertiseAll = fs.String("advertise-all", env("NOOBTUNNEL_ADVERTISE_ALL", "false"), "route every network this machine can reach")
 		direct       = fs.String("direct", env("NOOBTUNNEL_DIRECT", "true"), "attempt direct paths to other agents (true or false)")
 		keep         = fs.String("keep-interface", env("NOOBTUNNEL_KEEP_INTERFACE", "false"), "leave the WireGuard device up when the agent stops")
+		setupSystem  = fs.Bool("setup-system", envBool("NOOBTUNNEL_SETUP_SYSTEM", true), "accept mesh traffic in the host firewall and, when advertising networks, enable IP forwarding")
 		backendName  = fs.String("backend", env("NOOBTUNNEL_BACKEND", "kernel"), "WireGuard backend: kernel or fake")
 		logLevel     = fs.String("log-level", env("NOOBTUNNEL_LOG_LEVEL", "info"), "debug, info, warn or error")
 	)
@@ -55,6 +56,7 @@ func runAgent(args []string) error {
 		AdvertiseAll:    isTrue(*advertiseAll),
 		Direct:          isTrue(*direct),
 		KeepInterface:   isTrue(*keep),
+		SetupSystem:     *setupSystem,
 		Logger:          logger,
 		Backend:         backend,
 	})
