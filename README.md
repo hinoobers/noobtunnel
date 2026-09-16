@@ -49,29 +49,39 @@ and traffic keeps flowing instead of black-holing. See
 ### 1. Control node (VPS)
 
 On a fresh Ubuntu/Debian server with a domain pointing at it, one command does
-the whole setup and gets the certificate for you. It asks a few questions, checks
-every answer, and refuses to go on while something would break:
+the whole setup and gets the certificate for you:
 
 ```sh
-# build the binaries, then copy them and the scripts to the server
-./scripts/build.sh
-scp -r scripts dist root@YOUR.VPS.IP:/root/noobtunnel/
-
-# on the server: answer a few questions, the installer does the rest
-ssh root@YOUR.VPS.IP
-cd /root/noobtunnel
-sudo bash scripts/install-server.sh
+curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/install-server.sh | sudo bash
 ```
 
-The questions are the domain to publish on, your email for Let's Encrypt, whether
-to keep the default ports, and the admin password (press Enter and one is
+It downloads the installer, asks a few questions, checks every answer, and
+refuses to go on while something would break. The questions are the domain to
+publish on, your email for Let's Encrypt, whether to keep the default ports, and
+the admin password (press Enter and one is
 generated for you). Everything else is checked before it is used: the hostname
 must be a name a certificate authority can validate, its A record must point at
 this server, ports 80, 443, 8443/tcp and 51820/udp must be free (it names what
 holds one if not), and a weak or mistyped password is refused. Only after the
 summary is confirmed does it write anything: `/etc/noobtunnel/server.env`, a
 systemd unit, the control node plus the agent binaries it hands out, firewall
-rules and the WireGuard interface. Re-running it is safe.
+rules and the WireGuard interface, and then it waits for the certificate.
+Re-running it is safe.
+
+Without network access to GitHub, or to install the binaries you built yourself,
+copy the repository next to the script and run the same installer from there:
+
+```sh
+sudo bash scripts/install-server.sh
+```
+
+If the repository is private, GitHub serves the file only with a token, and the
+installer needs the same token to download the binaries:
+
+```sh
+export NOOBTUNNEL_GITHUB_TOKEN=github_pat_...
+curl -fsSL -H "Authorization: Bearer $NOOBTUNNEL_GITHUB_TOKEN" https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/install-server.sh | sudo NOOBTUNNEL_GITHUB_TOKEN="$NOOBTUNNEL_GITHUB_TOKEN" bash
+```
 
 Afterwards the control node is reachable on the domain, and the certificate is
 obtained by the control node itself:
@@ -88,7 +98,7 @@ reachable from the internet and nothing else may hold them.
 To remove noobtunnel again, with everything it created:
 
 ```sh
-sudo bash scripts/uninstall-server.sh
+curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/uninstall-server.sh | sudo bash
 ```
 
 It lists every service, directory, key, certificate, rule and copy it found, asks
@@ -98,30 +108,24 @@ for one confirmation, and then deletes all of it — see
 Without a domain the UI stays on `https://YOUR.VPS.IP:8443` with a self-signed
 certificate.
 
-To do the same by hand, without a domain:
-
-Build the binaries locally (or use `dist/` if it is already there):
-
-```sh
-./scripts/build.sh            # Linux/macOS;  scripts\build.ps1 on Windows
-```
-
-Copy the control node binary and deploy it:
+To do the same by hand, without a domain: build the binaries with
+`./scripts/build.sh` (on Windows `scripts\build.ps1`), then copy the control node
+to the server:
 
 ```sh
 scp dist/noobtunnel_linux_amd64 root@YOUR.VPS.IP:/usr/local/bin/noobtunnel
-ssh root@YOUR.VPS.IP
+```
 
-mkdir -p /usr/local/share/noobtunnel
-# upload the agent binaries too, they are what new machines download:
-#   scp dist/noobtunnel_linux_* root@YOUR.VPS.IP:/usr/local/share/noobtunnel/
+Copy the agent binaries too, they are what new machines download:
 
-install -m 0644 deploy/noobtunnel-server.service /etc/systemd/system/
-install -d -m 0700 /etc/noobtunnel
-cp deploy/server.env.example /etc/noobtunnel/server.env   # edit it
-systemctl daemon-reload
-systemctl enable --now noobtunnel-server
-journalctl -u noobtunnel-server -n 40
+```sh
+scp dist/noobtunnel_linux_* root@YOUR.VPS.IP:/usr/local/share/noobtunnel/
+```
+
+Copy `deploy/` to the server as well, then run this on the server:
+
+```sh
+ssh root@YOUR.VPS.IP 'install -d -m 0700 /etc/noobtunnel /usr/local/share/noobtunnel && install -m 0644 deploy/noobtunnel-server.service /etc/systemd/system/noobtunnel-server.service && cp -n deploy/server.env.example /etc/noobtunnel/server.env && systemctl daemon-reload && systemctl enable --now noobtunnel-server && journalctl -u noobtunnel-server -n 40'
 ```
 
 The first start prints a generated admin password and the certificate
@@ -138,10 +142,10 @@ Open these ports on the VPS:
 | 51820 | UDP | WireGuard hub; agents dial it and it relays traffic |
 
 ```sh
-# ufw
 ufw allow 8443/tcp && ufw allow 51820/udp
-# nftables / iptables users: allow tcp 8443 and udp 51820
 ```
+
+nftables or iptables users: allow tcp 8443 and udp 51820 instead.
 
 The control node also needs IP forwarding + FORWARD rules so it can relay between
 agents. It applies those itself on start (`--setup-system`, on by default) and the
@@ -153,9 +157,11 @@ In the UI click **Add agent**, give it a name, and copy the command. Paste it in
 the Linux machine you want on the mesh:
 
 ```sh
-curl -fsSLk --retry 3 --pinnedpubkey 'sha256//…' https://YOUR.VPS.IP:8443/install.sh \
-  | sudo sh -s -- --server YOUR.VPS.IP:8443 --token nt_… --fingerprint 12:34:… --name homelab-nas
+curl -fsSLk --retry 3 --pinnedpubkey 'sha256//…' https://YOUR.VPS.IP:8443/install.sh | sudo sh -s -- --server YOUR.VPS.IP:8443 --token nt_… --fingerprint 12:34:… --name homelab-nas
 ```
+
+The **Add agent** button writes that line for you, with the real pin, token and
+fingerprint, as one command.
 
 That one line installs `wireguard-tools`, downloads the agent, verifies the
 control node's certificate fingerprint, writes a systemd unit and starts it. No
@@ -317,9 +323,12 @@ Create an API token in Settings and use it as a bearer token:
 
 ```sh
 curl -fsSk -H "Authorization: Bearer ntapi_…" https://YOUR.VPS.IP:8443/api/state
-curl -fsSk -H "Authorization: Bearer ntapi_…" -H 'Content-Type: application/json' \
-  -d '{"name":"new-box","advertise":["192.168.1.0/24"]}' \
-  https://YOUR.VPS.IP:8443/api/agents
+```
+
+Create an agent with one command too:
+
+```sh
+curl -fsSk -H "Authorization: Bearer ntapi_…" -H 'Content-Type: application/json' -d '{"name":"new-box","advertise":["192.168.1.0/24"]}' https://YOUR.VPS.IP:8443/api/agents
 ```
 
 | Endpoint | Purpose |
@@ -381,22 +390,23 @@ the agents already there), so demo runs persist too.
 
 ## Operations
 
+State on the control node lives in `/var/lib/noobtunnel/state.json` (mesh keys,
+agent tokens), `/var/lib/noobtunnel/auth.json` (accounts: the first one comes
+from the installer's password prompt) and `/var/lib/noobtunnel/cert.pem` with
+`key.pem`. Back that directory up and keep it private. Agents keep their own
+identity in `/var/lib/noobtunnel/identity.json` (the private key, which survives
+reinstalls) and `/var/lib/noobtunnel/runtime.json` (what `noobtunnel status`
+shows).
+
+Remove an agent, keeping its identity so re-enrolling keeps its address:
+
 ```sh
-# state (keys, tokens, certificate) — back this up, keep it private
-/var/lib/noobtunnel/state.json
-/var/lib/noobtunnel/auth.json
-/var/lib/noobtunnel/cert.pem  key.pem
-
-# agent state on a member
-/var/lib/noobtunnel/identity.json   # private key, survives reinstalls
-/var/lib/noobtunnel/runtime.json    # what `noobtunnel status` shows
-
-# accounts live in auth.json: the first one comes from --admin-password,
-# further ones are created in the Users tab of the web UI
-
-# uninstall an agent (keeps its identity, so re-enrolling keeps the address)
 curl -fsSLk https://YOUR.VPS.IP:8443/install.sh | sudo sh -s -- --uninstall
-# …and to forget the machine entirely:
+```
+
+Forget the machine entirely:
+
+```sh
 curl -fsSLk https://YOUR.VPS.IP:8443/install.sh | sudo sh -s -- --uninstall --purge
 ```
 
@@ -407,8 +417,10 @@ sending **Restart tunnel** from the UI.
 ### Uninstalling
 
 ```sh
-sudo bash scripts/uninstall-server.sh
+curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/uninstall-server.sh | sudo bash
 ```
+
+Or, from the copy already on the machine: `sudo bash scripts/uninstall-server.sh`.
 
 The uninstaller looks for everything noobtunnel put on the machine and prints it
 before touching anything:

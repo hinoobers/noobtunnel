@@ -2,10 +2,8 @@
 .gocache/
 .gotmp/
 
-# Built binaries. `./scripts/build.sh` (or scripts\build.ps1) recreates them in
-# dist/, and the deploy flow copies them to the server from there. Commit them
-# with `git add -f dist` if you want release artifacts in the repository.
-dist/
+# Build leftovers (a binary that was still running when the build replaced it).
+*~
 
 # Editor and OS noise.
 .DS_Store

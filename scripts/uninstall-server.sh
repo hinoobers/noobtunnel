@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # noobtunnel uninstaller.
 #
+# Both of these work; both ask the same single question:
+#
+#   curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/uninstall-server.sh | sudo bash
 #   sudo bash scripts/uninstall-server.sh
 #
 # Asks one question, then removes everything noobtunnel created on this machine:
@@ -14,7 +17,14 @@ set -euo pipefail
 
 # Test hook used by scripts/selftest-installer.sh; empty on a real server.
 SYSROOT="${NOOBTUNNEL_SYSROOT:-}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Where this script came from; empty when it was piped into bash.
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+ROOT=""
+if [ -n "${SCRIPT_PATH}" ] && [ -f "${SCRIPT_PATH}" ]; then
+	ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+fi
+RAW_BASE="https://raw.githubusercontent.com/${NOOBTUNNEL_GITHUB_REPO:-hinoobers/noobtunnel}/${NOOBTUNNEL_GITHUB_REF:-main}"
 
 CONF_DIR="${SYSROOT}/etc/noobtunnel"
 STATE_DIR="${SYSROOT}/var/lib/noobtunnel"
@@ -48,6 +58,24 @@ die() {
 	[ "$#" -gt 1 ] && printf '    %sfix:%s %s\n' "$C_BOLD" "$C_OFF" "$2" >&2
 	printf '\n' >&2
 	exit 1
+}
+
+# The confirmation is read from the terminal, not from stdin: when this script
+# itself is piped into bash (`curl … | sudo bash`), stdin is the script text.
+INPUT_FD="0"
+setup_input() {
+	if [ "${NOOBTUNNEL_NO_TTY:-0}" != "1" ] && [ -r /dev/tty ]; then
+		if exec 3</dev/tty 2>/dev/null; then
+			INPUT_FD="3"
+			return 0
+		fi
+	fi
+	if [ -t 0 ] || [ -n "${ROOT}" ]; then
+		INPUT_FD="0"
+		return 0
+	fi
+	die "this uninstaller asks for confirmation, but no terminal is attached" \
+		"run it in a terminal: curl -fsSL ${RAW_BASE}/scripts/uninstall-server.sh | sudo bash"
 }
 
 banner() {
@@ -114,10 +142,24 @@ discover() {
 	[ -n "${WG_PORT}" ] && add_found "firewall rule for udp/${WG_PORT}"
 
 	CHECKOUT=""
-	if [ -f "${ROOT}/scripts/install-server.sh" ] && [ ! -d "${ROOT}/.git" ]; then
+	if [ -n "${ROOT}" ] && [ -f "${ROOT}/scripts/install-server.sh" ] && [ ! -d "${ROOT}/.git" ]; then
 		CHECKOUT="${ROOT}"
 		add_found "${CHECKOUT} (the noobtunnel copy this script runs from)"
 	fi
+}
+
+# confirm_once asks the one question this script asks. The answer is read from
+# the terminal, because stdin is the script itself when it is piped into bash.
+confirm_once() {
+	step "Confirmation"
+	echo "  Everything listed above will be deleted. This cannot be undone."
+	printf '%s?%s Type YES to remove all of it, anything else to stop: ' "${C_RED}${C_BOLD}" "${C_OFF}"
+	local answer=""
+	IFS= read -r -u "${INPUT_FD}" answer || answer=""
+	case "${answer}" in
+		YES|yes|Yes|y|Y) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 # service_installed reports whether systemd knows about a unit.
@@ -170,18 +212,6 @@ for node in state.get("exitNodes") or []:
     if node.get("address") and kind in ("gre", "address"):
         print("addr\t%s\t%s" % (node["address"], node.get("interface") or iface))
 PY
-}
-
-confirm_once() {
-	step "Confirmation"
-	echo "  Everything listed above will be deleted. This cannot be undone."
-	printf '%s?%s Type YES to remove all of it, anything else to stop: ' "${C_RED}${C_BOLD}" "${C_OFF}"
-	local answer=""
-	IFS= read -r answer || answer=""
-	case "${answer}" in
-		YES|yes|Yes|y|Y) return 0 ;;
-		*) return 1 ;;
-	esac
 }
 
 # ---------------------------------------------------------------- removing ----
@@ -357,12 +387,14 @@ if [ "$#" -gt 0 ]; then
 fi
 
 if [ "$(id -u)" != "0" ]; then
-	if command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
-		exec sudo bash "$0" "$@"
+	if [ -n "${ROOT}" ] && command -v sudo >/dev/null 2>&1; then
+		exec sudo bash "${SCRIPT_PATH}" "$@"
 	fi
-	die "the uninstaller must run as root" "run it with: sudo bash $0"
+	die "the uninstaller must run as root" \
+		"run it with sudo: curl -fsSL ${RAW_BASE}/scripts/uninstall-server.sh | sudo bash"
 fi
 
+setup_input
 discover
 if [ "${#FOUND_ITEMS[@]}" -eq 0 ]; then
 	printf '\n'

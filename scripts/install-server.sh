@@ -3,8 +3,10 @@
 #
 # Interactive on purpose: run it and it asks for the few things it needs, checks
 # every answer before using it, and refuses to continue while something would go
-# wrong. There is nothing to remember and nothing to pass on the command line:
+# wrong. There is nothing to remember and nothing to pass on the command line.
+# Both of these work, and both ask the same questions:
 #
+#   curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/install-server.sh | sudo bash
 #   sudo bash scripts/install-server.sh
 #
 # The certificate for the domain is obtained by the control node itself, over
@@ -13,7 +15,22 @@ set -euo pipefail
 
 # Test hook used by scripts/selftest-installer.sh; empty on a real server.
 SYSROOT="${NOOBTUNNEL_SYSROOT:-}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Where this script came from. Empty when it was piped into bash
+# (`curl … | sudo bash`), in which case there are no files next to it.
+SCRIPT_PATH="${BASH_SOURCE[0]:-}"
+ROOT=""
+if [ -n "${SCRIPT_PATH}" ] && [ -f "${SCRIPT_PATH}" ]; then
+	ROOT="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
+fi
+
+# Where the binaries and updates come from. Override the repository when you
+# fork, and pass a token for a private repository.
+GITHUB_REPO="${NOOBTUNNEL_GITHUB_REPO:-hinoobers/noobtunnel}"
+GITHUB_REF="${NOOBTUNNEL_GITHUB_REF:-main}"
+GITHUB_TOKEN="${NOOBTUNNEL_GITHUB_TOKEN:-}"
+RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_REF}"
+RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
 
 CONF_DIR="${SYSROOT}/etc/noobtunnel"
 ENV_FILE="${CONF_DIR}/server.env"
@@ -42,6 +59,7 @@ else
 fi
 
 step() { printf '\n%s==>%s %s\n' "$C_CYAN" "$C_OFF" "$*"; }
+log()  { printf '  %s\n' "$*"; }
 ok()   { printf '  %sok%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
 warn() { printf '  %s!%s %s\n' "$C_YELLOW" "$C_OFF" "$*" >&2; }
 bad()  { printf '  %sx%s %s\n' "$C_RED" "$C_OFF" "$*" >&2; }
@@ -73,6 +91,26 @@ EOF
 }
 
 # ask prints a question and puts the answer (or the default) into REPLY.
+# The questions come from the terminal, not from stdin: when the installer
+# itself is piped into bash (`curl … | sudo bash`), stdin is the script text.
+INPUT_FD="0"
+setup_input() {
+	if [ "${NOOBTUNNEL_NO_TTY:-0}" != "1" ] && [ -r /dev/tty ]; then
+		if exec 3</dev/tty 2>/dev/null; then
+			INPUT_FD="3"
+			return 0
+		fi
+	fi
+	# Without a terminal the answers can still come from stdin, which is the case
+	# when the script is a file: printf 'answers\n' | sudo bash install-server.sh
+	if [ -t 0 ] || [ -n "${ROOT}" ]; then
+		INPUT_FD="0"
+		return 0
+	fi
+	die "this installer asks questions, but no terminal is attached" \
+		"run it in a terminal: curl -fsSL ${RAW_BASE}/scripts/install-server.sh | sudo bash"
+}
+
 ask() {
 	local question="$1" default="${2:-}"
 	if [ -n "${default}" ]; then
@@ -80,8 +118,8 @@ ask() {
 	else
 		printf '%s?%s %s: ' "${C_CYAN}" "${C_OFF}" "${question}"
 	fi
-	IFS= read -r REPLY ||
-		die "the installer needs an interactive terminal" "run it directly: sudo bash $0"
+	IFS= read -r -u "${INPUT_FD}" REPLY ||
+		die "no answer was given" "run the installer in a terminal and answer the questions"
 	REPLY="${REPLY#"${REPLY%%[![:space:]]*}"}"
 	REPLY="${REPLY%"${REPLY##*[![:space:]]}"}"
 	if [ -z "${REPLY}" ]; then
@@ -93,7 +131,8 @@ ask() {
 ask_secret() {
 	local question="$1"
 	printf '%s?%s %s: ' "${C_CYAN}" "${C_OFF}" "${question}"
-	IFS= read -rs REPLY || die "the installer needs an interactive terminal"
+	IFS= read -rs -u "${INPUT_FD}" REPLY ||
+		die "no answer was given" "run the installer in a terminal and answer the questions"
 	printf '\n'
 	if [ -z "${REPLY}" ]; then
 		REPLY=""
@@ -188,11 +227,12 @@ check_host() {
 	ok "operating system: Linux"
 
 	if [ "$(id -u)" != "0" ]; then
-		if command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
+		if [ -n "${ROOT}" ] && command -v sudo >/dev/null 2>&1; then
 			step "Restarting the installer with root rights"
-			exec sudo bash "$0" "$@"
+			exec sudo bash "${SCRIPT_PATH}" "$@"
 		fi
-		die "the installer must run as root" "run it with: sudo bash $0"
+		die "the installer must run as root" \
+			"run it with sudo: curl -fsSL ${RAW_BASE}/scripts/install-server.sh | sudo bash"
 	fi
 	ok "running as root"
 
@@ -226,39 +266,107 @@ check_host() {
 	fi
 }
 
+# check_binaries only looks: where the binaries come from is decided by
+# fetch_binaries once the operator has confirmed the summary.
 check_binaries() {
 	step "Checking the noobtunnel binaries"
 	ARCH="${ARCH:-$(detect_arch)}"
-	CONTROL_BINARY=""
-	for candidate in "${ROOT}/dist/noobtunnel_linux_${ARCH}" "${ROOT}/noobtunnel_linux_${ARCH}"; do
-		if [ -f "${candidate}" ]; then
-			CONTROL_BINARY="${candidate}"
+	BINARY_DIR=""
+	local candidate
+	for candidate in "${ROOT:+${ROOT}/dist}" "${ROOT}"; do
+		[ -n "${candidate}" ] || continue
+		if [ -f "${candidate}/noobtunnel_linux_${ARCH}" ]; then
+			BINARY_DIR="${candidate}"
 			break
 		fi
 	done
-	if [ -z "${CONTROL_BINARY}" ]; then
-		die "the control node binary for linux/${ARCH} was not found next to this script" \
-			"on your own machine run ./scripts/build.sh, then copy the whole dist folder here next to scripts/"
-	fi
-	ok "control node binary: ${CONTROL_BINARY}"
-	if command -v file >/dev/null 2>&1; then
-		case "$(file -b "${CONTROL_BINARY}" 2>/dev/null || true)" in
-			*ELF*) ;;
-			*)
-				warn "that file does not look like a Linux executable"
-				warn "the usual cause is copying the Windows or macOS binary by mistake"
-				;;
-		esac
-	fi
-
-	AGENT_DIR=""
-	if compgen -G "${ROOT}/dist/noobtunnel_linux_*" >/dev/null; then
-		AGENT_DIR="${ROOT}/dist"
-		ok "agent binaries to hand out: $(cd "${AGENT_DIR}" && ls noobtunnel_linux_* | tr '\n' ' ')"
+	if [ -n "${BINARY_DIR}" ]; then
+		ok "found binaries next to this script: ${BINARY_DIR}"
 	else
-		die "the agent binaries were not found" \
-			"enrolling a machine needs dist/noobtunnel_linux_*; build them with ./scripts/build.sh and copy dist/ here"
+		ok "no local binaries; they will be downloaded from ${GITHUB_REPO} when you confirm"
 	fi
+}
+
+# make_temp_dir finds a usable scratch directory, so a server with an unwritable
+# /tmp does not stop the download.
+make_temp_dir() {
+	local base dir
+	for base in "${TMPDIR:-/tmp}" "${SYSROOT}/tmp"; do
+		[ -n "${base}" ] || continue
+		mkdir -p "${base}" 2>/dev/null || true
+		if dir="$(mktemp -d "${base%/}/noobtunnel-install.XXXXXX" 2>/dev/null)"; then
+			printf '%s' "${dir}"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# download_file fetches a URL into a file, with a token for private repositories.
+download_file() {
+	local url="$1" dest="$2"
+	if [ -n "${GITHUB_TOKEN}" ]; then
+		curl -fsSL --retry 2 --max-time 300 -H "Authorization: Bearer ${GITHUB_TOKEN}" -o "${dest}" "${url}"
+	else
+		curl -fsSL --retry 2 --max-time 300 -o "${dest}" "${url}"
+	fi
+}
+
+# download_binaries fills dest from the base URL, or fails without changing it.
+download_binaries() {
+	local base="$1" dest="$2" arch file magic
+	mkdir -p "${dest}"
+	file="${dest}/noobtunnel_linux_${ARCH}"
+	download_file "${base}/noobtunnel_linux_${ARCH}" "${file}" 2>/dev/null || return 1
+	# A real Linux binary, not an error page curl saved for us.
+	magic="$(head -c 4 "${file}" | od -An -tx1 | tr -d ' \n')"
+	[ "${magic}" = "7f454c46" ] || return 1
+	# Agent binaries are what enrolling machines download: take what exists.
+	for arch in amd64 arm64 armv7 386; do
+		download_file "${base}/noobtunnel_linux_${arch}" "${dest}/noobtunnel_linux_${arch}" 2>/dev/null ||
+			rm -f "${dest}/noobtunnel_linux_${arch}"
+	done
+	# Verify checksums when the source publishes them.
+	if download_file "${base}/SHA256SUMS" "${dest}/SHA256SUMS" 2>/dev/null; then
+		if command -v sha256sum >/dev/null 2>&1; then
+			if ! (cd "${dest}" && sha256sum -c SHA256SUMS --ignore-missing >/dev/null 2>&1); then
+				warn "the downloaded binaries do not match the published checksums"
+				return 1
+			fi
+			ok "checksums verified"
+		fi
+	fi
+	[ -s "${file}" ] || return 1
+	return 0
+}
+
+# fetch_binaries picks the binaries up: locally when they are here, otherwise
+# from the repository (a release first, then the dist folder on the branch).
+fetch_binaries() {
+	step "Getting the noobtunnel binaries"
+	if [ -n "${BINARY_DIR}" ]; then
+		ok "using ${BINARY_DIR}"
+		return 0
+	fi
+	command -v curl >/dev/null 2>&1 ||
+		die "curl is needed to download the binaries" "install curl and run the installer again"
+	local tmp
+	tmp="$(make_temp_dir)" ||
+		die "no writable scratch directory was found" "free some space in /tmp and run the installer again"
+	local bases=()
+	[ -n "${NOOBTUNNEL_BINARY_URL:-}" ] && bases+=("${NOOBTUNNEL_BINARY_URL%/}")
+	bases+=("${RELEASE_BASE}" "${RAW_BASE}/dist")
+	local base
+	for base in "${bases[@]}"; do
+		log "trying ${base}"
+		if download_binaries "${base}" "${tmp}"; then
+			BINARY_DIR="${tmp}"
+			ok "downloaded: $(cd "${tmp}" && ls noobtunnel_linux_* | tr '\n' ' ')"
+			return 0
+		fi
+	done
+	die "the binaries could not be downloaded from ${GITHUB_REPO}" \
+		"either build them (./scripts/build.sh) and run this script next to dist/, or publish them in the repository (NOOBTUNNEL_GITHUB_TOKEN is used for a private repository)"
 }
 
 # --------------------------------------------------------------- questions ----
@@ -529,8 +637,8 @@ install_packages_if_needed() {
 install_files() {
 	step "Installing the control node"
 	mkdir -p "${BIN_DIR}" "${AGENT_SHARE}" "${CONF_DIR}" "${STATE_DIR}" "${UNIT_DIR}"
-	install -m 0755 "${CONTROL_BINARY}" "${BIN}"
-	cp -f "${AGENT_DIR}"/noobtunnel_linux_* "${AGENT_SHARE}/"
+	install -m 0755 "${BINARY_DIR}/noobtunnel_linux_${ARCH}" "${BIN}"
+	cp -f "${BINARY_DIR}"/noobtunnel_linux_* "${AGENT_SHARE}/"
 	chmod 0644 "${AGENT_SHARE}"/noobtunnel_linux_*
 	chmod 0700 "${STATE_DIR}"
 	ok "${BIN}"
@@ -662,6 +770,7 @@ if [ "$#" -gt 0 ]; then
 	warn "this installer takes no options: it asks for everything it needs"
 	warn "ignoring: $*"
 fi
+setup_input
 check_host
 check_binaries
 ask_domain
@@ -687,6 +796,7 @@ if ! confirm "install now?" "y"; then
 fi
 
 install_packages_if_needed
+fetch_binaries
 install_files
 write_config
 open_firewall
@@ -733,7 +843,10 @@ Day to day:
   systemctl status ${SERVICE}
   journalctl -u ${SERVICE} -f
   ${BIN} doctor
-
-To remove noobtunnel and everything it created:
-  sudo bash ${ROOT}/scripts/uninstall-server.sh
 EOF
+
+if [ -n "${ROOT}" ]; then
+	printf '\nTo remove noobtunnel and everything it created:\n  sudo bash %s/scripts/uninstall-server.sh\n' "${ROOT}"
+else
+	printf '\nTo remove noobtunnel and everything it created:\n  curl -fsSL %s/scripts/uninstall-server.sh | sudo bash\n' "${RAW_BASE}"
+fi

@@ -101,11 +101,31 @@ EOF
 
 	cat > "${FAKE}/curl" <<'EOF'
 #!/usr/bin/env bash
+out=""
+url=""
+prev=""
 for arg in "$@"; do
 	case "${arg}" in
 		*api.ipify.org*) echo "${FAKE_IP:-203.0.113.10}"; exit 0 ;;
+		*api/health*) [ "${FAKE_HEALTH:-ok}" = "ok" ] && exit 0 || exit 7 ;;
 	esac
+	if [ "${prev}" = "-o" ]; then
+		out="${arg}"
+	fi
+	case "${arg}" in
+		http*) url="${arg}" ;;
+	esac
+	prev="${arg}"
 done
+# A file server for the download path: the file named after the URL's basename.
+if [ -n "${url}" ] && [ -n "${FAKE_DL_DIR:-}" ]; then
+	name="$(basename "${url}")"
+	if [ -f "${FAKE_DL_DIR}/${name}" ]; then
+		[ -n "${out}" ] && cp -f "${FAKE_DL_DIR}/${name}" "${out}"
+		exit 0
+	fi
+	exit 22
+fi
 [ "${FAKE_HEALTH:-ok}" = "ok" ] && exit 0
 exit 7
 EOF
@@ -207,10 +227,12 @@ run_install() { # run_install answers...
 	shift
 	printf '%s\n' "${answers}" |
 		env NOOBTUNNEL_SYSROOT="${SYSROOT}" \
+			NOOBTUNNEL_NO_TTY=1 \
 			PATH="${FAKE}:${PATH}" \
 			FAKE_IP="${FAKE_IP:-203.0.113.10}" \
 			FAKE_DNS="${FAKE_DNS:-yes}" \
 			FAKE_BUSY_PORT="${FAKE_BUSY_PORT:-}" \
+			FAKE_DL_DIR="${FAKE_DL_DIR:-}" \
 			FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
 			FAKE_LOG="${WORK}/systemctl.log" \
 			bash "${flags[@]}" "${CHECKOUT}/scripts/install-server.sh" "$@" 2>&1
@@ -220,6 +242,7 @@ run_uninstall() { # run_uninstall answers...
 	local answers="$1"
 	printf '%s\n' "${answers}" |
 		env NOOBTUNNEL_SYSROOT="${SYSROOT}" \
+			NOOBTUNNEL_NO_TTY=1 \
 			PATH="${FAKE}:${PATH}" \
 			FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
 			FAKE_LOG="${WORK}/systemctl.log" \
@@ -390,6 +413,61 @@ if printf '%s' "${OUT}" | grep -q "nothing to remove"; then
 else
 	fail "it reports that there is nothing to remove"
 fi
+
+printf '\n9. piped into bash without a terminal it explains itself\n'
+reset_state
+OUT="$(env NOOBTUNNEL_SYSROOT="${SYSROOT}" NOOBTUNNEL_NO_TTY=1 PATH="${FAKE}:${PATH}" \
+	FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
+	bash -s < "${REPO}/scripts/install-server.sh" 2>&1)"
+if printf '%s' "${OUT}" | grep -q "no terminal is attached"; then
+	pass "it says a terminal is needed instead of hanging"
+else
+	fail "it says a terminal is needed instead of hanging"
+fi
+if printf '%s' "${OUT}" | grep -q "install-server.sh | sudo bash"; then
+	pass "it shows the one line command to use"
+else
+	fail "it shows the one line command to use"
+fi
+check "nothing was installed" test ! -e "${SYSROOT}/etc/noobtunnel/server.env"
+if [ "${DEBUG:-0}" != "0" ]; then printf '%s\n' "----- test 9 -----"; printf '%s\n' "${OUT}" | tail -n 12; fi
+
+printf '\n10. without local binaries it downloads them from the repository\n'
+reset_state
+NODIST="${WORK}/nodist"
+mkdir -p "${NODIST}/scripts" "${WORK}/downloads"
+cp "${REPO}/scripts/install-server.sh" "${NODIST}/scripts/"
+# A stand-in for the published binaries: the download path checks the ELF magic.
+for arch in amd64 arm64 armv7 386; do
+	printf '\177ELF\002\001\001\000noobtunnel' > "${WORK}/downloads/noobtunnel_linux_${arch}"
+done
+if command -v sha256sum >/dev/null 2>&1; then
+	(cd "${WORK}/downloads" && sha256sum noobtunnel_linux_* > SHA256SUMS)
+fi
+OUT="$(printf '%s\n' "noobtunnel.mydomain.com
+you@example.com
+y
+
+y" | env NOOBTUNNEL_SYSROOT="${SYSROOT}" NOOBTUNNEL_NO_TTY=1 PATH="${FAKE}:${PATH}" \
+	FAKE_IP=203.0.113.10 \
+	FAKE_DL_DIR="${WORK}/downloads" \
+	FAKE_UNITS="${SYSROOT}/etc/systemd/system" \
+	bash "${NODIST}/scripts/install-server.sh" 2>&1)"
+if printf '%s' "${OUT}" | grep -q "downloaded:"; then
+	pass "it downloads the binaries"
+else
+	fail "it downloads the binaries"
+fi
+check "the downloaded control node was installed" \
+	grep -q "noobtunnel" "${SYSROOT}/usr/local/bin/noobtunnel"
+check "the downloaded agent binaries were published" \
+	test -f "${SYSROOT}/usr/local/share/noobtunnel/noobtunnel_linux_arm64"
+if printf '%s' "${OUT}" | grep -q "noobtunnel control node installed"; then
+	pass "the installation from the download completes"
+else
+	fail "the installation from the download completes"
+fi
+if [ "${DEBUG:-0}" != "0" ]; then printf '%s\n' "----- test 10 -----"; printf '%s\n' "${OUT}" | tail -n 16; fi
 
 printf '\n%s passed, %s failed\n\n' "${PASS}" "${FAIL}"
 [ "${FAIL}" -eq 0 ]
