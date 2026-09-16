@@ -15,6 +15,7 @@ security model and operations.
   - [Automatic DNS](#automatic-dns)
 - [Update](#update)
 - [Logs and errors](#logs-and-errors)
+  - [When a target is unreachable](#when-a-target-is-unreachable)
 - [Everyday use](#everyday-use)
 - [Accounts and roles](#accounts-and-roles-and-getting-back-in)
 - [Automation](#automation)
@@ -369,6 +370,32 @@ the domain or the ports.
 Running the installer on a machine that already has a control node offers the
 same update first (`update it to this build? [Y/n]`); answer no to walk through
 the full configuration again instead.
+
+### When a target is unreachable
+
+`dial tcp ADDRESS:PORT: connect: no route to host` means the control node has no
+route for that address, so the packet never enters a tunnel. In order:
+
+1. **Is this control node running a real mesh?** Settings -> Control node shows
+   the backend. `fake:...` means it was started with the demo flags
+   (`--backend fake`, and a simulated mesh): agents enrol and get addresses, but
+   no WireGuard device exists on the host, so every target fails exactly like
+   this. It appears in **Logs -> Errors** as "this control node runs with the
+   simulated WireGuard backend". Restart it without the demo flags.
+2. **Is the hub interface up?** `sudo wg show`, `ip -brief addr show noobtun` on
+   the control node, and the checklist on the dashboard. Missing `wg`,
+   `wireguard-tools` or root shows up in **Logs -> Errors** as "the control node
+   cannot program its WireGuard hub".
+3. **Is the agent's device configured?** The agent must show
+   `wireguard device in sync` in its log, and `wg show` on the machine (or in the
+   container) must list a peer. An agent whose earlier sync failed keeps its
+   interface and address — which is why the service still answers when you curl
+   it *on that machine* — while nothing arrives through the tunnel. Update the
+   agent and it will program the device.
+
+The Errors entry for a target quotes whichever of these the control node can see,
+so the "what to check" column names the side that is broken rather than the
+service behind it.
 
 ## Logs and errors
 

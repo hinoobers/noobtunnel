@@ -1248,14 +1248,23 @@ func (s *Server) recordResourceErrors() {
 			// tunnel is dead, which looks like "the service is down" from here.
 			detail := ts.LastError
 			hint := "check that the service listens on that address behind the agent and that the agent is online"
-			if sess, ok := sessions[target.AgentID]; ok && sess != nil {
+			s.mu.Lock()
+			hubErr, hubUp := s.hubErr, s.hubStatus.Exists
+			s.mu.Unlock()
+			if hubErr != "" || !hubUp {
+				hint = "the control node's own WireGuard hub is not up, so nothing can be reached through it"
+			} else if sess, ok := sessions[target.AgentID]; ok && sess != nil {
 				agentStats, _, _, _, _ := sess.snapshot()
 				switch {
 				case agentStats.LastError != "":
 					detail = strings.TrimSpace(detail + "\nthe agent reports: " + agentStats.LastError)
 					hint = "the agent is connected but its WireGuard device is not in sync, so nothing reaches it through the tunnel"
-				case len(agentStats.Routes) == 0:
-					detail = strings.TrimSpace(detail + "\nthe agent has not programmed any routes")
+				case agentStats.Interface == "":
+					detail = strings.TrimSpace(detail + "\nthe agent reports no WireGuard interface")
+					hint = "the agent's device does not exist on that machine; check its service or container logs"
+				case len(agentStats.PeerStats) == 0:
+					detail = strings.TrimSpace(detail + "\nthe agent's device has no peers configured")
+					hint = "the agent is connected but its WireGuard device was never configured; update the agent on that machine"
 				}
 			} else if ts.LastError != "" {
 				hint = "the agent is not connected right now, so the tunnel to it is down"
@@ -1276,6 +1285,28 @@ func (s *Server) recordResourceErrors() {
 		note(fmt.Sprintf("agent/%d", id), "agent",
 			who+" cannot program its WireGuard device", lastError,
 			"check wireguard-tools, the kernel module and NET_ADMIN on that machine")
+	}
+
+	// The hub is the thing every target is reached through: if the control node
+	// cannot program it, nothing is reachable no matter what the agents report.
+	s.mu.Lock()
+	hubErr, hubUp := s.hubErr, s.hubStatus.Exists
+	s.mu.Unlock()
+	switch {
+	case strings.HasPrefix(s.backend.Name(), "fake"):
+		// The demo backend simulates the mesh in memory: agents enroll, addresses
+		// are assigned, and nothing at all reaches the kernel, which is exactly
+		// what "no route to host" looks like from the proxy's point of view.
+		note("hub", "wireguard", "this control node runs with the simulated WireGuard backend",
+			"the mesh is not real: no interface or route exists on this host",
+			"restart the control node without --backend fake (or the demo flags) to run a real mesh")
+	case hubErr != "":
+		note("hub", "wireguard", "the control node cannot program its WireGuard hub", hubErr,
+			"check that wireguard-tools and the kernel module are installed and that the service runs as root")
+	case !hubUp && !s.opts.DisableWGHub:
+		note("hub", "wireguard", "the WireGuard hub interface is not up",
+			s.store.Settings().Interface+" does not exist on this host",
+			"look at the control node checklist on the dashboard, and at journalctl -u noobtunnel-server")
 	}
 
 	s.mu.Lock()
