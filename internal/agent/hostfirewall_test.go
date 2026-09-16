@@ -124,18 +124,19 @@ func TestAdvertisedNetworksGetRoutingRules(t *testing.T) {
 	}
 }
 
-// TestIptablesRulesAreInsertedOnce checks the fallback path and that an existing
-// rule is not added twice.
+// TestIptablesRulesAreInsertedOnce checks the mesh rules are re-asserted at the
+// head of the chain. Deleting and re-inserting is deliberate: Docker puts its own
+// jumps back at the top whenever a container or network is created, and a packet
+// its chains drop never reaches a rule of ours further down.
 func TestIptablesRulesAreInsertedOnce(t *testing.T) {
 	host := &fakeHost{iptables: true, existingIP: map[string]bool{
 		"INPUT -i noobtun -j ACCEPT": true,
 	}}
 	testAgent(host, true).allowMeshTraffic(context.Background())
 
-	if host.ran("iptables", "-I", "INPUT", "-i", "noobtun", "-j", "ACCEPT") {
-		t.Fatalf("a rule that is already there should not be inserted again: %v", host.calls)
-	}
 	for _, want := range [][]string{
+		{"iptables", "-D", "INPUT", "-i", "noobtun", "-j", "ACCEPT"},
+		{"iptables", "-I", "INPUT", "-i", "noobtun", "-j", "ACCEPT"},
 		{"iptables", "-I", "FORWARD", "-i", "noobtun", "-j", "ACCEPT"},
 		{"iptables", "-I", "FORWARD", "-o", "noobtun", "-j", "ACCEPT"},
 		// Traffic between the mesh and a 1500 byte LAN needs its segment size

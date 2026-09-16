@@ -396,6 +396,9 @@ func (a *Agent) controlSession(ctx context.Context) error {
 		case <-natTicker.C:
 			a.ensureRoutes(ctx)
 			if runtime.GOOS == "linux" {
+				// Docker reinstates its own chains in front of ours, so the mesh
+				// rules are re-asserted rather than assumed.
+				a.allowMeshTraffic(ctx)
 				a.meshNATExempt(ctx, a.meshCIDR())
 			}
 		}

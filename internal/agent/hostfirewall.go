@@ -178,10 +178,11 @@ func (a *Agent) iptablesAllow(ctx context.Context, iface string, advertises bool
 	}
 	var problems []string
 	ensure := func(args ...string) {
-		check := append([]string{"-C"}, args...)
-		if _, err := host.Run(ctx, iptables, check...); err == nil {
-			return
-		}
+		// Delete first, then insert at the head of the chain. A plain "insert if
+		// missing" is not enough: Docker puts its own jumps at the top of FORWARD
+		// whenever a container or a network is created, which pushes our rules
+		// below them - and a packet that Docker's chains drop never reaches ours.
+		_, _ = host.Run(ctx, iptables, append([]string{"-D"}, args...)...)
 		insert := append([]string{"-I"}, args...)
 		if _, err := host.Run(ctx, iptables, insert...); err != nil {
 			problems = append(problems, fmt.Sprintf("iptables %s: %v", strings.Join(args, " "), err))
