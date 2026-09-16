@@ -217,6 +217,21 @@ resourceEditorPage(null);
 resourceEditorPage(resource);
 openResourceEditor(null);
 
+// Logs -> Errors: the list, with the fix, and the empty state.
+renderErrors(node, node, [
+  { time: new Date().toISOString(), source: 'dns', message: 'could not update app.example.com',
+    detail: 'dns: Cloudflare error 1000: token is broken', hint: 'check the provider token' },
+]);
+renderErrors(node, node, []);
+renderErrors(node, node, null);
+
+// A wildcard domain keeps its "*.", so the Domains table shows what was added.
+const wildcardDomain = Object.assign({}, domain, { hostname: 'example.com', pattern: '*.example.com', kind: 'wildcard' });
+renderDomains(node, node, [wildcardDomain]);
+if (!textsOf(node).some((text) => text === '*.example.com')) {
+  throw new Error('the Domains table dropped the wildcard pattern');
+}
+
 // Access rules: the comparison list follows the field, the action reads ALLOW or
 // BLOCK, and the value box no longer carries a hint line underneath it.
 function textsOf(root) {

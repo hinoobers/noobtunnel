@@ -72,6 +72,53 @@ function renderRequests(node, recent) {
       h('td', { class: 'muted tiny' }, entry.resource || '—'))))));
 }
 
+// renderErrors lists everything that went wrong: DNS automation, certificate
+// issuance and resources that could not listen. This is the "why is it not
+// working" view, so each row carries the detail and the fix when there is one.
+function renderErrors(node, subNode, entries) {
+  if (!node) return;
+  entries = entries || [];
+  clear(node);
+  // The tab carries the count, so a failure is visible without opening it.
+  if (shell && shell.root) {
+    const tab = $('[data-tab=errors]', shell.root);
+    if (tab) tab.textContent = entries.length ? 'Errors (' + entries.length + ')' : 'Errors';
+  }
+  if (subNode) {
+    subNode.textContent = entries.length === 0
+      ? 'Nothing has failed since the control node started'
+      : entries.length + ' error' + (entries.length === 1 ? '' : 's') +
+        ', newest first \u00b7 ' + relTime(entries[0].time);
+  }
+  if (!entries.length) {
+    node.append(h('div', { class: 'empty' },
+      h('h3', null, 'No errors'),
+      h('p', { class: 'muted', text: 'Certificate, DNS and listener failures appear here with the reason and what to check.' })));
+    return;
+  }
+  node.append(h('table', null,
+    h('thead', null, h('tr', null,
+      h('th', null, 'Time'), h('th', null, 'Source'), h('th', null, 'Error'), h('th', null, 'What to check'))),
+    h('tbody', null, entries.map((entry) => h('tr', null,
+      h('td', { title: absTime(entry.time) }, relTime(entry.time)),
+      h('td', null, h('span', { class: 'chip chip-quiet' }, entry.source || 'control')),
+      h('td', null,
+        h('div', null, entry.message || ''),
+        entry.detail ? h('div', { class: 'muted tiny mono', style: 'white-space:pre-wrap' }, entry.detail) : null),
+      h('td', { class: 'muted tiny' }, entry.hint || '\u2014'))))));
+}
+
+// clearErrors empties the error list; the control node keeps recording new ones.
+async function clearErrors() {
+  try {
+    await api('/api/errors', { method: 'DELETE' });
+    await refresh();
+    toast('Error log cleared', 'ok');
+  } catch (err) {
+    toast(err.message, 'fail');
+  }
+}
+
 // installTabs wires every tab group. The group is whatever view the clicked tab
 // lives in, so one handler serves the main navigation, Logs and Settings.
 function installTabs(root) {

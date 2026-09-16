@@ -2,13 +2,16 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/dns"
 	"github.com/noobtunnel/noobtunnel/internal/store"
+	"github.com/noobtunnel/noobtunnel/internal/tlsutil"
 )
 
 // newDNSClient builds a provider client. Options.DNSFactory can override it, which
@@ -28,9 +31,10 @@ type DNSClient interface {
 }
 
 // desiredDomainAddress decides which address a domain should resolve to: the
-// exit node its resources are published on, or the control node itself.
+// exit node its resources are published on, or the control node itself. It always
+// answers with an IPv4 address, because an A record cannot hold a hostname.
 func (s *Server) desiredDomainAddress(domain store.Domain) (address, exitNode string) {
-	control := s.publicHost()
+	control := s.controlNodeAddress()
 	for _, r := range s.store.Resources() {
 		if r.Domain == "" || !domain.Covers(r.Domain) {
 			continue
@@ -45,6 +49,52 @@ func (s *Server) desiredDomainAddress(domain store.Domain) (address, exitNode st
 	return control, "Control node"
 }
 
+// controlNodeAddress is the address an A record of the control node itself should
+// point at: the advertised endpoint when it is already an address, otherwise this
+// machine's own public address, and only then the endpoint resolved by name (the
+// installer advertises the domain, which may not resolve yet — or may resolve to
+// a proxy — while the record is still being created).
+func (s *Server) controlNodeAddress() string {
+	host := s.publicHost()
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+	}
+	public, private := machineIPv4s()
+	if public != "" {
+		return public
+	}
+	if host != "" && !strings.EqualFold(host, "localhost") {
+		if addrs, err := net.LookupHost(host); err == nil {
+			for _, addr := range addrs {
+				if ip := net.ParseIP(addr); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+					return ip.To4().String()
+				}
+			}
+		}
+	}
+	return private
+}
+
+// machineIPv4s returns this machine's first public and first private IPv4 address,
+// if it has either.
+func machineIPv4s() (public, private string) {
+	for _, candidate := range tlsutil.LocalHosts() {
+		ip := net.ParseIP(candidate)
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.To4() == nil {
+			continue
+		}
+		if !ip.IsPrivate() && public == "" {
+			public = ip.To4().String()
+		}
+		if private == "" {
+			private = ip.To4().String()
+		}
+	}
+	return public, private
+}
+
 // syncDomains makes every domain's A record point at the right address, using the
 // configured provider. Domains without a provider are left alone (the UI shows
 // what to create by hand).
@@ -54,10 +104,6 @@ func (s *Server) syncDomains(ctx context.Context) {
 		providers[p.ID] = p
 	}
 	for _, domain := range s.store.Domains() {
-		address, _ := s.desiredDomainAddress(domain)
-		if address == "" {
-			continue
-		}
 		if domain.ProviderID == "" {
 			continue
 		}
@@ -65,8 +111,18 @@ func (s *Server) syncDomains(ctx context.Context) {
 		if !ok || !provider.Enabled {
 			continue
 		}
-		if domain.Address == address && domain.LastError == "" && !domain.LastSync.IsZero() {
-			// Already in sync.
+		address, exitName := s.desiredDomainAddress(domain)
+		if address == "" {
+			err := errors.New("no IPv4 address to point the record at")
+			_ = s.store.RecordDomainSync(domain.Hostname, "", err)
+			s.recordError("dns", "no address for "+domain.Hostname, err.Error(),
+				"set the WireGuard endpoint to an address, or publish the domain on an exit node with one")
+			continue
+		}
+		if domain.Address == address && domain.LastError == "" && !domain.LastSync.IsZero() &&
+			time.Since(domain.LastSync) < verifyEvery {
+			// Confirmed earlier and nothing changed: no need to ask the provider
+			// again on every pass.
 			continue
 		}
 		factory := s.opts.DNSFactory
@@ -76,19 +132,27 @@ func (s *Server) syncDomains(ctx context.Context) {
 		client, err := factory(provider)
 		if err != nil {
 			_ = s.store.RecordDomainSync(domain.Hostname, address, err)
+			s.recordError("dns", "could not update "+domain.Hostname, err.Error(), "")
 			continue
 		}
 		recordName := domain.RecordName()
 		if err := client.EnsureA(ctx, recordName, address); err != nil {
 			s.log.Warn("could not update DNS", "domain", domain.Hostname, "provider", provider.Name, "error", err)
 			_ = s.store.RecordDomainSync(domain.Hostname, address, err)
+			s.recordError("dns", "could not update "+domain.Hostname, err.Error(),
+				"check the provider token's DNS edit permission and that the zone is in this account")
 			continue
 		}
-		s.log.Info("DNS updated", "domain", domain.Hostname, "address", address, "provider", provider.Name)
+		s.log.Info("DNS updated", "domain", domain.Hostname, "record", recordName, "address", address,
+			"exitNode", exitName, "provider", provider.Name)
 		_ = s.store.RecordDomainSync(domain.Hostname, address, nil)
 	}
 	s.broadcastState()
 }
+
+// verifyEvery is how long a confirmed record is trusted before the control node
+// checks the provider again, so a record deleted by hand is noticed.
+const verifyEvery = 10 * time.Minute
 
 // dnsLoop keeps records current, for example after an exit node address changes.
 func (s *Server) dnsLoop(ctx context.Context) {

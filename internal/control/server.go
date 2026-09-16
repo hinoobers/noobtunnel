@@ -112,6 +112,10 @@ type Server struct {
 	geoIP      *geoip.Database
 	geoIPError string
 	requests   *requestLog
+	errors     *errorLog
+	// resourceErrors remembers the last reported failure per resource, so the
+	// Errors view gets one entry per change instead of one per reconcile.
+	resourceErrors map[uint32]string
 	sessions   map[uint32]*Session
 	endpoints  map[uint32]string
 	pending    map[uint64]*pendingPing
@@ -230,6 +234,8 @@ func New(opts Options) (*Server, error) {
 	}
 	// The request log is written by the proxy manager and read by the API.
 	requestEvents := newRequestLog()
+	// Everything that goes wrong and explains itself goes here, for Logs → Errors.
+	errorEvents := newErrorLog()
 	return &Server{
 		opts:      opts,
 		log:       opts.Logger,
@@ -239,8 +245,9 @@ func New(opts Options) (*Server, error) {
 		backend:   opts.Backend,
 		commands:  opts.Runner,
 		events:    newEventHub(),
-		proxies:   newProxyManager(opts, st, auth, requestEvents),
+		proxies:   newProxyManager(opts, st, auth, requestEvents, errorEvents),
 		requests:  requestEvents,
+		errors:    errorEvents,
 		sessions:  map[uint32]*Session{},
 		endpoints: map[uint32]string{},
 		pending:   map[uint64]*pendingPing{},
@@ -1169,12 +1176,60 @@ func (s *Server) reconcileResources() {
 	s.proxies.SetBrandName(s.BrandName())
 	specs := s.ResourceSpecs()
 	s.proxies.Reconcile(specs)
+	s.recordResourceErrors()
 	// A resource may have changed which exit node its domain points at.
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		s.syncDomains(ctx)
 	}()
+}
+
+// recordResourceErrors copies the proxy manager's per resource failures into the
+// Errors view, once per change so a listener that cannot bind is explained
+// instead of only being visible in a log.
+func (s *Server) recordResourceErrors() {
+	if s.errors == nil {
+		return
+	}
+	stats := s.proxies.Stats()
+	s.mu.Lock()
+	if s.resourceErrors == nil {
+		s.resourceErrors = map[uint32]string{}
+	}
+	seen := make(map[uint32]bool, len(stats))
+	var fresh []ErrorEntry
+	for _, resource := range s.store.Resources() {
+		stat, ok := stats[resource.ID]
+		if !ok {
+			continue
+		}
+		seen[resource.ID] = true
+		previous := s.resourceErrors[resource.ID]
+		if stat.LastError == previous {
+			continue
+		}
+		s.resourceErrors[resource.ID] = stat.LastError
+		if stat.LastError == "" {
+			continue
+		}
+		fresh = append(fresh, ErrorEntry{
+			Time:    time.Now().UTC(),
+			Source:  "resource",
+			Message: resource.Name + " is not listening",
+			Detail:  stat.LastError,
+			Hint:    "the port may be taken by another service, or the exit node address may not be on this host",
+		})
+	}
+	for id := range s.resourceErrors {
+		if !seen[id] {
+			delete(s.resourceErrors, id)
+		}
+	}
+	s.mu.Unlock()
+	for _, entry := range fresh {
+		s.errors.record(entry.Source, entry.Message, entry.Detail, entry.Hint)
+	}
 }
 
 // ResourceSpecs renders the store's resources for the proxy manager.

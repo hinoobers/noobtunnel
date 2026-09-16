@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -48,6 +50,11 @@ func (c *Cloudflare) EnsureA(ctx context.Context, hostname, address string) erro
 	if hostname == "" || address == "" {
 		return fmt.Errorf("dns: a hostname and an address are required")
 	}
+	// An A record holds an IPv4 address. A hostname here means the caller picked
+	// the wrong address, and the provider would answer with a confusing error.
+	if ip := net.ParseIP(address); ip == nil || ip.To4() == nil {
+		return fmt.Errorf("dns: %q is not an IPv4 address, so it cannot be an A record", address)
+	}
 	zoneID, zoneName, err := c.findZone(ctx, hostname)
 	if err != nil {
 		return err
@@ -56,10 +63,27 @@ func (c *Cloudflare) EnsureA(ctx context.Context, hostname, address string) erro
 	if hostname == zoneName {
 		recordName = zoneName
 	}
-	existing, err := c.findRecord(ctx, zoneID, recordName)
+	if err := c.upsertA(ctx, zoneID, recordName, address); err != nil {
+		return err
+	}
+	// Read the record back. Reporting "in sync" from a create that the provider
+	// accepted but did not keep is how a domain ends up looking fine with no
+	// record in the zone.
+	written, err := c.findRecord(ctx, zoneID, recordName)
 	if err != nil {
 		return err
 	}
+	if written == nil {
+		return fmt.Errorf("dns: the A record for %s is not there after writing it", recordName)
+	}
+	if !strings.EqualFold(strings.TrimSpace(written.Content), address) {
+		return fmt.Errorf("dns: %s reads back as %q, expected %q", recordName, written.Content, address)
+	}
+	return nil
+}
+
+// upsertA creates or updates the record with the address.
+func (c *Cloudflare) upsertA(ctx context.Context, zoneID, recordName, address string) error {
 	body := map[string]any{
 		"type":    "A",
 		"name":    recordName,
@@ -68,13 +92,37 @@ func (c *Cloudflare) EnsureA(ctx context.Context, hostname, address string) erro
 		"proxied": false,
 		"comment": c.comment(),
 	}
+	existing, err := c.findRecord(ctx, zoneID, recordName)
+	if err != nil {
+		return err
+	}
 	if existing != nil {
 		if existing.Content == address && existing.Comment == c.comment() {
 			return nil
 		}
 		return c.request(ctx, http.MethodPut, "/zones/"+zoneID+"/dns_records/"+existing.ID, body, nil)
 	}
-	return c.request(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", body, nil)
+	err = c.request(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", body, nil)
+	if err == nil || !alreadyExists(err) {
+		return err
+	}
+	// The provider says a record with that name exists even though the lookup did
+	// not return it (a record type we cannot read, or a filter miss). Find it
+	// again and update it instead of failing the sync.
+	existing, findErr := c.findRecord(ctx, zoneID, recordName)
+	if findErr != nil || existing == nil {
+		return err
+	}
+	return c.request(ctx, http.MethodPut, "/zones/"+zoneID+"/dns_records/"+existing.ID, body, nil)
+}
+
+// alreadyExists recognises the provider's "record already exists" answer.
+func alreadyExists(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "81057") || strings.Contains(message, "already exists")
 }
 
 // Verify checks that a token works and returns the zones it can see.
@@ -115,7 +163,7 @@ func (c *Cloudflare) findZone(ctx context.Context, hostname string) (string, str
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		}
-		if err := c.request(ctx, http.MethodGet, "/zones?name="+candidate, nil, &zones); err != nil {
+		if err := c.request(ctx, http.MethodGet, "/zones?name="+url.QueryEscape(candidate), nil, &zones); err != nil {
 			return "", "", err
 		}
 		if len(zones) > 0 {
@@ -133,7 +181,10 @@ type record struct {
 
 func (c *Cloudflare) findRecord(ctx context.Context, zoneID, hostname string) (*record, error) {
 	var records []record
-	if err := c.request(ctx, http.MethodGet, "/zones/"+zoneID+"/dns_records?type=A&name="+hostname, nil, &records); err != nil {
+	// The name is escaped: a wildcard record is literally "*.example.com", and an
+	// unescaped "*" is not a query string character.
+	query := "/zones/" + zoneID + "/dns_records?type=A&name=" + url.QueryEscape(hostname)
+	if err := c.request(ctx, http.MethodGet, query, nil, &records); err != nil {
 		return nil, err
 	}
 	if len(records) == 0 {

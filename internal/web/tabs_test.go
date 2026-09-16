@@ -60,7 +60,7 @@ func TestLogsTabsSitAtPageLevel(t *testing.T) {
 	if nav.Parent == nil || nav.Parent.Tag != "section" || !nodeMatches(nav.Parent, ".view") {
 		t.Fatalf("the Logs tab row should hang off the view section like Settings, found parent <%s>", nav.Parent.Tag)
 	}
-	for _, panel := range []string{"requests", "activity"} {
+	for _, panel := range []string{"requests", "activity", "errors"} {
 		if !queryMatches(root, `[data-tab="`+panel+`"]`) {
 			t.Errorf("no Logs tab for %q", panel)
 		}

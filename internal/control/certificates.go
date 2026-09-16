@@ -16,7 +16,7 @@ import (
 // newProxyManager builds the resource proxy manager, wiring in the certificate
 // provider for terminated HTTPS resources and the account check used by identity
 // controlled ones.
-func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEvents *requestLog) *proxy.Manager {
+func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEvents *requestLog, errorEvents *errorLog) *proxy.Manager {
 	manager := proxy.New(opts.Logger)
 	// The name on a published service's error pages follows the operator's brand.
 	manager.SetBrandName(st.Settings().BrandName)
@@ -60,6 +60,8 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 			OnError: func(name string, err error) {
 				opts.Logger.Warn("could not obtain a managed certificate, serving a self-signed one",
 					"domain", name, "error", err)
+				errorEvents.record("certificate", "no managed certificate for "+name, err.Error(),
+					"check that the name resolves here and that port 80 is reachable for the ACME challenge")
 			},
 		}
 		// HTTP-01 validation is answered on the ports HTTP resources use.

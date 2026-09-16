@@ -78,6 +78,9 @@ type StateView struct {
 	Health       []Check             `json:"health"`
 	Rejected     []topology.Rejected `json:"rejected,omitempty"`
 	Events       []Event             `json:"events"`
+	// Errors are the recent failures, for Logs → Errors: what went wrong, with
+	// the detail and the fix where the control node knows one.
+	Errors       []ErrorEntry        `json:"errors"`
 	Tokens       []store.APIToken    `json:"apiTokens,omitempty"`
 	Resources    []ResourceView      `json:"resources"`
 	Domains      []DomainView        `json:"domains"`
@@ -133,6 +136,7 @@ func (s *Server) StateSnapshot() *StateView {
 		Agents:       []AgentView{},
 		Health:       notNil(s.Checks()),
 		Events:       notNil(s.events.recent()),
+		Errors:       notNil(s.errors.recent()),
 		Tokens:       notNil(s.auth.APITokens()),
 		Rejected:     notNil(rejected),
 		Resources:    notNil(s.resourceViews()),

@@ -204,9 +204,11 @@ func (s *Store) RecordDomainSync(hostname, address string, syncErr error) error 
 			if st.Domains[i].Hostname != host {
 				continue
 			}
-			st.Domains[i].Address = address
-			st.Domains[i].LastSync = time.Now().UTC()
 			if syncErr == nil {
+				// Only a confirmed success updates the record's address and time,
+				// so a failed attempt cannot be mistaken for "in sync" later.
+				st.Domains[i].Address = address
+				st.Domains[i].LastSync = time.Now().UTC()
 				st.Domains[i].LastError = ""
 			} else {
 				st.Domains[i].LastError = syncErr.Error()

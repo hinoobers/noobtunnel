@@ -14,6 +14,7 @@ security model and operations.
   - [Extra public addresses](#extra-public-addresses-exit-nodes)
   - [Automatic DNS](#automatic-dns)
 - [Update](#update)
+- [Logs and errors](#logs-and-errors)
 - [Everyday use](#everyday-use)
 - [Accounts and roles](#accounts-and-roles-and-getting-back-in)
 - [Automation](#automation)
@@ -339,6 +340,17 @@ address, which exit node it belongs to, and the sync state (`in sync`, `pending`
 or the provider's error). *Update now* forces a refresh; leaving the domain on
 **Manual DNS** shows the record to create by hand instead.
 
+A record is only reported as `in sync` after the provider has been asked for it
+again and answered with the address that was written, and a failed attempt no
+longer counts as a success: it stays `error` until a write is confirmed. Records
+the control node manages carry a **managed by noobtunnel** comment, so they are
+easy to spot in the provider's dashboard, and they are re-checked every ten
+minutes so a record deleted by hand is noticed. Wildcard domains are created
+literally (`*.example.com`) and keep their `*.` in the Domains table.
+
+When a record cannot be written, the reason and what to check appear in
+**Logs → Errors**, described below.
+
 ## Update
 
 An installed control node is updated with one command, and it asks nothing:
@@ -357,6 +369,31 @@ the domain or the ports.
 Running the installer on a machine that already has a control node offers the
 same update first (`update it to this build? [Y/n]`); answer no to walk through
 the full configuration again instead.
+
+## Logs and errors
+
+**Logs** has three views:
+
+- **Requests** - the traffic published services handled, with the decision and
+  the country it came from.
+- **Activity** - administrative changes: agents enrolled or removed, settings and
+  resources changed, domains added.
+- **Errors** - everything that failed, newest first, with the reason and what to
+  check. The tab carries the count, so a failure is visible without opening it,
+  and *Clear* empties the list (new ones keep being recorded).
+
+Errors are recorded for the things an operator can act on: DNS automation that
+could not write a record (with the provider's own message, for example a token
+without DNS edit permission), a certificate that could not be issued, and a
+published resource that is not listening (port taken, exit node address missing).
+An entry looks like this:
+
+```text
+time      source   error                                    what to check
+1m ago    dns      could not update app.example.com          check the provider token's DNS edit
+                   dns: Cloudflare error 1000: token is      permission and that the zone is in
+                   broken                                    this account
+```
 
 ## Everyday use
 

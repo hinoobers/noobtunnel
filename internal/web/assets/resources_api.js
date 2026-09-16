@@ -209,7 +209,9 @@ function renderDomains(node, subNode, domains) {
     h('thead', null, h('tr', null,
       h('th', null, 'Domain'), h('th', null, 'DNS'), h('th', null, 'Used by'), h('th', null, ''))),
     h('tbody', null, domains.map((domain) => h('tr', null,
-      h('td', null, h('span', { class: 'mono', text: domain.hostname })),
+      // A wildcard domain is stored as its base name plus a kind: show the
+      // pattern the operator typed, so "*.example.com" stays recognisable.
+      h('td', null, h('span', { class: 'mono', text: domain.pattern || domain.hostname })),
       h('td', { class: 'muted tiny' },
         h('div', { class: 'row', style: 'gap:6px' },
           h('span', { class: 'mono tiny', text: domain.address || '—' }),

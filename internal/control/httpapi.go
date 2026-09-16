@@ -96,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("/api/dns/providers", s.handleDNSProviders)
 	authed.HandleFunc("/api/geoip", s.handleGeoIP)
 	authed.HandleFunc("/api/requests", s.handleRequests)
+	authed.HandleFunc("/api/errors", s.handleErrors)
 	authed.HandleFunc("/api/dns/providers/", s.handleDNSProviderItem)
 	authed.HandleFunc("/api/logo", s.handleLogoUpload)
 	authed.HandleFunc("/api/css", s.handleBrandCSS)

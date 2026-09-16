@@ -398,6 +398,8 @@ function mountShell() {
     exitNodesSub: $('[data-exitnodes-sub]', node),
     exitNodesAdd: $('[data-exitnodes-add]', node),
     events: $('[data-events]', node),
+    errorsTable: $('[data-errors-table]', node),
+    errorsSub: $('[data-errors-sub]', node),
     requestCharts: $('[data-request-charts]', node),
     requestTable: $('[data-request-table]', node),
     requestsSub: $('[data-requests-sub]', node),
@@ -505,6 +507,7 @@ async function handleGlobalAction(event) {
       render();
       break;
     case 'add-agent': openAddAgent(); break;
+    case 'clear-errors': await clearErrors(); break;
     case 'add-user': openAddUser(); break;
     case 'user-password': openUserPassword(actionEl.dataset.username, actionEl.dataset.id); break;
     case 'user-role': openRoleModal(actionEl.dataset.id); break;
@@ -593,6 +596,7 @@ function renderShell() {
   renderAgentGrid(shell.agentGrid, filtered, summary);
   shell.agentsSub.textContent = describeAgents(summary);
   renderEvents(shell.events, state.data.events || []);
+  renderErrors(shell.errorsTable, shell.errorsSub, state.data.errors || []);
   const requestLog = requestData();
   renderCharts(shell.requestCharts, requestLog.summary);
   renderRequests(shell.requestTable, requestLog.recent);
