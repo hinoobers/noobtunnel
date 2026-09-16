@@ -600,6 +600,12 @@ func normaliseTargetHost(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%w: a target address is required", ErrBadResource)
 	}
+	// The port has its own field: "10.77.0.2:4547" here is a common slip, and
+	// "not an IP address" does not tell anyone what to do about it.
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return "", fmt.Errorf("%w: %q is an address with a port; put the address here and the port in the port field",
+			ErrBadResource, raw)
+	}
 	if prefix, err := netip.ParsePrefix(raw); err == nil {
 		raw = prefix.Addr().String()
 	}

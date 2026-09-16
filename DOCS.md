@@ -376,6 +376,12 @@ the full configuration again instead.
 `dial tcp ADDRESS:PORT: connect: no route to host` means the control node has no
 route for that address, so the packet never enters a tunnel. In order:
 
+That is also what WireGuard answers when it has no peer for the destination: the
+route exists, the tunnel does not, and the Errors entry says so ("the control node
+has no WireGuard handshake with that agent"). The address and the port belong in
+their own fields when you add a target — `10.77.0.2:4547` in the address box is
+refused with that hint.
+
 Before anything else, check **which build is running**: `noobtunnel version`, and
 in the UI Settings -> Control node -> *Built*. An update only takes effect after
 the service is restarted, and a control node from before a fix behaves exactly

@@ -1251,9 +1251,24 @@ func (s *Server) recordResourceErrors() {
 			hint := "check that the service listens on that address behind the agent and that the agent is online"
 			s.mu.Lock()
 			hubErr, hubUp := s.hubErr, s.hubStatus.Exists
+			hubPeers := append([]wg.PeerStatus(nil), s.hubStatus.Peers...)
 			s.mu.Unlock()
+			// "no route to host" is what WireGuard answers when it has no peer for
+			// the destination: the route is there, the tunnel is not.
+			tunnelDead := strings.Contains(ts.LastError, "no route to host")
+			handshake := false
+			if agent, err := s.store.Agent(target.AgentID); err == nil && agent.PublicKey != "" {
+				for _, peer := range hubPeers {
+						if peer.PublicKey == agent.PublicKey && !peer.LatestHandshake.IsZero() {
+						handshake = true
+					}
+				}
+			}
 			if hubErr != "" || !hubUp {
 				hint = "the control node's own WireGuard hub is not up, so nothing can be reached through it"
+			} else if tunnelDead && !handshake {
+				detail = strings.TrimSpace(detail + "\nthe control node has no WireGuard handshake with that agent")
+				hint = "the agent's device is not configured, or it was re-enrolled: check wg show on the agent and its log for \"wireguard device in sync\""
 			} else if sess, ok := sessions[target.AgentID]; ok && sess != nil {
 				agentStats, _, _, _, _ := sess.snapshot()
 				switch {

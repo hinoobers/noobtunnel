@@ -115,6 +115,7 @@ func TestResourceTargetValidation(t *testing.T) {
 		{"unknown agent", []ResourceTargetInput{{AgentID: 999, Host: agent.Address, Port: 80}}, "no agent"},
 		{"unreachable", oneTarget(agent.ID, "8.8.8.8", 80), "not reachable"},
 		{"bad host", oneTarget(agent.ID, "not-an-ip", 80), "IP address"},
+		{"host with a port", oneTarget(agent.ID, agent.Address+":4547", 4547), "port field"},
 		{"bad port", oneTarget(agent.ID, agent.Address, 0), "port"},
 		{"all disabled", []ResourceTargetInput{
 			{AgentID: agent.ID, Host: agent.Address, Port: 80, Enabled: boolPtr(false)},

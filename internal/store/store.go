@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -630,6 +631,9 @@ func NormalisePrefixes(in []string) ([]string, error) {
 		}
 		prefix, err := netip.ParsePrefix(raw)
 		if err != nil {
+			if _, _, splitErr := net.SplitHostPort(raw); splitErr == nil {
+				return nil, fmt.Errorf("%q is an address with a port; this field takes a network such as 192.168.1.0/24", raw)
+			}
 			addr, aerr := netip.ParseAddr(raw)
 			if aerr != nil {
 				return nil, fmt.Errorf("%q is not a CIDR or address", raw)
