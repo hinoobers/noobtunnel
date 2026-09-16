@@ -120,7 +120,14 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		add("Tunnel handshake", "ok", "last handshake "+s.now().Sub(handshake).Round(time.Second).String()+" ago", "")
 	}
 
-	if out, err := s.runner().Run(ctx, "ip", "route", "get", address); err != nil {
+	// `ip route get` wants an address, not host:port: passing the target as the
+	// operator types it makes it answer "any valid prefix is expected rather
+	// than "10.0.0.5:4702"".
+	routeTarget := address
+	if host, _, splitErr := net.SplitHostPort(address); splitErr == nil && host != "" {
+		routeTarget = host
+	}
+	if out, err := s.runner().Run(ctx, "ip", "route", "get", routeTarget); err != nil {
 		detail := strings.TrimSpace(out)
 		if detail == "" {
 			// No output to show: the command itself is what failed.
@@ -143,10 +150,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		return result
 	}
 
-	host, _, splitErr := net.SplitHostPort(address)
-	if splitErr != nil {
-		host = address
-	}
+	host := routeTarget
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
