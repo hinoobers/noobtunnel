@@ -1266,6 +1266,10 @@ func (s *Server) recordResourceErrors() {
 			// "no route to host" is what WireGuard answers when it has no peer for
 			// the destination: the route is there, the tunnel is not.
 			tunnelDead := strings.Contains(ts.LastError, "no route to host")
+			// A timeout is the other shape: the packet goes out and the answer
+			// never comes back. The service is usually fine, so the hint has to
+			// send the operator to the agent itself.
+			silentTimeout := strings.Contains(ts.LastError, "i/o timeout")
 			handshake := false
 			if agent, err := s.store.Agent(target.AgentID); err == nil && agent.PublicKey != "" {
 				for _, peer := range hubPeers {
@@ -1274,26 +1278,45 @@ func (s *Server) recordResourceErrors() {
 					}
 				}
 			}
+			// explained marks the cases where the control node already knows what
+			// is wrong: the agent's own device report is only worth adding when it
+			// does not.
+			explained := false
 			if hubErr != "" || !hubUp {
 				hint = "the control node's own WireGuard hub is not up, so nothing can be reached through it"
+				explained = true
 			} else if tunnelDead && !handshake {
 				detail = strings.TrimSpace(detail + "\nthe control node has no WireGuard handshake with that agent")
 				hint = "the agent's device is not configured, or it was re-enrolled: check wg show on the agent and its log for \"wireguard device in sync\""
-			} else if sess, ok := sessions[target.AgentID]; ok && sess != nil {
-				agentStats, _, _, _, _ := sess.snapshot()
-				switch {
-				case agentStats.LastError != "":
-					detail = strings.TrimSpace(detail + "\nthe agent reports: " + agentStats.LastError)
-					hint = "the agent is connected but its WireGuard device is not in sync, so nothing reaches it through the tunnel"
-				case agentStats.Interface == "":
-					detail = strings.TrimSpace(detail + "\nthe agent reports no WireGuard interface")
-					hint = "the agent's device does not exist on that machine; check its service or container logs"
-				case len(agentStats.PeerStats) == 0:
-					detail = strings.TrimSpace(detail + "\nthe agent's device has no peers configured")
-					hint = "the agent is connected but its WireGuard device was never configured; update the agent on that machine"
+				explained = true
+			} else if silentTimeout {
+				port := target.Host
+				if _, p, err := net.SplitHostPort(target.Target()); err == nil {
+					port = p
 				}
-			} else if ts.LastError != "" {
-				hint = "the agent is not connected right now, so the tunnel to it is down"
+				detail = strings.TrimSpace(detail + "\nthe packet reached the agent but nothing answered")
+				hint = "on " + who + " run `tcpdump -ni noobtun port " + port + "` while you retry: an answer arriving from a different " +
+					"address means host NAT rewrote it (Docker masquerade does this to containers), and no answer at all means the host " +
+					"is not forwarding between the mesh and that network. Update that agent, its firewall setup keeps the mesh out of host NAT."
+				explained = true
+			}
+			if !explained {
+				if sess, ok := sessions[target.AgentID]; ok && sess != nil {
+					agentStats, _, _, _, _ := sess.snapshot()
+					switch {
+					case agentStats.LastError != "":
+						detail = strings.TrimSpace(detail + "\nthe agent reports: " + agentStats.LastError)
+						hint = "the agent is connected but its WireGuard device is not in sync, so nothing reaches it through the tunnel"
+					case agentStats.Interface == "":
+						detail = strings.TrimSpace(detail + "\nthe agent reports no WireGuard interface")
+						hint = "the agent's device does not exist on that machine; check its service or container logs"
+					case len(agentStats.PeerStats) == 0:
+						detail = strings.TrimSpace(detail + "\nthe agent's device has no peers configured")
+						hint = "the agent is connected but its WireGuard device was never configured; update the agent on that machine"
+					}
+				} else if ts.LastError != "" {
+					hint = "the agent is not connected right now, so the tunnel to it is down"
+				}
 			}
 			note(fmt.Sprintf("target/%d/%d", resource.ID, target.ID), "target",
 				resource.Name+": target "+target.Target()+" ("+who+") is not reachable",

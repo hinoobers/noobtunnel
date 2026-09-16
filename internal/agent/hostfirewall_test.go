@@ -155,3 +155,60 @@ func TestSetupSystemCanBeTurnedOff(t *testing.T) {
 		t.Fatalf("nothing should be run with --setup-system=false: %v", host.calls)
 	}
 }
+
+// TestMeshTrafficIsKeptOutOfHostNAT covers the "curl on the agent works, the
+// proxy times out" case: Docker masquerades a container's answer to traffic
+// leaving its bridge, so the control node - which opened the connection to the
+// container's own address - sees the answer arrive from somewhere else and
+// drops it.
+func TestMeshTrafficIsKeptOutOfHostNAT(t *testing.T) {
+	host := &fakeHost{iptables: true, existingIP: map[string]bool{}}
+	a := testAgent(host, true)
+	a.meshNATExempt(context.Background(), "10.77.0.0/16")
+
+	rule := []string{"iptables", "-t", "nat", "-I", "POSTROUTING", "-d", "10.77.0.0/16", "-j", "RETURN"}
+	if !host.ran(rule...) {
+		t.Fatalf("the mesh range should be returned from POSTROUTING before Docker's rules: %v", host.calls)
+	}
+	// The rule has to be re-inserted rather than checked, because it only works
+	// while it sits ahead of the rules Docker adds.
+	if !host.ran("iptables", "-t", "nat", "-D", "POSTROUTING", "-d", "10.77.0.0/16", "-j", "RETURN") {
+		t.Fatalf("the rule should be removed before it is inserted again: %v", host.calls)
+	}
+}
+
+// TestNATExemptionFailureIsReported keeps the same silence out of this path: if
+// the rule cannot be installed, the control node's Errors view says so.
+func TestNATExemptionFailureIsReported(t *testing.T) {
+	host := &fakeHost{iptables: true, existingIP: map[string]bool{}, failOn: "nat"}
+	a := testAgent(host, true)
+	a.meshNATExempt(context.Background(), "10.77.0.0/16")
+	if !strings.Contains(a.lastError(), "masquerade") {
+		t.Fatalf("the failure should be reported, last error: %q", a.lastError())
+	}
+}
+
+// TestNATExemptionIgnoresWhatItCannotUse leaves hosts without iptables and
+// agents that were told not to touch the system alone.
+func TestNATExemptionIgnoresWhatItCannotUse(t *testing.T) {
+	noIptables := &fakeHost{}
+	testAgent(noIptables, true).meshNATExempt(context.Background(), "10.77.0.0/16")
+	if len(noIptables.calls) != 0 {
+		t.Fatalf("nothing should run without iptables: %v", noIptables.calls)
+	}
+
+	off := &fakeHost{iptables: true}
+	a := testAgent(off, true)
+	a.opts.SetupSystem = false
+	a.meshNATExempt(context.Background(), "10.77.0.0/16")
+	if len(off.calls) != 0 {
+		t.Fatalf("nothing should run with --setup-system=false: %v", off.calls)
+	}
+
+	// A mesh range that is not an IPv4 prefix is nothing to act on either.
+	junk := &fakeHost{iptables: true}
+	testAgent(junk, true).meshNATExempt(context.Background(), "")
+	if len(junk.calls) != 0 {
+		t.Fatalf("nothing should run without a mesh range: %v", junk.calls)
+	}
+}

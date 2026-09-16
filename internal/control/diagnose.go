@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -156,8 +157,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
 	switch {
 	case dialErr != nil:
-		add("Connect to the target", "fail", dialErr.Error(),
-			"check that the service listens on "+host+" on the agent's side, and that the agent's firewall allows it")
+		add("Connect to the target", "fail", dialErr.Error(), dialHint(dialErr, address, host))
 		result.Verdict = "the control node cannot open a connection to " + address
 		result.VerdictStatus = "fail"
 	default:
@@ -184,4 +184,33 @@ func firstLine(raw string) string {
 		return strings.TrimSpace(raw[:index])
 	}
 	return raw
+}
+
+// dialHint explains a failed connection attempt in terms of what it means.
+//
+// The distinction matters: "no route to host" is the tunnel, "connection
+// refused" is nothing listening, and a silent timeout is the case that sends
+// operators hunting for a healthy service - the packets arrive, the answers do
+// not come back.
+func dialHint(dialErr error, address, host string) string {
+	message := strings.ToLower(dialErr.Error())
+	var netErr net.Error
+	timedOut := errors.As(dialErr, &netErr) && netErr.Timeout()
+	switch {
+	case strings.Contains(message, "no route to host"):
+		return "the tunnel did not deliver the packet: check that the agent is online and that the control node's hub is up (noobtunnel server --print-info)"
+	case strings.Contains(message, "connection refused"), strings.Contains(message, "connection reset"):
+		return "the packet arrived and was refused: nothing is listening on " + address + " on the agent's side"
+	case timedOut || strings.Contains(message, "timeout"):
+		port := address
+		if _, p, err := net.SplitHostPort(address); err == nil {
+			port = p
+		}
+		return "the packets go out and nothing answers. On the agent run `tcpdump -ni noobtun port " + port + "` while " +
+			"this check runs: a SYN with no answer means forwarding is filtered, and an answer arriving from an address " +
+			"other than " + host + " means host NAT is rewriting it - which is what Docker masquerade does to a container. " +
+			"Update the agent, it keeps the mesh out of host NAT."
+	default:
+		return "check that the service listens on " + host + " on the agent's side, and that the agent's firewall allows it"
+	}
 }

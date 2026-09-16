@@ -434,7 +434,8 @@ the full configuration again instead.
 ### When a target is unreachable
 
 `dial tcp ADDRESS:PORT: connect: no route to host` means the control node has no
-route for that address, so the packet never enters a tunnel. In order:
+route for that address, so the packet never enters a tunnel. Check these in
+order:
 
 That is also what WireGuard answers when it has no peer for the destination: the
 route exists, the tunnel does not, and the Errors entry says so ("the control node
@@ -486,8 +487,43 @@ For one target there is also **diagnose** in the Resources tab: the control node
 walks the path itself and reports each step — which backend it runs, whether its
 hub interface is up, whether it has a WireGuard handshake with the agent hosting
 that target, what route it has for the address, and whether a connection attempt
-succeeds — ending in one sentence that names the broken step. That replaces
+succeeds - ending in one sentence that names the broken step. That replaces
 SSH'ing into the control node to guess.
+
+### When the connection times out instead
+
+`dial tcp ADDRESS:PORT: i/o timeout` is a different fault from `no route to
+host`, and it is the one that sends people looking at a service that is perfectly
+healthy: the packets go out and no answer comes back. The service answering *on
+the agent itself* does not clear it. `curl` on that machine uses its own network,
+while the mesh arrives over the tunnel with the mesh address as the source, and
+only the second path goes through forwarding and NAT.
+
+The usual cause on a Docker host is Docker's own masquerade rule. Docker rewrites
+the source of anything leaving one of its bridges through another interface, so a
+service inside a container answers a connection from the mesh with the *host's*
+mesh address. The control node opened that connection to the container's address,
+sees an answer from somewhere else, and drops it - a silent timeout against a
+service that never sees anything wrong.
+
+Agents and control nodes now stop that from happening: the mesh range is returned
+from the host's `nat POSTROUTING` chain ahead of any masquerade rule, so traffic
+between the mesh and an advertised network keeps its real address. The agent
+re-asserts the rule while it runs, because Docker puts its own back at the top of
+that chain whenever its daemon or a network is created. If the rule cannot be
+installed, the agent reports it and **Logs -> Errors** says so.
+
+To confirm it by hand on the agent, while the control node retries the target:
+
+```sh
+sudo tcpdump -ni noobtun port 4700        # SYN out, and what comes back
+sudo iptables -t nat -S POSTROUTING | head
+```
+
+A SYN-ACK arriving from an address other than the target's, or a `MASQUERADE`
+rule above the mesh `RETURN`, is this problem. Update the agent on that machine
+(`curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update`) and
+it fixes itself.
 
 ## Slow connections
 

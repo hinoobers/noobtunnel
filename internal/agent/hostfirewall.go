@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 )
@@ -41,6 +42,50 @@ func (a *Agent) setupHost(ctx context.Context) {
 		return
 	}
 	a.allowMeshTraffic(ctx)
+}
+
+// meshNATExempt keeps the host's NAT rules from rewriting traffic that leaves an
+// advertised network for the mesh.
+//
+// Docker masquerades everything that leaves one of its bridges through another
+// interface. A service inside a container therefore answers a connection from the
+// mesh with the *host's* mesh address as the source, and the control node - which
+// opened that connection to the container's own address - drops the answer as
+// unrelated. The service is healthy, curl from the agent works, and the proxy
+// dials until it times out. Returning from POSTROUTING before any NAT rule runs
+// leaves the real address on the packet, which is what a routed network is meant
+// to do.
+//
+// The rule is re-asserted rather than merely checked: it has to sit before the
+// rules Docker inserts, and Docker puts its own back at the top whenever the
+// daemon or a network is created.
+func (a *Agent) meshNATExempt(ctx context.Context, meshCIDR string) {
+	if !a.opts.SetupSystem {
+		return
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(meshCIDR))
+	if err != nil || !prefix.Addr().Is4() {
+		return
+	}
+	host := a.host()
+	iptables, err := host.LookPath("iptables")
+	if err != nil {
+		return // No iptables: nothing to order, nft setups are left alone.
+	}
+	rule := []string{"-t", "nat", "POSTROUTING", "-d", prefix.Masked().String(), "-j", "RETURN"}
+	// Delete first so the insert lands at the head of the chain, ahead of
+	// anything that would masquerade the packet.
+	remove := append([]string{"-t", "nat", "-D"}, rule[2:]...)
+	insert := append([]string{"-t", "nat", "-I"}, rule[2:]...)
+	_, _ = host.Run(ctx, iptables, remove...)
+	if _, err := host.Run(ctx, iptables, insert...); err != nil {
+		message := "host NAT: could not keep mesh traffic out of Docker's masquerade rules, " +
+			"so services inside containers may answer from the wrong address: " + err.Error()
+		a.setLastError(message)
+		a.log.Warn("could not exclude the mesh from host NAT", "error", err)
+		return
+	}
+	a.log.Debug("mesh traffic is excluded from host NAT", "mesh", prefix.Masked().String())
 }
 
 // allowMeshTraffic opens the host firewall for the mesh interface, the way the

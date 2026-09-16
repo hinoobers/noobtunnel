@@ -70,6 +70,10 @@ const (
 	// statusInterval is how often local device state is inspected to drive the
 	// direct/relayed decision.
 	statusInterval = 3 * time.Second
+	// natAssertInterval is how often the mesh is re-excluded from the host's NAT
+	// rules, so a Docker restart cannot quietly put its masquerade rules back in
+	// front of ours.
+	natAssertInterval = 30 * time.Second
 )
 
 var (
@@ -354,6 +358,11 @@ func (a *Agent) controlSession(ctx context.Context) error {
 	defer statsTicker.Stop()
 	stateTicker := time.NewTicker(statusInterval)
 	defer stateTicker.Stop()
+	// The host NAT rule has to stay ahead of the ones Docker inserts, and Docker
+	// reinstates its own whenever the daemon or a network is created, so it is
+	// re-asserted while the agent runs instead of only at enrollment.
+	natTicker := time.NewTicker(natAssertInterval)
+	defer natTicker.Stop()
 
 	for {
 		select {
@@ -378,6 +387,10 @@ func (a *Agent) controlSession(ctx context.Context) error {
 				a.setLastError(err.Error())
 				a.log.Debug("reconcile failed", "error", err)
 			}
+		case <-natTicker.C:
+			if runtime.GOOS == "linux" {
+				a.meshNATExempt(ctx, a.meshCIDR())
+			}
 		}
 	}
 }
@@ -399,6 +412,17 @@ func (a *Agent) currentAddress() string {
 		return ""
 	}
 	return prefixString(a.session.welcome.Address, a.session.welcome.Prefix)
+}
+
+// meshCIDR is the overlay range, as announced by the control node. Empty until
+// this agent has enrolled.
+func (a *Agent) meshCIDR() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return ""
+	}
+	return a.session.welcome.MeshCIDR
 }
 
 // snapshot returns a consistent copy of the current membership.
@@ -456,6 +480,12 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 			"mesh", welcome.MeshCIDR,
 			"peers", len(welcome.Peers),
 			"hub", welcome.Hub.Endpoint)
+		// The mesh range is only known after enrollment, and it is what keeps
+		// Docker's masquerade rules from rewriting answers that come back
+		// through the tunnel.
+		if runtime.GOOS == "linux" {
+			a.meshNATExempt(context.Background(), welcome.MeshCIDR)
+		}
 		return a.applyDevice(context.Background(), true)
 	case proto.TError:
 		var e proto.Error

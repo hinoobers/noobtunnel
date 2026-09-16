@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,7 +38,7 @@ func (s *Server) ApplySystemSetup(ctx context.Context) error {
 	}
 
 	if path, err := exec.LookPath("iptables"); err == nil {
-		problems = append(problems, enableIptablesForwarding(ctx, path, settings.Interface)...)
+		problems = append(problems, enableIptablesForwarding(ctx, path, settings.Interface, settings.MeshCIDR)...)
 	} else if path, nftErr := exec.LookPath("nft"); nftErr == nil {
 		if err := ensureNftForwarding(ctx, path, settings.Interface); err != nil {
 			problems = append(problems, err.Error())
@@ -54,7 +55,7 @@ func (s *Server) ApplySystemSetup(ctx context.Context) error {
 	return nil
 }
 
-func enableIptablesForwarding(ctx context.Context, iptables, iface string) []string {
+func enableIptablesForwarding(ctx context.Context, iptables, iface, meshCIDR string) []string {
 	var problems []string
 	for _, direction := range []string{"-i", "-o"} {
 		if runQuiet(ctx, iptables, "-C", "FORWARD", direction, iface, "-j", "ACCEPT") {
@@ -75,6 +76,19 @@ func enableIptablesForwarding(ctx context.Context, iptables, iface string) []str
 		insert := append([]string{"-t", "mangle", "-A"}, clamp...)
 		if !runQuiet(ctx, iptables, insert...) {
 			problems = append(problems, "iptables mangle FORWARD TCPMSS clamping failed")
+		}
+	}
+	// A container answer must keep its own address when it comes back through
+	// the tunnel, or the peer that opened the connection drops it as unrelated
+	// and reports an i/o timeout against a service that is perfectly healthy.
+	// Docker masquerades traffic leaving its bridges for any other interface, so
+	// the mesh range is returned from the NAT table before any of that runs.
+	if mesh, err := netip.ParsePrefix(strings.TrimSpace(meshCIDR)); err == nil && mesh.Addr().Is4() {
+		nat := []string{"-d", mesh.Masked().String(), "-j", "RETURN"}
+		// Delete and re-insert so the rule keeps the head of the chain.
+		_, _ = exec.CommandContext(ctx, iptables, append([]string{"-t", "nat", "-D", "POSTROUTING"}, nat...)...).Output()
+		if _, err := exec.CommandContext(ctx, iptables, append([]string{"-t", "nat", "-I", "POSTROUTING"}, nat...)...).Output(); err != nil {
+			problems = append(problems, "iptables -t nat POSTROUTING for "+mesh.Masked().String()+" failed: "+err.Error())
 		}
 	}
 	return problems
