@@ -113,9 +113,10 @@ type Server struct {
 	geoIPError string
 	requests   *requestLog
 	errors     *errorLog
-	// resourceErrors remembers the last reported failure per resource, so the
-	// Errors view gets one entry per change instead of one per reconcile.
-	resourceErrors map[uint32]string
+	// reportedErrors remembers the last failure reported per resource, target and
+	// agent, so the Errors view gets one entry per change rather than one per
+	// reconcile pass.
+	reportedErrors map[string]string
 	sessions   map[uint32]*Session
 	endpoints  map[uint32]string
 	pending    map[uint64]*pendingPing
@@ -1185,47 +1186,84 @@ func (s *Server) reconcileResources() {
 	}()
 }
 
-// recordResourceErrors copies the proxy manager's per resource failures into the
-// Errors view, once per change so a listener that cannot bind is explained
-// instead of only being visible in a log.
+// recordResourceErrors copies the failures the Resources view shows into the
+// Errors view: a resource that is not listening, one target that cannot be
+// dialled while the other answers, and an agent whose device is out of sync. Each
+// distinct failure is recorded once, when it appears or changes.
 func (s *Server) recordResourceErrors() {
 	if s.errors == nil {
 		return
 	}
 	stats := s.proxies.Stats()
-	s.mu.Lock()
-	if s.resourceErrors == nil {
-		s.resourceErrors = map[uint32]string{}
+	agents := map[uint32]string{}
+	for _, agent := range s.store.Agents() {
+		agents[agent.ID] = agent.Name
 	}
-	seen := make(map[uint32]bool, len(stats))
+	s.mu.Lock()
+	previous := s.reportedErrors
+	current := make(map[string]string, len(previous)+8)
+	sessions := make(map[uint32]*Session, len(s.sessions))
+	for id, sess := range s.sessions {
+		sessions[id] = sess
+	}
+	s.mu.Unlock()
+
 	var fresh []ErrorEntry
+	note := func(key, source, message, detail, hint string) {
+		if detail == "" {
+			return
+		}
+		current[key] = detail
+		if previous[key] == detail {
+			return
+		}
+		fresh = append(fresh, ErrorEntry{
+			Time:    time.Now().UTC(),
+			Source:  source,
+			Message: message,
+			Detail:  detail,
+			Hint:    hint,
+		})
+	}
+
 	for _, resource := range s.store.Resources() {
 		stat, ok := stats[resource.ID]
 		if !ok {
 			continue
 		}
-		seen[resource.ID] = true
-		previous := s.resourceErrors[resource.ID]
-		if stat.LastError == previous {
-			continue
-		}
-		s.resourceErrors[resource.ID] = stat.LastError
-		if stat.LastError == "" {
-			continue
-		}
-		fresh = append(fresh, ErrorEntry{
-			Time:    time.Now().UTC(),
-			Source:  "resource",
-			Message: resource.Name + " is not listening",
-			Detail:  stat.LastError,
-			Hint:    "the port may be taken by another service, or the exit node address may not be on this host",
-		})
-	}
-	for id := range s.resourceErrors {
-		if !seen[id] {
-			delete(s.resourceErrors, id)
+		note(fmt.Sprintf("resource/%d", resource.ID), "resource",
+			resource.Name+" is not listening", stat.LastError,
+			"the port may be taken by another service, or the exit node address may not be on this host")
+		for _, target := range resource.Targets {
+			ts, ok := stat.Targets[target.ID]
+			if !ok {
+				continue
+			}
+			who := agents[target.AgentID]
+			if who == "" {
+				who = "the agent"
+			}
+			note(fmt.Sprintf("target/%d/%d", resource.ID, target.ID), "target",
+				resource.Name+": target "+target.Target()+" ("+who+") is not reachable",
+				ts.LastError,
+				"check that the service listens on that address behind the agent and that the agent is online")
 		}
 	}
+
+	for id, sess := range sessions {
+		agentStats, _, _, _, _ := sess.snapshot()
+		lastError := agentStats.LastError
+		who := agents[id]
+		if who == "" {
+			who = "an agent"
+		}
+		note(fmt.Sprintf("agent/%d", id), "agent",
+			who+" cannot program its WireGuard device", lastError,
+			"check wireguard-tools, the kernel module and NET_ADMIN on that machine")
+	}
+
+	s.mu.Lock()
+	s.reportedErrors = current
 	s.mu.Unlock()
 	for _, entry := range fresh {
 		s.errors.record(entry.Source, entry.Message, entry.Detail, entry.Hint)

@@ -382,10 +382,18 @@ the full configuration again instead.
   check. The tab carries the count, so a failure is visible without opening it,
   and *Clear* empties the list (new ones keep being recorded).
 
-Errors are recorded for the things an operator can act on: DNS automation that
-could not write a record (with the provider's own message, for example a token
-without DNS edit permission), a certificate that could not be issued, and a
-published resource that is not listening (port taken, exit node address missing).
+Errors are recorded for the things an operator can act on:
+
+- **dns** - the automation could not write a record, with the provider's own
+  message (for example a token without DNS edit permission);
+- **certificate** - a managed certificate could not be issued;
+- **resource** - a published service is not listening (port taken, exit node
+  address missing);
+- **target** - one backend of a published service cannot be reached while the
+  others answer, so the Resources tab shows it next to that target;
+- **agent** - a machine cannot program its WireGuard device (missing
+  `wireguard-tools`, no `NET_ADMIN`, a kernel module that will not load).
+
 An entry looks like this:
 
 ```text
