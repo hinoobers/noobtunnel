@@ -210,7 +210,19 @@ func (a *Agent) iptablesAllow(ctx context.Context, iface string, advertises bool
 // enableForwarding turns on IPv4 forwarding, which relaying between the mesh and
 // an advertised network needs.
 func (a *Agent) enableForwarding(ctx context.Context) error {
-	if _, err := a.host().Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+	host := a.host()
+	// Already on is the answer we want, and it is the only one a container can
+	// usually give: /proc/sys is read-only in a container, so writing fails while
+	// the machine forwards perfectly well.
+	if out, err := host.Run(ctx, "sysctl", "-n", "net.ipv4.ip_forward"); err == nil {
+		if strings.TrimSpace(out) == "1" {
+			return nil
+		}
+	}
+	if _, err := host.Run(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+		if out, readErr := host.Run(ctx, "sysctl", "-n", "net.ipv4.ip_forward"); readErr == nil && strings.TrimSpace(out) == "1" {
+			return nil
+		}
 		return fmt.Errorf("ipv4 forwarding: %w", err)
 	}
 	return nil

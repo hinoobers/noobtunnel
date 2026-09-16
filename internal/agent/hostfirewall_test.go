@@ -19,6 +19,8 @@ type fakeHost struct {
 	failOn     string
 	calls      [][]string
 	existingIP map[string]bool
+	// forwarding is what `sysctl -n net.ipv4.ip_forward` answers.
+	forwarding string
 }
 
 func (f *fakeHost) LookPath(name string) (string, error) {
@@ -38,6 +40,12 @@ func (f *fakeHost) Run(_ context.Context, name string, args ...string) (string, 
 	}
 	if name == "ufw" && len(args) > 0 && args[0] == "status" {
 		return "Status: active\n", nil
+	}
+	if name == "sysctl" && len(args) > 0 && args[0] == "-n" {
+		if f.forwarding == "" {
+			return "0\n", nil
+		}
+		return f.forwarding + "\n", nil
 	}
 	if name == "iptables" {
 		// The table may come first ("-t mangle"), so look for the check flag.
@@ -217,6 +225,22 @@ func TestNATExemptionIgnoresWhatItCannotUse(t *testing.T) {
 	testAgent(junk, true).meshNATExempt(context.Background(), "")
 	if len(junk.calls) != 0 {
 		t.Fatalf("nothing should run without a mesh range: %v", junk.calls)
+	}
+}
+
+// TestForwardingAlreadyOnIsNotAProblem covers a docker agent: /proc/sys is
+// read-only in a container, so the write fails while the machine forwards
+// perfectly well, and the agent reported that as a firewall failure on every
+// start.
+func TestForwardingAlreadyOnIsNotAProblem(t *testing.T) {
+	host := &fakeHost{iptables: true, forwarding: "1"}
+	a := testAgent(host, true)
+	a.allowMeshTraffic(context.Background())
+	if !host.ran("sysctl", "-n", "net.ipv4.ip_forward") {
+		t.Fatalf("the current value should be read first: %v", host.calls)
+	}
+	if host.ran("sysctl", "-w", "net.ipv4.ip_forward=1") {
+		t.Fatalf("nothing to write when it is already on: %v", host.calls)
 	}
 }
 
