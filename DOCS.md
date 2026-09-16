@@ -587,6 +587,34 @@ target's address is delivered to, and when that is not the agent the resource
 names it says so by name. That is the case a capture on the agent cannot explain,
 because nothing at all arrives there.
 
+### When the machine blocks container addresses itself
+
+Pterodactyl's wings blocks direct access to its containers' addresses with a rule
+in the **raw** table:
+
+```
+-t raw -A PREROUTING -d 172.18.0.3/32 ! -i pterodactyl0 -j DROP
+```
+
+The raw table runs before conntrack, before the routing decision and before
+`FORWARD`, so a packet arriving from the mesh is dropped there and **no counter in
+any chain anybody looks at moves**: the mesh interface accepts it, forwarding is
+enabled, the FORWARD rules are correct and never see it, nothing is logged, and
+the service looks dead. Diagnose reports it as "a rule before the routing
+decision consumed it", quoting the rule.
+
+Agents add an `ACCEPT` for the addresses the control node routes through them,
+ahead of whatever another program put in that table, and re-assert it - so a
+Pterodactyl reload cannot push it back down. By hand, for one target:
+
+```sh
+sudo iptables -t raw -I PREROUTING -i noobtun -d 172.18.0.3/32 -j ACCEPT
+```
+
+The alternative is to publish the target as the host's own published address
+(`172.18.0.1:4700` for a Pterodactyl allocation), which is reached on the host
+itself and never goes through that rule.
+
 The third thing to check is the machine's own routing table:
 
 ```sh
