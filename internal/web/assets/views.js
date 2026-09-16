@@ -604,9 +604,9 @@ function openEditAgent(id) {
         h('input', { name: 'name', value: agent.name, required: true })),
       h('label', { class: 'field' }, h('span', null, 'Advertised routes (comma separated CIDRs)'),
         h('input', { name: 'advertise', value: (agent.advertise || []).join(', '), placeholder: '192.168.1.0/24' }),
-        h('em', null, 'Access the mesh gets through this agent, not ownership of the network. ' +
-          'A network is routed to one agent only: if two agents offer the same range, one of them loses it ' +
-          'and the Errors tab under Logs says which.')),
+        h('em', null, 'Networks the control node reaches through this agent. Published targets do not need ' +
+          'to be listed here - they are reached through the agent you publish them with. If two agents offer ' +
+          'the same range, the Errors tab under Logs says which one won.')),
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'enabled', checked: agent.enabled }),
         h('span', null, h('strong', null, 'Enabled'),
@@ -675,14 +675,15 @@ function openAddAgent() {
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'advertiseAll' }),
         h('span', null, h('strong', null, 'Advertise everything'),
-          h('em', null, 'Let the mesh use every network this machine can reach. This is access through ' +
-            'the agent; the machine keeps its own routes, and a range another agent already carries is reported in Logs.'))),
+          h('em', null, 'Let the control node reach every network this machine can reach, Docker bridges ' +
+            'included. The mesh itself only carries mesh addresses; this is about the control node reaching ' +
+            'a whole network through this machine.'))),
       h('label', { class: 'field', 'data-advertise-field': '' },
         h('span', null, 'Advertise networks (optional, comma separated)'),
         h('input', { name: 'advertise', placeholder: '192.168.1.0/24, 10.10.0.0/16', autocomplete: 'off' }),
-        h('em', null, 'List what the mesh is allowed to reach through this agent, such as 192.168.1.0/24 ' +
-          'for a host on 192.168.1.5. Anything outside that list is not reachable through it, even if the ' +
-          'machine can route to it.')),
+        h('em', null, 'What the control node may reach through this agent, such as 192.168.1.0/24 for a ' +
+          'host on 192.168.1.5. A published target does not need to be listed: it is reached through the ' +
+          'agent you publish it with.')),
       h('label', { class: 'field' }, h('span', null, 'Enrollment link expires after'),
         h('select', { name: 'ttlHours' },
           h('option', { value: '0' }, 'never'),

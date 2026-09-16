@@ -124,8 +124,13 @@ func TestDirectPeerOwnsItsPrefixes(t *testing.T) {
 	if direct.Endpoint != "198.51.100.9:51820" {
 		t.Fatalf("direct peer endpoint = %q", direct.Endpoint)
 	}
-	if !contains(direct.AllowedIPs, "10.77.0.3/32") || !contains(direct.AllowedIPs, "192.168.5.0/24") {
-		t.Fatalf("direct peer should own its prefixes, got %v", direct.AllowedIPs)
+	if !contains(direct.AllowedIPs, "10.77.0.3/32") {
+		t.Fatalf("a direct peer should own its mesh address, got %v", direct.AllowedIPs)
+	}
+	// Agents do not route each other's LANs: the control node is the one that
+	// reaches them, so a peer's advertised range must not appear here at all.
+	if contains(direct.AllowedIPs, "192.168.5.0/24") {
+		t.Fatalf("an agent must not route another machine's LAN, got %v", direct.AllowedIPs)
 	}
 	hubEntry, _ := hubPeer(cfg, "HUBKEY")
 	if contains(hubEntry.AllowedIPs, "10.77.0.3/32") {
@@ -134,8 +139,8 @@ func TestDirectPeerOwnsItsPrefixes(t *testing.T) {
 	if contains(hubEntry.AllowedIPs, "192.168.5.0/24") {
 		t.Fatalf("advertised prefix must move off the hub, hub still has %v", hubEntry.AllowedIPs)
 	}
-	if !contains(cfg.Routes, "192.168.5.0/24") {
-		t.Fatalf("advertised prefix needs a kernel route: %v", cfg.Routes)
+	if contains(cfg.Routes, "192.168.5.0/24") {
+		t.Fatalf("an agent needs no route into another machine's LAN: %v", cfg.Routes)
 	}
 }
 

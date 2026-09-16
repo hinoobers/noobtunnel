@@ -255,10 +255,17 @@ container is up:
 Running the installer without `--docker` on a terminal asks which of the two ways
 you want, so the one-line command from the UI works for both.
 
-### Reach a LAN through one agent
+### The mesh carries addresses; the control node reaches networks
 
-Give an agent `--advertise` (or set it in the UI) and every other agent can reach
-that network through the tunnel:
+The overlay itself only carries **mesh addresses**. Every agent owns one, and any
+agent can reach any other agent's address - directly when their NAT allows it and
+through the control node otherwise. Nothing else travels between agents: agent A
+has no route into agent B's LAN, and does not need one.
+
+The **control node** is the node that has to reach the networks behind those
+machines, because it is what published services are dialled from. Give an agent
+`--advertise` (or set it in the UI) and the control node can reach that whole
+network through it:
 
 ```sh
 noobtunnel agent … --advertise 192.168.1.0/24
@@ -272,13 +279,12 @@ wins, so adding an agent never takes a network away from the machine, and a brid
 that comes up later is not blocked by a mesh route that is already there.
 
 Advertising is a **grant of access, not ownership**: an agent still only owns its
-mesh address, and a network it advertises is one the mesh may reach *through* it.
-Exactly one agent can carry a given network: that is what keeps the relay fallback
-working on every node, because a prefix has to belong to a single peer entry.
-When two agents advertise overlapping ranges the mesh keeps one of them and drops
-the other, and the dropped claim is reported in **Logs -> Errors** with the agent
-and the range. That is about the mesh reaching a network *between* machines; it
-does not decide which machine a published service runs on.
+mesh address, and a network it advertises is one the control node may reach
+*through* it. Exactly one agent can carry a given range there, because a prefix
+belongs to a single peer entry; when two agents advertise overlapping ranges the
+control node keeps one and drops the other, and the dropped claim is reported in
+**Logs -> Errors** with the agent and the range. That never decides which machine
+a published service runs on - that is what the target's own agent is for.
 
 ### The same private range on two machines
 
@@ -293,8 +299,8 @@ machine it belongs to.
 So publishing does **not** require the target to be inside an advertised network:
 the agent connects to its own network, and anything your machine can reach is a
 valid target - including its own Docker bridges and even `127.0.0.1`. Advertising
-matters for the other direction: letting *other machines on the mesh* reach a
-whole network through that agent.
+only matters for the networks you want the control node to reach as a whole,
+outside of the addresses that published resources already cover.
 
 ### Publish services (Resources tab)
 
@@ -381,8 +387,12 @@ The publish form is split into three steps — **Service**, **Targets**,
 **Publishing** — so it is readable instead of one long page.
 
 The target must be reachable *through the chosen agent* — its own mesh address, or
-a network that agent advertises. Anything else is refused, so the control node
-cannot be turned into an open proxy.
+any address that machine can reach: the agent connects from its own network, so
+its own `172.18.0.5` is the one the resource means even if another machine has a
+container on the same address. See
+[The same private range on two machines](#the-same-private-range-on-two-machines).
+A target inside the mesh range itself is refused, because that belongs to the
+overlay rather than to any machine's network.
 
 **Domains** are the hostnames resources answer on. Adding one shows the A record
 to create and which resources use it; a domain that is still in use cannot be

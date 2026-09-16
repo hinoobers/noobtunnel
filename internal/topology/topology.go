@@ -1,15 +1,25 @@
 // Package topology turns enrolled agents into WireGuard configurations.
 //
-// The interesting part is route ownership. Every mesh address and every
-// advertised subnet is owned by exactly one WireGuard peer entry:
+// Two different jobs live here, and keeping them apart is what makes the mesh
+// predictable:
 //
-//   - a peer reachable directly owns its own prefixes, or
-//   - the control node's hub peer owns them on the agent's behalf.
+//   - an *agent* only ever carries mesh addresses. It reaches every other
+//     agent's overlay address, directly when that path is healthy and through the
+//     hub otherwise, and it carries nothing else. Networks behind a machine are
+//     not the other machines' business, and leaving them out is what lets two
+//     machines run the same private range without having to fight over it.
 //
-// WireGuard picks the longest matching AllowedIPs entry, so overlapping entries
-// between the hub and a direct peer would break the relay fallback. Keeping
-// ownership exclusive avoids that entirely: moving a prefix between the hub peer
-// and a direct peer is an atomic switch from relayed to direct and back.
+//   - the *control node* carries the networks behind each agent, because it is
+//     the node that dials published targets. A network is routed to exactly one
+//     agent there (a prefix belongs to one peer entry, which is what keeps the
+//     relay fallback correct), and a published target's own address is pinned as
+//     a /32 to the agent the resource names, so it wins over whatever range
+//     another machine advertises around it.
+//
+// For the mesh addresses themselves, WireGuard picks the longest matching
+// AllowedIPs entry, so ownership is kept exclusive on the hub: moving an address
+// between the hub peer and a direct peer is an atomic switch from relayed to
+// direct and back.
 package topology
 
 import (
@@ -265,25 +275,12 @@ type AgentInput struct {
 
 // BuildAgentConfig renders the WireGuard configuration for an agent.
 func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
-	// A peer must not be able to claim this node's own address, the hub, or the
-	// mesh range itself. Anything it is not allowed to route is dropped here,
-	// before it can win a prefix in the ownership resolution below.
+	// An agent carries exactly one thing for the rest of the mesh: its own mesh
+	// address. Networks a machine offers are reachable by the *control node*,
+	// which is the node that dials published targets and routes them - agents do
+	// not need each other's LANs, and not installing them here is what keeps two
+	// machines with the same private range from having to fight over it.
 	var rejected []Rejected
-	protected := []netip.Prefix{netip.PrefixFrom(in.Hub.Address, 32)}
-	sanitised := make([]Member, 0, len(in.Peers))
-	for _, peer := range in.Peers {
-		accepted, peerRejected := in.Mesh.Sanitise(peer.Advertise, in.Self, protected)
-		for i := range peerRejected {
-			peerRejected[i].Name = peer.Name
-			peerRejected[i].MemberID = peer.ID
-		}
-		rejected = append(rejected, peerRejected...)
-		peer.Advertise = accepted
-		sanitised = append(sanitised, peer)
-	}
-	advertiseOwners, conflicts := in.Mesh.ResolveAdvertise(sanitised)
-	rejected = append(rejected, conflicts...)
-
 	cfg := wg.Config{
 		Interface: wg.InterfaceConfig{
 			PrivateKey: in.PrivateKey,
@@ -308,8 +305,6 @@ func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
 		if peer.Address.IsValid() {
 			owned = append(owned, netip.PrefixFrom(peer.Address, 32))
 		}
-		owned = append(owned, advertiseOwners[peer.ID]...)
-
 		// Kernel routes always point at the WireGuard interface; WireGuard then
 		// decides whether the packet leaves directly or through the hub.
 		for _, p := range owned {
