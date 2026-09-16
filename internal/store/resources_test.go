@@ -224,6 +224,23 @@ func TestResourcePortConflicts(t *testing.T) {
 	if !errors.Is(err, ErrPortInUse) {
 		t.Fatalf("a duplicate domain on one port must be rejected, got %v", err)
 	}
+
+	// A game server publishes one port for both transports: the UDP resource on
+	// the same number must be allowed next to the TCP one, and a second TCP
+	// resource on it must not.
+	if _, err := st.AddResource(ResourceInput{
+		Name: "game udp", Protocol: ProtocolUDP,
+		Targets: oneTarget(agent.ID, agent.Address, 2222), ListenPort: 2222,
+	}); err != nil {
+		t.Fatalf("udp next to tcp on the same port should be allowed: %v", err)
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "game tcp again", Protocol: ProtocolTCP,
+		Targets: oneTarget(agent.ID, agent.Address, 2222), ListenPort: 2222,
+	})
+	if !errors.Is(err, ErrPortInUse) {
+		t.Fatalf("a second tcp resource on one port must be rejected, got %v", err)
+	}
 }
 
 func TestResourceUpdateAndRemove(t *testing.T) {

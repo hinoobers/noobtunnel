@@ -563,6 +563,9 @@ func (s *Store) checkReservedPorts(st *State, r Resource) error {
 
 // checkPortConflicts rejects ambiguous listener sharing. HTTP and HTTPS route by
 // name so they may share a port, as long as every resource on it has a domain.
+// usesUDP reports whether a resource of this kind listens on UDP rather than TCP.
+func usesUDP(p Protocol) bool { return p == ProtocolUDP }
+
 func checkPortConflicts(st *State, candidate Resource, ignore *Resource) error {
 	port := candidate.EffectiveListenPort()
 	if !candidate.Enabled {
@@ -578,6 +581,11 @@ func checkPortConflicts(st *State, candidate Resource, ignore *Resource) error {
 		// The same port on two different exit nodes is fine: they are different
 		// public addresses.
 		if other.ExitNodeID != candidate.ExitNodeID {
+			continue
+		}
+		// TCP and UDP on the same number do not collide: a game server normally
+		// publishes one port for both, and they are separate listeners.
+		if usesUDP(candidate.Protocol) != usesUDP(other.Protocol) {
 			continue
 		}
 		shared := candidate.Protocol.SharedPort() && other.Protocol == candidate.Protocol &&

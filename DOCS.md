@@ -281,6 +281,11 @@ cannot be dialled are skipped and reported per target in the Resources tab.
 | **TCP** | Raw forward — SSH, RDP, databases, game servers. |
 | **UDP** | Datagram forward with per-client sessions — DNS, QUIC, game servers. |
 
+Game servers publish one port for both transports, so a TCP and a UDP resource may
+use the same port number: they are separate listeners. Publish the game server as
+**TCP** and **UDP** (not HTTP), and note that its client connects to the control
+node's address — the resource's listen port can differ from the port on the agent.
+
 **PROXY protocol** (v1 or v2) can be enabled per resource for TCP, HTTP and HTTPS
 passthrough resources. The service then sees the real client address in the
 connection preamble, which is what software like nginx, HAProxy, Postfix or a game

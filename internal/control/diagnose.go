@@ -132,6 +132,17 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		add("Route from the control node", "ok", firstLine(strings.TrimSpace(out)), "")
 	}
 
+	if resource.Protocol == store.ProtocolUDP {
+		// A UDP service has no handshake to test, so the tunnel, the route and the
+		// agent's own view are the whole diagnosis.
+		add("Connect to the target", "warn",
+			"UDP cannot be tested with a connection attempt",
+			"check the service on the agent side, and that the resource forwards to the right port")
+		result.Verdict = "the checks above are what can be verified for a UDP target"
+		result.VerdictStatus = "warn"
+		return result
+	}
+
 	host, _, splitErr := net.SplitHostPort(address)
 	if splitErr != nil {
 		host = address
