@@ -99,7 +99,10 @@ type Agent struct {
 	direct      map[uint32]bool
 	candidate   map[uint32]time.Time
 	lastApplied string
-	startedAt   time.Time
+	// forwardedFor remembers the last carried set the host was opened for, so the
+	// firewall commands are not repeated on every membership message.
+	forwardedFor string
+	startedAt    time.Time
 
 	connectedMu sync.Mutex
 	connected   bool
@@ -111,6 +114,9 @@ type sessionState struct {
 	welcome    proto.Welcome
 	peers      map[uint32]proto.Peer
 	generation uint64
+	// carry is what the control node resolved to this agent, which is what it has
+	// to forward for.
+	carry []string
 }
 
 // New creates an agent.
@@ -473,6 +479,7 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 			a.session.peers[p.ID] = p
 		}
 		a.mu.Unlock()
+		a.setCarry(welcome.Carry)
 		a.log.Info("enrolled with control node",
 			"agentID", welcome.AgentID,
 			"name", welcome.Name,
@@ -485,6 +492,7 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 		// through the tunnel.
 		if runtime.GOOS == "linux" {
 			a.meshNATExempt(context.Background(), welcome.MeshCIDR)
+			a.syncCarriedForwarding(context.Background())
 		}
 		return a.applyDevice(context.Background(), true)
 	case proto.TError:
@@ -507,6 +515,11 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 			return err
 		}
 		a.updatePeers(p.Generation, p.Peers)
+		// The membership message carries what the mesh routes through this agent,
+		// which changes when the operator edits its networks.
+		if a.setCarry(p.Carry) && runtime.GOOS == "linux" {
+			go a.syncCarriedForwarding(context.Background())
+		}
 		return a.reconcile(context.Background())
 	case proto.TPing:
 		var ping proto.Ping
@@ -561,6 +574,62 @@ func (a *Agent) updatePeers(generation uint64, peers []proto.Peer) {
 		a.session.peers[p.ID] = p
 	}
 	a.session.generation = generation
+}
+
+// setCarry records what the mesh routes through this agent and reports whether it
+// changed, so the host setup only runs when there is something new to apply.
+func (a *Agent) setCarry(prefixes []string) bool {
+	joined := strings.Join(prefixes, ",")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return false
+	}
+	if strings.Join(a.session.carry, ",") == joined {
+		return false
+	}
+	a.session.carry = append([]string(nil), prefixes...)
+	return true
+}
+
+// carriedPrefixes is what the control node resolved to this agent.
+func (a *Agent) carriedPrefixes() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return nil
+	}
+	return append([]string(nil), a.session.carry...)
+}
+
+// advertises reports whether this agent has to forward for anything: either what
+// it offered at enrollment, or what the control node decided to route through it.
+func (a *Agent) advertises() bool {
+	if a.opts.AdvertiseAll || len(a.opts.Advertise) > 0 {
+		return true
+	}
+	return len(a.carriedPrefixes()) > 0
+}
+
+// syncCarriedForwarding opens the host's forwarding rules for the networks the
+// mesh routes through this agent.
+//
+// It runs whenever that set changes, because the networks an operator adds in the
+// UI after enrollment never reach the machine any other way: without this the hub
+// would route a network here and the host would drop every packet for it, which
+// looks exactly like a service that is down.
+func (a *Agent) syncCarriedForwarding(ctx context.Context) {
+	if !a.advertises() {
+		return
+	}
+	carry := a.carriedPrefixes()
+	if a.forwardedFor == strings.Join(carry, ",") {
+		return
+	}
+	a.forwardedFor = strings.Join(carry, ",")
+	a.log.Info("the mesh routes networks through this agent: opening host forwarding",
+		"networks", strings.Join(carry, ", "))
+	a.allowMeshTraffic(ctx)
 }
 
 // reconcile recomputes path ownership from the live device and applies changes.

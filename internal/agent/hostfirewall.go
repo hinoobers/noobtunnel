@@ -103,7 +103,9 @@ func (a *Agent) allowMeshTraffic(ctx context.Context) {
 	if iface == "" {
 		iface = "noobtun"
 	}
-	advertises := a.opts.AdvertiseAll || len(a.opts.Advertise) > 0
+	// Whether the mesh routes anything through this agent: what it offered at
+	// enrollment, or what the control node resolved to it since.
+	advertises := a.advertises()
 	var problems []string
 
 	switch {

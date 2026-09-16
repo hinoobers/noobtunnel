@@ -732,6 +732,11 @@ func (s *Server) buildWelcome(agentID uint32, hello proto.Hello, localAddr strin
 		return proto.Welcome{}, err
 	}
 	welcome.Peers = peers
+	// Tell the agent which networks the mesh routes through it. Its own install
+	// flags are not the whole story: the operator can add networks here after the
+	// machine enrolled, and without this the agent would never open forwarding
+	// for them.
+	welcome.Carry = s.store.CarriedPrefixes(agentID)
 	return welcome, nil
 }
 
@@ -1021,7 +1026,8 @@ func (s *Server) peerPushLoop(ctx context.Context) {
 					s.log.Warn("failed to build peer list", "agent", sess.Hello.Name, "error", err)
 					continue
 				}
-				if err := sess.send(proto.Peers{T: proto.TPeers, Generation: generation, Peers: peers}); err != nil {
+				carry := s.store.CarriedPrefixes(sess.ID)
+				if err := sess.send(proto.Peers{T: proto.TPeers, Generation: generation, Peers: peers, Carry: carry}); err != nil {
 					s.log.Debug("failed to push peers", "agent", sess.Hello.Name, "error", err)
 				}
 			}

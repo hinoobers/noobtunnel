@@ -142,3 +142,34 @@ func TestANarrowerClaimDoesNotCarveOutSomeoneElsesRange(t *testing.T) {
 		t.Fatalf("the carrier should be allowed to publish inside its own range: %v", err)
 	}
 }
+
+// TestCarriedPrefixesAreWhatTheMeshRoutesThroughAnAgent is the list an agent has
+// to forward for. It comes from the control node's resolution, not from what the
+// agent offered, because the operator can change the list here after the machine
+// enrolled - and a network the mesh routes to an agent that never opened
+// forwarding for it looks exactly like a service that is down.
+func TestCarriedPrefixesAreWhatTheMeshRoutesThroughAnAgent(t *testing.T) {
+	st, cassandra := resourceFixture(t)
+	lily := enrolled(t, st, "lily")
+	advertise(t, st, cassandra.ID, "172.18.0.0/16")
+	advertise(t, st, lily.ID, "172.18.0.0/16")
+
+	if got := st.CarriedPrefixes(cassandra.ID); len(got) != 1 || got[0] != "172.18.0.0/16" {
+		t.Fatalf("the agent the mesh routes the range to should carry it, got %v", got)
+	}
+	if got := st.CarriedPrefixes(lily.ID); len(got) != 0 {
+		t.Fatalf("the agent that lost the conflict carries nothing, got %v", got)
+	}
+
+	// Once the conflict is gone, both lists are what their agents offer.
+	advertise(t, st, lily.ID, "10.10.0.0/16")
+	if got := st.CarriedPrefixes(lily.ID); len(got) != 1 || got[0] != "10.10.0.0/16" {
+		t.Fatalf("an agent should carry what it advertises, got %v", got)
+	}
+
+	// An agent that offers nothing carries nothing.
+	quiet := enrolled(t, st, "quiet")
+	if got := st.CarriedPrefixes(quiet.ID); len(got) != 0 {
+		t.Fatalf("an agent with no advertised networks carries nothing, got %v", got)
+	}
+}

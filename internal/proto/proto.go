@@ -111,6 +111,9 @@ type Welcome struct {
 	ServerTime   int64  `json:"serverTime"`
 	Hub          Hub    `json:"hub"`
 	Peers        []Peer `json:"peers"`
+	// Carry is what the mesh routes through this agent, as resolved by the
+	// control node (see Peers.Carry).
+	Carry []string `json:"carry,omitempty"`
 	// Tuning values the agent needs so both ends agree on timing.
 	StatsIntervalSec int `json:"statsIntervalSec"`
 	DirectFreshSec   int `json:"directFreshSec"`
@@ -122,6 +125,11 @@ type Peers struct {
 	T          string `json:"t"`
 	Generation uint64 `json:"generation"`
 	Peers      []Peer `json:"peers"`
+	// Carry is what the mesh routes through this agent: the networks the control
+	// node resolved to it. It is what the agent has to forward, which is not
+	// necessarily what the agent offered - the operator can change the list here
+	// after the machine enrolled, and the control node is the one that decides.
+	Carry []string `json:"carry,omitempty"`
 }
 
 // Ping asks the agent to answer with a Pong.

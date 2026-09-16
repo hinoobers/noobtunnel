@@ -514,6 +514,14 @@ re-asserts the rule while it runs, because Docker puts its own back at the top o
 that chain whenever its daemon or a network is created. If the rule cannot be
 installed, the agent reports it and **Logs -> Errors** says so.
 
+The same applies to forwarding. An agent opens the host's forwarding rules for the
+networks the *control node* resolved to it, not merely the ones its install flags
+mentioned: when you add a network to an agent in the UI after the machine
+enrolled, the agent is told that it carries it and opens the rules for it. A
+network the mesh routes to a machine that never opened forwarding for it is
+dropped silently by that host, which is indistinguishable from a dead service
+until you look at the capture.
+
 **Diagnose** on that target is the quick way: the control node asks the agent to
 try the target from where it is, twice - once normally, and once with the agent's
 mesh address as the source, which is what a connection arriving through the

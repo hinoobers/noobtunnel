@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/noobtunnel/noobtunnel/internal/proto"
 )
 
 // fakeHost records the host commands and answers the questions the firewall
@@ -210,5 +212,48 @@ func TestNATExemptionIgnoresWhatItCannotUse(t *testing.T) {
 	testAgent(junk, true).meshNATExempt(context.Background(), "")
 	if len(junk.calls) != 0 {
 		t.Fatalf("nothing should run without a mesh range: %v", junk.calls)
+	}
+}
+
+// TestCarriedNetworksOpenForwarding covers the case that looks like a dead
+// service: the operator adds a network to an agent in the UI, the hub routes it
+// there, and the machine was never told to forward it - so every packet for it is
+// dropped by the host and the target times out.
+func TestCarriedNetworksOpenForwarding(t *testing.T) {
+	host := &fakeHost{iptables: true, existingIP: map[string]bool{}}
+	a := testAgent(host, false)
+	a.session = &sessionState{peers: map[uint32]proto.Peer{}}
+	if !a.setCarry([]string{"172.18.0.0/16"}) {
+		t.Fatal("a new carried set counts as a change")
+	}
+	a.syncCarriedForwarding(context.Background())
+
+	for _, want := range [][]string{
+		{"iptables", "-I", "FORWARD", "-i", "noobtun", "-j", "ACCEPT"},
+		{"iptables", "-I", "FORWARD", "-o", "noobtun", "-j", "ACCEPT"},
+		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
+	} {
+		if !host.ran(want...) {
+			t.Fatalf("expected %q to run, calls: %v", strings.Join(want, " "), host.calls)
+		}
+	}
+
+	// The same set again is not reapplied: membership messages arrive often.
+	before := len(host.calls)
+	if a.setCarry([]string{"172.18.0.0/16"}) {
+		t.Fatal("the same carried set is not a change")
+	}
+	a.syncCarriedForwarding(context.Background())
+	if len(host.calls) != before {
+		t.Fatalf("nothing should run again: %v", host.calls[before:])
+	}
+
+	// An agent the mesh routes nothing through is left as it was.
+	later := &fakeHost{iptables: true}
+	idle := testAgent(later, false)
+	idle.session = &sessionState{peers: map[uint32]proto.Peer{}}
+	idle.syncCarriedForwarding(context.Background())
+	if len(later.calls) != 0 {
+		t.Fatalf("nothing to forward means nothing to open: %v", later.calls)
 	}
 }

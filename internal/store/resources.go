@@ -650,6 +650,23 @@ func normaliseTargetHost(raw string) (string, error) {
 	return addr.String(), nil
 }
 
+// CarriedPrefixes lists the networks the mesh actually routes through an agent:
+// the claims that were accepted for it, after the same resolution the hub
+// programs. It can differ from what the agent offered, because the operator can
+// edit the list here after the machine enrolled - and it is the control node's
+// answer that the agent has to forward for.
+func (s *Store) CarriedPrefixes(agentID uint32) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	owners, _, _ := resolveAdvertise(s.st)
+	var out []string
+	for _, prefix := range owners[agentID] {
+		out = append(out, prefix.String())
+	}
+	sort.Strings(out)
+	return out
+}
+
 // CheckTargetReachability reports whether the mesh would deliver traffic for a
 // target to the agent that hosts it. The control node calls it for resources that
 // already exist, so a conflicting advertisement shows up as an error instead of
