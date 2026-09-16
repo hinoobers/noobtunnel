@@ -172,21 +172,24 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 
 	var problems []string
 	for r := range want {
-		// Always re-assert: installing a route is idempotent, and a route that is
-		// in the bookkeeping is not proof that it is in the kernel. An interface
-		// recreated by another tool, a network manager rewriting the table, or an
-		// install that failed once all leave the machine without the route while
-		// the agent believes it is configured - and a missing mesh route sends the
-		// tunnel's answers out of the default gateway instead of back to the hub.
+		// Clear anything older for this prefix *before* installing: a route from an
+		// older build has no metric, and deleting after adding is how a route gets
+		// removed in the same breath as it is added - the install reports success,
+		// the table has nothing, and the tunnel answers out of the default
+		// gateway. Deleting first is order-safe, and the read-back below confirms
+		// the result either way.
+		// One `ip route del` removes one route, so clear duplicates left by older
+		// builds (they installed the same prefix with no metric) before adding
+		// ours, or the lower priority wins and the tunnel is bypassed anyway.
+		for attempts := 0; attempts < 3; attempts++ {
+			if _, err := run.Run(ctx, "ip", "route", "del", r, "dev", iface); err != nil {
+				break
+			}
+		}
 		if _, err := run.Run(ctx, "ip", "route", "replace", r, "dev", iface, "metric", tunnelRouteMetric); err != nil {
 			problems = append(problems, "ip route replace "+r+" dev "+iface+" metric "+tunnelRouteMetric+": "+err.Error())
 			continue
 		}
-		// An older version installed the route without a metric, which means
-		// priority 0: on a host that owns the same prefix that stale route still
-		// wins, so remove it. Scoped to this interface, so the host's own routes
-		// are never touched.
-		_, _ = run.Run(ctx, "ip", "route", "del", r, "dev", iface, "metric", "0")
 	}
 	for r := range prev {
 		if want[r] {
@@ -209,7 +212,8 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 		if out, err := run.Run(ctx, "ip", "-4", "route", "show"); err == nil {
 			for r := range want {
 				if !routePresent(out, r, iface) {
-					problems = append(problems, "the kernel has no route for "+r+" dev "+iface+" after installing it")
+					problems = append(problems, "the kernel has no route for "+r+" dev "+iface+
+						" after installing it (this process reads: "+tablePeek(out)+")")
 				}
 			}
 		} else {
@@ -220,6 +224,20 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 		return fmt.Errorf("routes for %s: %s", iface, strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// tablePeek keeps an error message readable: a few lines of the routing table
+// are enough to see whether the read happened at all, and what it found.
+func tablePeek(table string) string {
+	lines := strings.Split(strings.TrimSpace(table), "\n")
+	const shown = 4
+	if len(lines) > shown {
+		lines = append(lines[:shown], "…")
+	}
+	if len(lines) == 1 && lines[0] == "" {
+		return "nothing"
+	}
+	return strings.Join(lines, " | ")
 }
 
 // routePresent reports whether a prefix is in a `ip route show` listing for an
