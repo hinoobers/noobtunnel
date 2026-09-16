@@ -48,6 +48,7 @@ const (
 	TError   = "error"
 	TRevoked = "revoked"
 	TCommand = "command"
+	TProbe   = "probeResult"
 	TBye     = "bye"
 )
 
@@ -187,7 +188,11 @@ type Revoked struct {
 // Command is a request from the control node to the agent.
 type Command struct {
 	T      string `json:"t"`
+	Seq    uint64 `json:"seq,omitempty"`
 	Action string `json:"action"` // reconnect | resync | shutdown
+	// Targets are host:port pairs the agent should try to reach itself, used by
+	// the control node's diagnostics. Only set for ActionProbe.
+	Targets []string `json:"targets,omitempty"`
 }
 
 // Command actions.
@@ -195,7 +200,32 @@ const (
 	ActionReconnect = "reconnect"
 	ActionResync    = "resync"
 	ActionShutdown  = "shutdown"
+	// ActionProbe asks the agent to try reaching the targets from its own
+	// machine and to describe the path it would take.
+	ActionProbe = "probe"
 )
+
+// ProbeEntry is one connection an agent attempted on the control node's behalf.
+type ProbeEntry struct {
+	Target string `json:"target"`
+	OK     bool   `json:"ok"`
+	Millis int64  `json:"millis"`
+	Error  string `json:"error,omitempty"`
+	// LocalAddr is the source address the agent's kernel picked.
+	LocalAddr string `json:"localAddr,omitempty"`
+	// Meshed marks the attempt whose source was the agent's own mesh address,
+	// which is what a connection arriving through the tunnel looks like to the
+	// service on the other side.
+	Meshed bool `json:"meshed,omitempty"`
+}
+
+// ProbeResult answers a probe command.
+type ProbeResult struct {
+	T       string       `json:"t"`
+	Seq     uint64       `json:"seq"`
+	Route   string       `json:"route,omitempty"`
+	Results []ProbeEntry `json:"results"`
+}
 
 // Bye is sent by an agent that is shutting down cleanly.
 type Bye struct {

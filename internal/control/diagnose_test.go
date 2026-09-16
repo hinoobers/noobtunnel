@@ -65,6 +65,9 @@ func TestDiagnoseExplainsAnUnreachableTarget(t *testing.T) {
 	// Every step the operator needs to see is there, in the order a connection
 	// takes them.
 	wanted := []string{"WireGuard backend", "Hub interface", "Tunnel handshake", "Route from the control node", "Connect to the target"}
+	// The agent is asked about its own side too: that is the half the control
+	// node cannot see, and the answer decides what the operator does next.
+	wanted = append(wanted, "Reach the target from the agent")
 	if len(result.Steps) != len(wanted) {
 		t.Fatalf("expected %d steps, got %d: %+v", len(wanted), len(result.Steps), result.Steps)
 	}

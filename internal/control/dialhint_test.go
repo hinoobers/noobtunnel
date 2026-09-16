@@ -35,12 +35,17 @@ func TestSilentTimeoutDetailIsAnOrderedProcedure(t *testing.T) {
 	detail := silentTimeoutDetail("cassandra", "4700", "noobtun", "10.77.0.0/16")
 
 	capture := strings.Index(detail, "sudo tcpdump -ni any port 4700")
-	press := strings.Index(detail, "press Diagnose")
+	press := strings.Index(detail, "press Diagnose on this target")
 	if capture < 0 || press < 0 {
 		t.Fatalf("the procedure needs both the capture and the retry: %s", detail)
 	}
-	if capture > press {
-		t.Fatalf("the capture has to be started before the retry: %s", detail)
+	if press < 0 || press > capture {
+		t.Fatalf("pressing Diagnose comes first now that it asks the agent: %s", detail)
+	}
+	// The capture is the manual fallback, and it has to be started before the
+	// retry it is supposed to observe.
+	if !strings.Contains(detail, "start this on cassandra first") {
+		t.Fatalf("the capture is meant to be started before the retry: %s", detail)
 	}
 	for _, want := range []string{
 		"cassandra",

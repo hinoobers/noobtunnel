@@ -528,6 +528,10 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 			return a.applyDevice(context.Background(), true)
 		case proto.ActionShutdown:
 			return errShutdown
+		case proto.ActionProbe:
+			// Probing means making connections, which must not hold up the read
+			// loop that keeps the rest of the mesh in sync.
+			go a.probeTargets(cmd, writer)
 		}
 		return nil
 	case proto.TRevoked:

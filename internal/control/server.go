@@ -120,6 +120,8 @@ type Server struct {
 	sessions       map[uint32]*Session
 	endpoints      map[uint32]string
 	pending        map[uint64]*pendingPing
+	pendingProbes  map[uint64]chan proto.ProbeResult
+	probeSeq       atomic.Uint64
 	hubStatus      wg.InterfaceStatus
 	hubErr         string
 	rejected       []topology.Rejected
@@ -238,22 +240,23 @@ func New(opts Options) (*Server, error) {
 	// Everything that goes wrong and explains itself goes here, for Logs → Errors.
 	errorEvents := newErrorLog()
 	return &Server{
-		opts:      opts,
-		log:       opts.Logger,
-		store:     st,
-		auth:      auth,
-		cert:      cert,
-		backend:   opts.Backend,
-		commands:  opts.Runner,
-		events:    newEventHub(),
-		proxies:   newProxyManager(opts, st, auth, requestEvents, errorEvents),
-		requests:  requestEvents,
-		errors:    errorEvents,
-		sessions:  map[uint32]*Session{},
-		endpoints: map[uint32]string{},
-		pending:   map[uint64]*pendingPing{},
-		peerStats: map[uint32]map[uint32]proto.PeerStat{},
-		startedAt: time.Now(),
+		opts:          opts,
+		log:           opts.Logger,
+		store:         st,
+		auth:          auth,
+		cert:          cert,
+		backend:       opts.Backend,
+		commands:      opts.Runner,
+		events:        newEventHub(),
+		proxies:       newProxyManager(opts, st, auth, requestEvents, errorEvents),
+		requests:      requestEvents,
+		errors:        errorEvents,
+		sessions:      map[uint32]*Session{},
+		endpoints:     map[uint32]string{},
+		pending:       map[uint64]*pendingPing{},
+		pendingProbes: map[uint64]chan proto.ProbeResult{},
+		peerStats:     map[uint32]map[uint32]proto.PeerStat{},
+		startedAt:     time.Now(),
 	}, nil
 }
 
@@ -608,6 +611,12 @@ func (s *Server) serveAgent(conn net.Conn) error {
 				continue
 			}
 			s.resolvePing(pong.Seq)
+		case proto.TProbe:
+			var probe proto.ProbeResult
+			if err := json.Unmarshal(raw, &probe); err != nil {
+				continue
+			}
+			s.resolveProbe(probe)
 		case proto.TLog:
 			var entry proto.Log
 			if err := json.Unmarshal(raw, &entry); err != nil {
@@ -1105,6 +1114,69 @@ func (s *Server) resolvePing(seq uint64) {
 	}
 }
 
+// probeWait bounds how long the control node waits for an agent to answer a
+// probe. It is longer than the agent's own dial timeout so a slow target still
+// produces an answer, and it means an agent too old to understand the command
+// ends up as "did not answer" rather than as a hang.
+const probeWait = 10 * time.Second
+
+// ProbeTargets asks an agent to try reaching these host:port targets itself, and
+// returns what it saw.
+//
+// The control node can see the tunnel and its own route, but not what happens on
+// the other side of it: whether the service answers the agent at all, which
+// interface the packets take there, and whether it answers a connection whose
+// source is the mesh address. That is exactly the half that is missing when a
+// target times out.
+func (s *Server) ProbeTargets(ctx context.Context, agentID uint32, targets []string) (proto.ProbeResult, error) {
+	s.mu.Lock()
+	sess, ok := s.sessions[agentID]
+	s.mu.Unlock()
+	if !ok {
+		return proto.ProbeResult{}, errors.New("control: the agent is not connected")
+	}
+	if len(targets) == 0 {
+		return proto.ProbeResult{}, errors.New("control: no targets to probe")
+	}
+	seq := s.probeSeq.Add(1)
+	ch := make(chan proto.ProbeResult, 1)
+	s.mu.Lock()
+	s.pendingProbes[seq] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.pendingProbes, seq)
+		s.mu.Unlock()
+	}()
+	if err := sess.send(proto.Command{T: proto.TCommand, Seq: seq, Action: proto.ActionProbe, Targets: targets}); err != nil {
+		return proto.ProbeResult{}, err
+	}
+	timer := time.NewTimer(probeWait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return proto.ProbeResult{}, ctx.Err()
+	case <-timer.C:
+		return proto.ProbeResult{}, errors.New("control: the agent did not answer the probe; update the agent on that machine")
+	case result := <-ch:
+		return result, nil
+	}
+}
+
+func (s *Server) resolveProbe(result proto.ProbeResult) {
+	s.mu.Lock()
+	ch, ok := s.pendingProbes[result.Seq]
+	delete(s.pendingProbes, result.Seq)
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- result:
+	default:
+	}
+}
+
 // Command sends an action to a connected agent.
 func (s *Server) Command(agentID uint32, action string) error {
 	s.mu.Lock()
@@ -1399,9 +1471,11 @@ func silentTimeoutDetail(who, port, iface, meshCIDR string) string {
 		"the packet left the control node and nothing valid came back",
 		"the service on that machine can still be healthy: a curl there never uses this path",
 		"",
-		"1. on " + who + ", start this and leave it running:",
+		"1. press Diagnose on this target. The control node asks the agent to try it from where it",
+		"   is, and says which side is broken: the service itself, or the path between the two.",
+		"2. to watch the packets yourself while it runs, start this on " + who + " first and leave",
+		"   it running (it waits, so nothing is missed), then press Diagnose again:",
 		"       sudo tcpdump -ni any port " + port,
-		"2. now press Diagnose on this target, and read what arrived:",
 	}
 	lines = append(lines, strings.Split(silentTimeoutBranches(iface, meshCIDR), "\n")...)
 	lines = append(lines, "3. update the agent on that machine:  install.sh --update",

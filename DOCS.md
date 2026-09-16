@@ -487,8 +487,9 @@ For one target there is also **diagnose** in the Resources tab: the control node
 walks the path itself and reports each step — which backend it runs, whether its
 hub interface is up, whether it has a WireGuard handshake with the agent hosting
 that target, what route it has for the address, and whether a connection attempt
-succeeds - ending in one sentence that names the broken step. That replaces
-SSH'ing into the control node to guess.
+succeeds. When that attempt fails it also asks the agent to try the target from
+its own machine, so the answer covers both sides of the tunnel - the service, and
+the path to it - instead of leaving you to work out which one it is.
 
 ### When the connection times out instead
 
@@ -513,9 +514,18 @@ re-asserts the rule while it runs, because Docker puts its own back at the top o
 that chain whenever its daemon or a network is created. If the rule cannot be
 installed, the agent reports it and **Logs -> Errors** says so.
 
-To find out which of the three it is, on the agent start the capture and leave it
-running, then press **Diagnose** on that target (the capture waits for packets,
-so nothing can be missed) and read what arrived:
+**Diagnose** on that target is the quick way: the control node asks the agent to
+try the target from where it is, twice - once normally, and once with the agent's
+mesh address as the source, which is what a connection arriving through the
+tunnel looks like to the service. That separates the two cases an operator
+cannot separate from the outside: a service that does not answer at all (broken
+on its own machine) from one that answers locally but not to traffic coming
+through the mesh (a path problem). The step also reports the interface and source
+the agent's kernel would use.
+
+To watch the packets yourself, start the capture on the agent first and leave it
+running - it waits, so nothing can be missed - then press **Diagnose** again and
+read what arrived:
 
 ```sh
 sudo tcpdump -ni any port 4700

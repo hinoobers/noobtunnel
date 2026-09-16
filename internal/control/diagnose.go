@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/noobtunnel/noobtunnel/internal/proto"
 	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
@@ -152,6 +153,18 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 
 	host := routeTarget
+	// Anything that already failed before the connection attempt is the cause,
+	// and the agent's answer is only a consequence of it: a control node whose own
+	// hub is not up cannot reach anything, no matter what the agent sees.
+	priorFailures := 0
+	for _, step := range result.Steps {
+		if step.Status == "fail" {
+			priorFailures++
+		}
+	}
+	// Set when the agent's own answer explains the failure: it knows more about
+	// that side than any step the control node can run on itself.
+	verdictFromProbe := false
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
@@ -160,6 +173,39 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		add("Connect to the target", "fail", dialErr.Error(), dialHint(dialErr, address, host))
 		result.Verdict = "the control node cannot open a connection to " + address
 		result.VerdictStatus = "fail"
+		// The control node can see the tunnel and its own route, but not what
+		// happens on the other side of it. Ask the agent: does the service answer
+		// on its own machine at all, and does it answer a connection whose source
+		// is the mesh address, which is what the tunnel looks like on the wire?
+		probe, probeErr := s.ProbeTargets(ctx, agentID, []string{address})
+		switch {
+		case probeErr != nil:
+			add("Reach the target from the agent", "warn", probeErr.Error(),
+				"the agent could not be asked to try it itself; update the agent on that machine and run this again")
+		default:
+			reached, meshed, local := probeReading(probe)
+			verdictFromProbe = priorFailures == 0
+			switch {
+			case reached && !meshed:
+				add("Reach the target from the agent", "fail",
+					"the agent reaches "+address+" in "+probeMillis(probe)+" from "+local+", but not from its own mesh address",
+					"the service answers on this machine and refuses mesh-sourced traffic: check the host firewall and rp_filter on the interface the service is on")
+				result.Verdict = "the service is healthy on that machine; the traffic coming from the mesh is what it will not answer"
+			case reached && meshed:
+				add("Reach the target from the agent", "ok",
+					"the agent reaches "+address+" from "+local+", and also from its mesh address",
+					"")
+				result.Verdict = "the service answers the agent, from the mesh address too, so the break is on the path between the two machines"
+			default:
+				add("Reach the target from the agent", "fail",
+					"the agent cannot reach "+address+" either: "+probeError(probe),
+					"the service is not reachable from the machine that hosts it: check the listener and the container network")
+				result.Verdict = "the service does not answer on the agent's own machine either"
+			}
+			if route := strings.TrimSpace(probe.Route); route != "" {
+				add("Route on the agent", "ok", firstLine(route), "")
+			}
+		}
 	default:
 		_ = conn.Close()
 		add("Connect to the target", "ok", "connected to "+address, "")
@@ -167,7 +213,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		result.VerdictStatus = "ok"
 	}
 
-	if result.VerdictStatus != "ok" {
+	if result.VerdictStatus != "ok" && !verdictFromProbe {
 		for _, step := range result.Steps {
 			if step.Status == "fail" {
 				result.Verdict = step.Name + ": " + step.Detail
@@ -192,6 +238,43 @@ func firstLine(raw string) string {
 // refused" is nothing listening, and a silent timeout is the case that sends
 // operators hunting for a healthy service - the packets arrive, the answers do
 // not come back.
+// probeReading is the control node's half of a probe: whether the target answers
+// on the machine that hosts it, whether it answers a connection whose source is
+// the mesh address, and which source the agent actually used.
+func probeReading(probe proto.ProbeResult) (reached, meshed bool, local string) {
+	for _, entry := range probe.Results {
+		if entry.Meshed {
+			meshed = meshed || entry.OK
+			continue
+		}
+		if entry.OK {
+			reached = true
+			local = entry.LocalAddr
+		}
+	}
+	return reached, meshed, local
+}
+
+// probeError is the first failure the agent saw, for a step's detail.
+func probeError(probe proto.ProbeResult) string {
+	for _, entry := range probe.Results {
+		if entry.Error != "" {
+			return entry.Error
+		}
+	}
+	return "no answer"
+}
+
+// probeMillis names how long the agent's successful attempt took.
+func probeMillis(probe proto.ProbeResult) string {
+	for _, entry := range probe.Results {
+		if entry.OK && !entry.Meshed {
+			return fmt.Sprintf("%dms", entry.Millis)
+		}
+	}
+	return "no time"
+}
+
 func dialHint(dialErr error, address, host string) string {
 	message := strings.ToLower(dialErr.Error())
 	var netErr net.Error
