@@ -264,6 +264,20 @@ that network through the tunnel:
 noobtunnel agent … --advertise 192.168.1.0/24
 ```
 
+**Advertise all** (`--advertise-all`, the switch in the Add agent window) offers
+every network the machine can reach, Docker bridges included. Mesh routes are
+installed with metric `1000`, which is the part that keeps this safe: a route the
+host itself owns - its own Docker bridge on `172.18.0.0/16`, for example - always
+wins, so adding an agent never takes a network away from the machine, and a bridge
+that comes up later is not blocked by a mesh route that is already there.
+
+Overlapping private ranges are still ambiguous by nature: when two machines both
+have `172.18.0.0/16` locally, each of them uses its *own* copy, and neither can
+reach the other's by that address alone. What always works is the published
+service: a resource whose target is a service on the agent's own network is
+dialled by the agent itself, so `172.18.0.1:4702` on one machine is reachable
+through that machine's resource no matter who else uses the same range.
+
 ### Publish services (Resources tab)
 
 **Resources** expose something running behind an agent on the control node's

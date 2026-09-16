@@ -278,6 +278,17 @@ if (!textsOf(node).some((text) => text === '*.example.com')) {
   throw new Error('the Domains table dropped the wildcard pattern');
 }
 
+// The publish preview names the hostname for a direct domain too: passing a null
+// child to replaceChildren used to print the literal word "null" under it.
+state.data.domains = [{ hostname: 'chat.example.com', pattern: 'chat.example.com', kind: 'direct' }];
+const directEditorTexts = textsOf(resourceEditorPage(null));
+if (!directEditorTexts.includes('https://chat.example.com')) {
+  throw new Error('the publish preview does not name the direct domain: ' + directEditorTexts.join(' | '));
+}
+if (directEditorTexts.includes('null') || directEditorTexts.includes('undefined')) {
+  throw new Error('the publish preview rendered a missing value: ' + directEditorTexts.join(' | '));
+}
+
 // Access rules: the comparison list follows the field, the action reads ALLOW or
 // BLOCK, and the value box no longer carries a hint line underneath it.
 function textsOf(root) {

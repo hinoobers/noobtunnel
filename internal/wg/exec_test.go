@@ -67,7 +67,10 @@ func TestSyncFeedsSetConfAConfigItUnderstands(t *testing.T) {
 	for _, want := range []string{
 		"ip -4 addr replace 10.77.0.2/32 dev noobtun",
 		"ip link set dev noobtun mtu 1420 up",
-		"ip route replace 10.77.0.1/32 dev noobtun",
+		// The metric matters: with priority 0 the mesh route would take the
+		// prefix away from a network this host owns (a Docker bridge on the same
+		// range, for example).
+		"ip route replace 10.77.0.1/32 dev noobtun metric 1000",
 	} {
 		if !strings.Contains(all, want) {
 			t.Errorf("expected the backend to run %q, it ran:\n%s", want, all)

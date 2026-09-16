@@ -142,6 +142,16 @@ func (b *ExecBackend) setConf(ctx context.Context, iface string, cfg Config) err
 	return nil
 }
 
+// tunnelRouteMetric is how mesh routes are installed in the main table. A high
+// metric means the mesh route is only used when nothing else claims the prefix:
+// a host that runs Docker (or any other network) on the same private range keeps
+// its own route, and the mesh route never blocks the bridge from being created.
+//
+// The alternative - installing the mesh route with metric 0 - is what makes
+// "install the agent and the machine's other networks break": the kernel then
+// prefers the tunnel for a prefix the host itself owns.
+const tunnelRouteMetric = "1000"
+
 // syncRoutes installs the desired routes and removes ones we installed before.
 func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []string) error {
 	run := b.runner()
@@ -164,17 +174,25 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 		if prev != nil && prev[r] {
 			continue
 		}
-		if _, err := run.Run(ctx, "ip", "route", "replace", r, "dev", iface); err != nil {
+		if _, err := run.Run(ctx, "ip", "route", "replace", r, "dev", iface, "metric", tunnelRouteMetric); err != nil {
 			return err
 		}
+		// An older version installed the route without a metric, which means
+		// priority 0: on a host that owns the same prefix that stale route still
+		// wins, so remove it. Scoped to this interface, so the host's own routes
+		// are never touched.
+		_, _ = run.Run(ctx, "ip", "route", "del", r, "dev", iface, "metric", "0")
 	}
 	for r := range prev {
 		if want[r] {
 			continue
 		}
 		// A missing route is fine; the prefix may never have been installed.
-		if _, err := run.Run(ctx, "ip", "route", "del", r, "dev", iface); err != nil {
-			continue
+		if _, err := run.Run(ctx, "ip", "route", "del", r, "dev", iface, "metric", tunnelRouteMetric); err != nil {
+			// A route from an older version has no metric.
+			if _, fallback := run.Run(ctx, "ip", "route", "del", r, "dev", iface); fallback != nil {
+				continue
+			}
 		}
 	}
 	return nil

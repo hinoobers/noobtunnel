@@ -480,15 +480,19 @@ function resourceEditorPage(existing) {
     domainPreview.hidden = domainField.hidden;
     const hostname = resolvedHostname();
     const scheme = type.value === 'https' ? 'https' : 'http';
-    domainPreview.replaceChildren(
+    // Built as a list: replaceChildren(null) would put the literal text "null"
+    // on the page for every domain that is not a wildcard.
+    const lines = [
       h('strong', null, 'Will be published at'),
       h('span', { class: 'mono', text: type.value === 'http' || type.value === 'https'
         ? scheme + '://' + hostname
         : hostname }),
-      domain.kind === 'wildcard'
-        ? h('span', { class: 'muted tiny', text: 'from the wildcard domain ' + domain.value +
-            ' — rename the resource and this name follows.' })
-        : null);
+    ];
+    if (domain.kind === 'wildcard') {
+      lines.push(h('span', { class: 'muted tiny', text: 'from the wildcard domain ' + domain.value +
+        ' — rename the resource and this name follows.' }));
+    }
+    domainPreview.replaceChildren(...lines);
   };
   // resolvedHostname combines the chosen domain with the subdomain label.
   function resolvedHostname() {
