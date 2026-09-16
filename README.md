@@ -44,15 +44,18 @@ curl -fsSL https://raw.githubusercontent.com/hinoobers/noobtunnel/main/scripts/u
 
 ## Add an agent
 
-Click **Add agent** in the UI, give it a name, and run the command it hands you on
-the machine you want on the mesh:
+Click **Add agent** in the UI, give it a name, choose whether it should run as a
+systemd service or a Docker container, and run the command it hands you on the
+machine you want on the mesh:
 
 ```sh
 curl -fsSLk --retry 3 https://your-domain:8443/install.sh | sudo sh -s -- --server your-domain:8443 --token nt_... --fingerprint 12:34:... --name homelab
 ```
 
-The button writes that line for you, with the real token, pin and fingerprint. The
-agent appears in the UI within seconds and needs nothing opened on its side.
+The button writes that line for you, with the real token, pin and fingerprint —
+add `--docker` to it for the container (run it in the directory the container
+should live in, and it offers to install Docker if the machine does not have it).
+The agent appears in the UI within seconds and needs nothing opened on its side.
 
 ## Remove it
 

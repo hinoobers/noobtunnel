@@ -127,3 +127,37 @@ func TestControlDomainCannotBePublishedAsAResource(t *testing.T) {
 		t.Fatalf("error should explain the clash: %s", body)
 	}
 }
+// TestDockerInstallMethodMarksTheCommand covers the "Install with: Docker"
+// choice in the UI: the same command, plus --docker so the installer on the
+// target machine writes compose files instead of a systemd unit.
+func TestDockerInstallMethodMarksTheCommand(t *testing.T) {
+	h := newHarness(t, true)
+	cookies := h.login(t)
+
+	commandFor := func(path, name string) string {
+		t.Helper()
+		status, body, _ := h.api("POST", path, map[string]any{"name": name}, cookies)
+		if status != http.StatusOK {
+			t.Fatalf("adding %s returned %d: %s", name, status, body)
+		}
+		var result struct {
+			InstallCommand string `json:"installCommand"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.InstallCommand
+	}
+
+	docker := commandFor("/api/agents?method=docker", "docker-box")
+	if !strings.Contains(docker, " --docker") {
+		t.Fatalf("the Docker install command should carry --docker:\n%s", docker)
+	}
+	if !strings.Contains(docker, "/install.sh") {
+		t.Fatalf("the Docker install command should still use the control node's installer:\n%s", docker)
+	}
+	service := commandFor("/api/agents", "service-box")
+	if strings.Contains(service, "--docker") {
+		t.Fatalf("the default command should not ask for Docker:\n%s", service)
+	}
+}

@@ -657,11 +657,16 @@ function openAddAgent() {
           h('option', { value: '0' }, 'never'),
           h('option', { value: '1' }, '1 hour'),
           h('option', { value: '24' }, '24 hours'),
-          h('option', { value: '168' }, '7 days')))),
+          h('option', { value: '168' }, '7 days'))),
+      h('label', { class: 'field' }, h('span', null, 'Install with'),
+        h('select', { name: 'method' },
+          h('option', { value: 'service' }, 'a systemd service (recommended)'),
+          h('option', { value: 'docker' }, 'a Docker container')))),
     h('div', { class: 'callout' },
       h('strong', null, 'How agents connect'),
       h('span', { class: 'muted', text: 'Agents dial out to this control node, so they need no open ports. ' +
-        'They reach each other directly when their NAT allows it and through the control node otherwise.' })),
+        'They reach each other directly when their NAT allows it and through the control node otherwise. ' +
+        'With Docker, run the command on the machine that should host the agent, in the directory the compose files should live in.' })),
     h('div', { class: 'field-error', 'data-error': 'add', hidden: true }),
     h('div', { class: 'modal-foot' },
       h('button', { class: 'btn', type: 'button', 'data-action': 'modal-close' }, 'Cancel'),
@@ -683,6 +688,7 @@ function openAddAgent() {
     const data = new FormData(form);
     const advertise = String(data.get('advertise') || '').split(',').map((s) => s.trim()).filter(Boolean);
     const name = String(data.get('name') || '').trim();
+    const method = String(data.get('method') || 'service');
     if (!name) {
       const box = $('[data-error=add]', form);
       box.hidden = false;
@@ -690,7 +696,9 @@ function openAddAgent() {
       return;
     }
     try {
-      const result = await api('/api/agents', {
+      // The method decides which install command comes back: a systemd service
+      // or a Docker container (--docker).
+      const result = await api('/api/agents?method=' + encodeURIComponent(method), {
         method: 'POST',
         body: {
           name,
@@ -712,10 +720,12 @@ function openAddAgent() {
 }
 
 function showCreated(agent, command) {
+  const docker = String(command || '').includes('--docker');
   const body = h('div', { class: 'stack' },
     h('div', { class: 'callout ok' },
       h('strong', null, agent.name + ' is ready to enroll'),
-      h('span', { class: 'muted', text: 'Mesh address ' + agent.prefix + '. The command below only works while the token is valid.' })),
+      h('span', { class: 'muted', text: 'Mesh address ' + agent.prefix + '. The command below only works while the token is valid.' +
+        (docker ? ' It writes a Dockerfile, a docker-compose.yml and a .env, then starts the container.' : '') })),
     h('div', { class: 'cmd', text: command }),
     h('div', { class: 'cmd-actions' },
       copyButton(command, 'Copy command'),

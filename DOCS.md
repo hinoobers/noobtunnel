@@ -8,6 +8,7 @@ security model and operations.
 - [Install](#install)
   - [Control node](#control-node)
   - [Add an agent](#add-an-agent)
+    - [Install an agent as a Docker container](#install-an-agent-as-a-docker-container)
   - [Reach a LAN through one agent](#reach-a-lan-through-one-agent)
   - [Publish services](#publish-services-resources-tab)
   - [Extra public addresses](#extra-public-addresses-exit-nodes)
@@ -185,6 +186,42 @@ noobtunnel status                      # local view of the same state
 ip -brief addr show noobtun
 ping 10.77.0.3                         # another agent's mesh address
 ```
+
+#### Install an agent as a Docker container
+
+The agent can also run as a container. Pick **a Docker container** under *Install
+with* in the **Add agent** window (the command then carries `--docker`), or add
+`--docker` to the command yourself, and run it on the machine that should host the
+agent, **from the directory the container should live in**:
+
+```sh
+mkdir -p /opt/noobtunnel-agent && cd /opt/noobtunnel-agent
+curl -fsSLk --retry 3 --pinnedpubkey 'sha256//…' https://YOUR.VPS.IP:8443/install.sh | sudo sh -s -- --server YOUR.VPS.IP:8443 --token nt_… --fingerprint 12:34:… --name docker-box --docker
+```
+
+It writes `Dockerfile`, `docker-compose.yml`, `.env` and the agent binary into
+that directory, then runs `docker compose up -d --build` and waits until the
+container is up:
+
+- **Docker missing?** It says so and asks before installing it, using the
+  official `get.docker.com` script. Answer no and it stops without changing
+  anything.
+- The container uses `network_mode: host` with `NET_ADMIN`, `SYS_MODULE` and
+  `/dev/net/tun`: the WireGuard interface and its routes belong to the machine
+  rather than to the container, which is also what lets **Advertise everything**
+  see this machine's own networks instead of Docker's bridges.
+- The identity lives in `./noobtunnel-state` (mounted at `/var/lib/noobtunnel`),
+  so `docker compose down` followed by `docker compose up -d` keeps the same mesh
+  address.
+- Advertising networks also needs the host to forward packets, which is not
+  something a container can enable for the machine: the installer sets
+  `net.ipv4.ip_forward=1` and persists it in
+  `/etc/sysctl.d/99-noobtunnel-agent.conf`.
+- Day to day, from that directory: `docker compose logs -f`,
+  `docker compose restart`, `docker compose down`, `docker compose up -d`.
+
+Running the installer without `--docker` on a terminal asks which of the two ways
+you want, so the one-line command from the UI works for both.
 
 ### Reach a LAN through one agent
 

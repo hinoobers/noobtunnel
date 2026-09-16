@@ -23,6 +23,9 @@ type InstallOptions struct {
 	Pin             string
 	Direct          bool
 	Interface       string
+	// Docker asks for the command that runs the agent as a container instead of
+	// installing it as a systemd service, which is what --docker does.
+	Docker bool
 }
 
 // installOptions derives the enrollment parameters from the request the admin
@@ -44,12 +47,18 @@ func (s *Server) installOptions(r *http.Request) InstallOptions {
 	} else if host == "" {
 		host = s.hubEndpoint("")
 	}
+	// The UI passes ?method=docker when the operator picked the Docker install.
+	docker := false
+	if r != nil {
+		docker = strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("method")), "docker")
+	}
 	return InstallOptions{
 		ControlEndpoint: host,
 		Fingerprint:     s.cert.Fingerprint,
 		Pin:             s.cert.Pin,
 		Direct:          settings.DirectPaths,
 		Interface:       settings.Interface,
+		Docker:          docker,
 	}
 }
 
@@ -79,6 +88,12 @@ func (s *Server) InstallCommand(agent *store.Agent, opts InstallOptions) string 
 	}
 	if !opts.Direct {
 		b.WriteString(" --no-direct")
+	}
+	if opts.Docker {
+		// The installer writes the compose files into the directory it runs from
+		// and starts the container there, so the operator runs it on the machine
+		// that should host the agent.
+		b.WriteString(" --docker")
 	}
 	return b.String()
 }

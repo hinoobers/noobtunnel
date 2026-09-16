@@ -7,6 +7,11 @@
 #
 # The script is POSIX sh, needs root (for the WireGuard device) and is safe to
 # re-run: it reuses the existing machine identity in /var/lib/noobtunnel.
+#
+# It asks how the agent should run here: as a systemd service (the default) or
+# as a Docker container. With --docker it writes a Dockerfile, a
+# docker-compose.yml and a .env into the current directory and starts the
+# container there, so run it in the directory the container should live in.
 set -eu
 
 SERVER=""
@@ -20,6 +25,8 @@ DIRECT="1"
 KEEP="0"
 UNINSTALL="0"
 PURGE="0"
+METHOD=""
+SYSCTL_DIR="${NOOBTUNNEL_SYSCTL_DIR:-/etc/sysctl.d}"
 STATE_DIR="/var/lib/noobtunnel"
 CONF_DIR="/etc/noobtunnel"
 BIN="/usr/local/bin/noobtunnel"
@@ -29,6 +36,120 @@ UNIT="/etc/systemd/system/${SERVICE}.service"
 log()  { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m!!\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m!!\033[0m %s\n' "$*" >&2; exit 1; }
+
+# has_terminal reports whether the questions below can be asked. When the script
+# is piped into the shell (curl … | sudo sh) stdin is the script itself, so the
+# answers have to come from the terminal.
+has_terminal() {
+	[ "${NOOBTUNNEL_FAKE_TTY:-0}" = "1" ] && return 0
+	[ -t 0 ] && return 0
+	[ -r /dev/tty ]
+}
+
+# ask reads one line, from the terminal when there is one.
+ask() {
+	if [ "${NOOBTUNNEL_FAKE_TTY:-0}" = "1" ]; then
+		# Used by the self test: pretend a terminal is attached and read stdin.
+		read -r REPLY || REPLY=""
+	elif [ -t 0 ]; then
+		read -r REPLY || REPLY=""
+	elif [ -r /dev/tty ]; then
+		read -r REPLY < /dev/tty || REPLY=""
+	else
+		REPLY=""
+	fi
+}
+
+# confirm asks a yes/no question, defaulting to yes.
+confirm() {
+	printf '\033[36m?>\033[0m %s [Y/n]: ' "$1"
+	ask
+	case "${REPLY:-y}" in
+		y|Y|yes|YES|"") return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+# choose_method decides how the agent runs here: a systemd service (the original
+# way) or a Docker container, picked at the prompt or passed as --docker/--service.
+choose_method() {
+	[ -z "$METHOD" ] || return 0
+	if ! has_terminal; then
+		METHOD="service"
+		return 0
+	fi
+	printf '\nHow should this agent run on this machine?\n'
+	printf '  1) as a systemd service (default, nothing else to install)\n'
+	printf '  2) as a Docker container (files are written to %s)\n' "$PWD"
+	printf '\033[36m?>\033[0m choose 1 or 2 [1]: '
+	ask
+	case "${REPLY:-1}" in
+		2|d|D|docker) METHOD="docker" ;;
+		*) METHOD="service" ;;
+	esac
+}
+
+# compose_run runs docker compose, falling back to the standalone docker-compose.
+compose_run() {
+	if docker compose version >/dev/null 2>&1; then
+		docker compose "$@"
+		return $?
+	fi
+	if command -v docker-compose >/dev/null 2>&1; then
+		docker-compose "$@"
+		return $?
+	fi
+	return 127
+}
+
+# ensure_docker makes sure docker and docker compose are usable, offering to
+# install Docker with the official script when it is missing.
+ensure_docker() {
+	if command -v docker >/dev/null 2>&1; then
+		log "docker is already installed ($(docker --version 2>/dev/null | head -n1))"
+	else
+		warn "Docker is not installed on this machine"
+		if ! has_terminal; then
+			die "Docker is required for --docker" "install it first: curl -fsSL https://get.docker.com | sh"
+		fi
+		if ! confirm "Install Docker now with the official get.docker.com script?"; then
+			die "Docker is required for this install method" "install Docker yourself (https://get.docker.com) and run this command again"
+		fi
+		log "installing Docker from get.docker.com (this takes a minute)"
+		GET_DOCKER="$(mktemp 2>/dev/null || echo "${DIR}/.get-docker.sh.$$")"
+		curl -fsSL https://get.docker.com -o "${GET_DOCKER}" ||
+			die "could not download the Docker installer" "check the network and try again"
+		sh "${GET_DOCKER}" ||
+			die "the Docker installer failed" "read its output above, fix the problem and run this command again"
+		rm -f "${GET_DOCKER}"
+		command -v docker >/dev/null 2>&1 ||
+			die "Docker is installed but not on PATH yet" "open a new shell and run this command again"
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl enable --now docker >/dev/null 2>&1 || true
+		fi
+		log "docker installed"
+	fi
+	if ! docker info >/dev/null 2>&1; then
+		warn "the docker daemon is not answering, starting it"
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl start docker >/dev/null 2>&1 || true
+			sleep 2
+		fi
+		docker info >/dev/null 2>&1 ||
+			die "the docker daemon is not running" "start it (systemctl start docker) and run this command again"
+	fi
+	if ! compose_run version >/dev/null 2>&1; then
+		warn "the docker compose plugin is missing"
+		if command -v apt-get >/dev/null 2>&1; then
+			apt-get update -qq >/dev/null 2>&1 || true
+			apt-get install -y -qq docker-compose-plugin >/dev/null 2>&1 ||
+				die "could not install docker compose" "install the compose plugin and run this command again"
+		else
+			die "docker compose is required" "install the compose plugin and run this command again"
+		fi
+	fi
+	log "docker compose is ready"
+}
 
 usage() {
 	cat <<'EOF'
@@ -45,6 +166,10 @@ noobtunnel agent installer
   --keep-interface       leave the WireGuard device up when the agent stops
   --uninstall            remove the agent
   --purge                with --uninstall, also remove the machine identity
+  --docker               run the agent as a Docker container instead of a
+                         systemd service; the compose files are written to the
+                         current directory
+  --service              run the agent as a systemd service (the default)
 EOF
 }
 
@@ -67,6 +192,8 @@ while [ "$#" -gt 0 ]; do
 		--keep-interface) KEEP="1"; shift ;;
 		--uninstall)   UNINSTALL="1"; shift ;;
 		--purge)       PURGE="1"; shift ;;
+		--docker)      METHOD="docker"; shift ;;
+		--service)     METHOD="service"; shift ;;
 		-h|--help)     usage; exit 0 ;;
 		*)             die "unknown option: $1 (try --help)" ;;
 	esac
@@ -155,6 +282,145 @@ install_packages() {
 		warn "no supported package manager found, install $* manually"
 	fi
 }
+
+# docker_install writes the agent's Docker files into the current directory and
+# starts the container from there. The container shares the host's network
+# namespace, because the WireGuard interface and its routes have to belong to this
+# machine, and --advertise-all has to see this machine's own networks.
+docker_install() {
+	DIR="$PWD"
+	log "installing the agent as a Docker container in ${DIR}"
+	[ -w "$DIR" ] || die "${DIR} is not writable" "run this from a directory you can write to, for example: mkdir -p /opt/noobtunnel-agent && cd /opt/noobtunnel-agent"
+	ensure_docker
+
+	log "downloading the agent binary for linux/${ARCH}"
+	# shellcheck disable=SC2086
+	$CURL -o "${DIR}/noobtunnel" "${BASE}/download/noobtunnel_linux_${ARCH}" || die "download failed"
+	chmod 0755 "${DIR}/noobtunnel"
+
+	# The image is built here: a small base with the tools the agent drives, plus
+	# the binary that was just downloaded.
+	cat > "${DIR}/Dockerfile" <<'DOCKERFILE'
+FROM alpine:3.20
+RUN apk add --no-cache wireguard-tools iproute2 iptables curl
+COPY noobtunnel /usr/local/bin/noobtunnel
+ENTRYPOINT ["/usr/local/bin/noobtunnel", "agent"]
+DOCKERFILE
+	log "wrote ${DIR}/Dockerfile"
+
+	# Settings and the token live in .env, which compose reads next to the file.
+	umask 077
+	{
+		echo "# Written by the noobtunnel agent installer. Keep this file private."
+		echo "NOOBTUNNEL_SERVER=${SERVER}"
+		echo "NOOBTUNNEL_TOKEN=${TOKEN}"
+		if [ -n "$FINGERPRINT" ]; then
+			echo "NOOBTUNNEL_FINGERPRINT=${FINGERPRINT}"
+		fi
+		if [ -n "$NAME" ]; then
+			echo "NOOBTUNNEL_NAME=${NAME}"
+		fi
+		if [ -n "$ADVERTISE" ]; then
+			echo "NOOBTUNNEL_ADVERTISE=${ADVERTISE}"
+		fi
+		if [ "${ADVERTISE_ALL:-0}" = "1" ]; then
+			echo "NOOBTUNNEL_ADVERTISE_ALL=1"
+		fi
+		if [ -n "$IFACE" ]; then
+			echo "NOOBTUNNEL_INTERFACE=${IFACE}"
+		fi
+		echo "NOOBTUNNEL_DIRECT=${DIRECT}"
+		echo "NOOBTUNNEL_KEEP_INTERFACE=${KEEP}"
+		echo "NOOBTUNNEL_STATE_DIR=/var/lib/noobtunnel"
+	} > "${DIR}/.env"
+	chmod 0600 "${DIR}/.env"
+	log "wrote ${DIR}/.env (it holds the enrollment token, keep it private)"
+	umask 022
+
+	{
+		cat <<'COMPOSE'
+services:
+  noobtunnel-agent:
+    build: .
+    image: noobtunnel-agent
+    container_name: noobtunnel-agent
+    restart: unless-stopped
+    # The interface the agent creates belongs to this machine, and advertised
+    # networks are this machine's networks, so it shares the host's network.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./noobtunnel-state:/var/lib/noobtunnel
+      - /lib/modules:/lib/modules:ro
+    env_file:
+      - .env
+COMPOSE
+		if [ "${ADVERTISE_ALL:-0}" = "1" ] || [ -n "$ADVERTISE" ]; then
+			cat <<'COMPOSE_TAIL'
+    # Routing this machine's networks into the mesh needs the host to forward
+    # packets. The installer enabled that with:
+    #   sysctl -w net.ipv4.ip_forward=1
+COMPOSE_TAIL
+		fi
+	} > "${DIR}/docker-compose.yml"
+	log "wrote ${DIR}/docker-compose.yml"
+
+	if [ "${ADVERTISE_ALL:-0}" = "1" ] || [ -n "$ADVERTISE" ]; then
+		# Forwarding is a host setting: a container cannot enable it for the
+		# machine it advertises.
+		if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 1)" != "1" ]; then
+			sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 ||
+				warn "could not enable IP forwarding, advertised networks may not be reachable"
+		fi
+		if [ -n "${SYSCTL_DIR}" ]; then
+			mkdir -p "${SYSCTL_DIR}" 2>/dev/null || true
+			echo "net.ipv4.ip_forward = 1" > "${SYSCTL_DIR}/99-noobtunnel-agent.conf" 2>/dev/null ||
+				warn "could not persist IP forwarding in ${SYSCTL_DIR}"
+		fi
+		log "IP forwarding enabled for the advertised networks"
+	fi
+
+	log "building the image and starting the container"
+	compose_run up -d --build ||
+		die "docker compose could not start the container" "read the output above, then run: docker compose up -d --build"
+
+	sleep 3
+	if ! docker ps --format '{{.Names}}' | grep -qx 'noobtunnel-agent'; then
+		echo
+		warn "the container is not running, its last log lines:"
+		compose_run logs --tail 20 noobtunnel-agent 2>/dev/null | sed 's/^/    /' || true
+		die "the agent container did not stay up" "read the log lines above, then run: docker compose up -d"
+	fi
+
+	printf '\n'
+	log "the noobtunnel agent is running in Docker"
+	cat <<EOF
+
+  Directory   ${DIR}
+  Files       Dockerfile, docker-compose.yml, .env, noobtunnel
+  State       ${DIR}/noobtunnel-state (the machine identity, keep it)
+
+Day to day, from ${DIR}:
+  docker compose logs -f            follow the agent's log
+  docker compose restart            restart it
+  docker compose down               stop and remove the container
+  docker compose up -d              start it again with the same identity
+
+The agent appears in the control node's UI within a few seconds.
+EOF
+}
+
+# The Docker path asks how the agent should run here; the systemd path below is
+# what happens when the answer is (or defaults to) a service.
+choose_method
+if [ "$METHOD" = "docker" ]; then
+	docker_install
+	exit 0
+fi
 
 NEED_PACKAGES=""
 command -v wg >/dev/null 2>&1 || NEED_PACKAGES="wireguard-tools"
