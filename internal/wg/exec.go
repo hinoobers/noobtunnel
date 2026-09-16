@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,10 @@ type ExecBackend struct {
 
 	mu     sync.Mutex
 	routes map[string]map[string]bool
+	// syncRoutes is serialised: it deletes a prefix and puts it back, and a second
+	// pass read-back in the middle of that would report a route that is there as
+	// missing.
+	syncing sync.Mutex
 }
 
 // Name implements Backend.
@@ -154,6 +159,8 @@ const tunnelRouteMetric = "1000"
 
 // syncRoutes installs the desired routes and removes ones we installed before.
 func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []string) error {
+	b.syncing.Lock()
+	defer b.syncing.Unlock()
 	run := b.runner()
 	want := make(map[string]bool, len(desired))
 	for _, r := range desired {
@@ -243,9 +250,19 @@ func tablePeek(table string) string {
 // routePresent reports whether a prefix is in a `ip route show` listing for an
 // interface.
 func routePresent(table, prefix, iface string) bool {
+	want, ok := parseRoutePrefix(prefix)
+	if !ok {
+		return false
+	}
 	for _, line := range strings.Split(table, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != prefix {
+		if len(fields) == 0 {
+			continue
+		}
+		// `ip route show` prints a /32 as a bare address, so compare parsed
+		// prefixes rather than their text.
+		got, ok := parseRoutePrefix(fields[0])
+		if !ok || got != want {
 			continue
 		}
 		for i, f := range fields {
@@ -255,6 +272,18 @@ func routePresent(table, prefix, iface string) bool {
 		}
 	}
 	return false
+}
+
+// parseRoutePrefix accepts what `ip route show` prints: a prefix with its mask, or
+// a bare address when the mask is a full one.
+func parseRoutePrefix(raw string) (netip.Prefix, bool) {
+	if prefix, err := netip.ParsePrefix(raw); err == nil {
+		return prefix.Masked(), true
+	}
+	if addr, err := netip.ParseAddr(raw); err == nil {
+		return netip.PrefixFrom(addr, addr.BitLen()), true
+	}
+	return netip.Prefix{}, false
 }
 
 // EnsureRoutes re-asserts the kernel routes for an interface without touching the

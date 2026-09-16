@@ -119,6 +119,30 @@ func TestSyncFeedsSetConfAConfigItUnderstands(t *testing.T) {
 	}
 }
 
+// TestRoutePresentAcceptsWhatIPPrints covers the mistake that made a correct
+// control node look broken: `ip route show` prints a /32 as a bare address, and
+// comparing that against "172.18.0.3/32" never matched.
+func TestRoutePresentAcceptsWhatIPPrints(t *testing.T) {
+	table := strings.Join([]string{
+		"default via 89.144.8.1 dev ens3 proto static",
+		"10.0.0.0/24 dev noobtun scope link metric 1000",
+		"10.77.0.0/16 dev noobtun scope link metric 1000",
+		"172.18.0.0/16 dev noobtun scope link metric 1000",
+		"172.18.0.3 dev noobtun scope link metric 1000",
+	}, "\n")
+	for _, want := range []string{"10.0.0.0/24", "10.77.0.0/16", "172.18.0.0/16", "172.18.0.3/32"} {
+		if !routePresent(table, want, "noobtun") {
+			t.Fatalf("%s is in the table, it was reported missing:\n%s", want, table)
+		}
+	}
+	if routePresent(table, "172.19.0.0/16", "noobtun") {
+		t.Fatal("a prefix that is not in the table must not be reported as present")
+	}
+	if routePresent(table, "172.18.0.3/32", "ens3") {
+		t.Fatal("a route on another interface is not our route")
+	}
+}
+
 // failingRunner refuses one command, which is what an install that failed once
 // looks like from the backend's point of view.
 type failingRunner struct {
