@@ -35,14 +35,20 @@ func (l *errorLog) record(source, message, detail, hint string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.entries) > 0 {
-		last := l.entries[0]
-		if last.Source == source && last.Message == message && last.Detail == detail {
-			// Same failure again: keep the newest time without repeating it.
-			last.Time = time.Now().UTC()
-			l.entries[0] = last
-			return
+	// The same failure happening again moves its entry back to the top with a
+	// fresh time instead of stacking up: a retrying sync should not fill the list.
+	for i, existing := range l.entries {
+		if existing.Source != source || existing.Message != message || existing.Detail != detail {
+			continue
 		}
+		existing.Time = time.Now().UTC()
+		if i > 0 {
+			l.entries = append(l.entries[:i], l.entries[i+1:]...)
+			l.entries = append([]ErrorEntry{existing}, l.entries...)
+		} else {
+			l.entries[0] = existing
+		}
+		return
 	}
 	entry := ErrorEntry{
 		Time:    time.Now().UTC(),

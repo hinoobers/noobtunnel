@@ -13,6 +13,18 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+// worthReporting keeps the Errors view about the operator's own names. A
+// handshake without SNI, or from a scanner, is not a certificate problem: those
+// clients get the self-signed fallback and would otherwise bury the real failures
+// under "missing server name" lines.
+func worthReporting(name string, err error) bool {
+	if strings.TrimSpace(name) == "" {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return !strings.Contains(message, "missing server name")
+}
+
 // newProxyManager builds the resource proxy manager, wiring in the certificate
 // provider for terminated HTTPS resources and the account check used by identity
 // controlled ones.
@@ -60,8 +72,10 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 			OnError: func(name string, err error) {
 				opts.Logger.Warn("could not obtain a managed certificate, serving a self-signed one",
 					"domain", name, "error", err)
-				errorEvents.record("certificate", "no managed certificate for "+name, err.Error(),
-					"check that the name resolves here and that port 80 is reachable for the ACME challenge")
+				if worthReporting(name, err) {
+					errorEvents.record("certificate", "no managed certificate for "+name, err.Error(),
+						"check that the name resolves here and that port 80 is reachable for the ACME challenge")
+				}
 			},
 		}
 		// HTTP-01 validation is answered on the ports HTTP resources use.
