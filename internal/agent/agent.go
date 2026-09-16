@@ -731,7 +731,8 @@ func (a *Agent) applyDevice(ctx context.Context, force bool) error {
 	}
 	rendered := cfg.Render()
 	a.mu.Lock()
-	if a.lastApplied == rendered && !force {
+	sameConfig := a.lastApplied == rendered
+	if sameConfig && !force {
 		a.mu.Unlock()
 		return nil
 	}
@@ -743,7 +744,14 @@ func (a *Agent) applyDevice(ctx context.Context, force bool) error {
 		return err
 	}
 	a.setLastError("")
-	a.log.Info("wireguard device in sync",
+	// Re-applying the same configuration (a forced resync, a retry after a
+	// failure) is worth a line in the file only when someone is debugging: the
+	// interesting line is the one that describes a change.
+	level := slog.LevelInfo
+	if sameConfig {
+		level = slog.LevelDebug
+	}
+	a.log.Log(ctx, level, "wireguard device in sync",
 		"addresses", cfg.Interface.Addresses,
 		"peers", len(cfg.Peers),
 		"routes", len(cfg.Routes))
