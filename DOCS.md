@@ -472,6 +472,15 @@ like the bug it fixes.
    head` (a trailing `-j REJECT --reject-with icmp-host-prohibited` is the trap)
    and `sudo tcpdump -ni noobtun port <port>` while connecting from the control
    node.
+   The same trap exists on the *control node*, in the other direction: published
+   services are dialled from here, so the answers arrive addressed to this machine
+   and go through `INPUT`, not `FORWARD`. A host firewall that rejects traffic on
+   the mesh interface drops every one of them, which looks exactly like a service
+   that is down - the agent side is perfect, `curl` on the agent works, and only
+   the control node times out. The dashboard has a separate check for it
+   ("Inbound mesh traffic"), and the fix is
+   `iptables -I INPUT -i noobtun -j ACCEPT` (`ufw allow in on noobtun` when ufw is
+   in use). The control node applies this itself at startup.
 4. **Is the agent's device configured?** The agent must show
    `wireguard device in sync` in its log, and `wg show` on the machine (or in the
    container) must list a peer. An agent whose earlier sync failed keeps its

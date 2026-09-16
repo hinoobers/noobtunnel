@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -84,6 +85,14 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 
 	settings := s.store.Settings()
+	// The connection this node makes is answered into its own INPUT chain, so a
+	// host firewall that rejects the mesh interface breaks every target here while
+	// the agent side looks perfect.
+	if runtime.GOOS == "linux" {
+		if inbound := s.inboundCheck(ctx, settings.Interface); inbound.Status == statusFail {
+			add("Inbound mesh traffic", "fail", inbound.Detail, inbound.Fix)
+		}
+	}
 	status, err := s.backend.Status(ctx, settings.Interface)
 	switch {
 	case err != nil:

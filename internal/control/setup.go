@@ -48,6 +48,14 @@ func (s *Server) ApplySystemSetup(ctx context.Context) error {
 	} else {
 		problems = append(problems, "neither iptables nor nft was found, relayed traffic may be blocked")
 	}
+	// ufw keeps its own chains and its default deny is a REJECT in INPUT, so the
+	// rules above are not enough on a host where it is active.
+	if ufwPath, err := exec.LookPath("ufw"); err == nil {
+		if out, statusErr := exec.CommandContext(ctx, ufwPath, "status").Output(); statusErr == nil &&
+			strings.Contains(string(out), "Status: active") {
+			problems = append(problems, ufwAllowMesh(ctx, ufwPath, settings.Interface)...)
+		}
+	}
 
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "; "))
@@ -55,8 +63,38 @@ func (s *Server) ApplySystemSetup(ctx context.Context) error {
 	return nil
 }
 
+// ufwAllowMesh accepts traffic on the mesh interface in ufw's own rules: input
+// for the connections this node makes, and routed for the ones it relays.
+func ufwAllowMesh(ctx context.Context, ufw, iface string) []string {
+	var problems []string
+	for _, args := range [][]string{
+		{"allow", "in", "on", iface},
+		{"route", "allow", "in", "on", iface},
+		{"route", "allow", "out", "on", iface},
+	} {
+		out, err := exec.CommandContext(ctx, ufw, args...).CombinedOutput()
+		if err == nil || strings.Contains(string(out), "Skipping") {
+			continue
+		}
+		problems = append(problems, "ufw "+strings.Join(args, " ")+": "+err.Error())
+	}
+	return problems
+}
+
 func enableIptablesForwarding(ctx context.Context, iptables, iface, meshCIDR string) []string {
 	var problems []string
+	// The control node's own published services are dialled from here, so the
+	// answers come back addressed to this machine and go through INPUT, not
+	// FORWARD. A host firewall that rejects traffic arriving on the mesh interface
+	// - ufw's default is "-A INPUT -j REJECT --reject-with icmp-host-prohibited" -
+	// therefore drops every answer while the agent side looks perfect: the tunnel
+	// handshakes, the service answers on its own machine, and the proxy here times
+	// out. The mesh interface has to be accepted for input as well.
+	if !runQuiet(ctx, iptables, "-C", "INPUT", "-i", iface, "-j", "ACCEPT") {
+		if !runQuiet(ctx, iptables, "-I", "INPUT", "-i", iface, "-j", "ACCEPT") {
+			problems = append(problems, "iptables -I INPUT -i "+iface+" -j ACCEPT failed")
+		}
+	}
 	for _, direction := range []string{"-i", "-o"} {
 		if runQuiet(ctx, iptables, "-C", "FORWARD", direction, iface, "-j", "ACCEPT") {
 			continue
@@ -100,6 +138,10 @@ func ensureNftForwarding(ctx context.Context, nft, iface string) error {
 		{"add", "chain", "inet", "noobtunnel", "forward", "{", "type", "filter", "hook", "forward", "priority", "0", ";", "policy", "accept", ";", "}"},
 		{"add", "rule", "inet", "noobtunnel", "forward", "iifname", `"` + iface + `"`, "accept"},
 		{"add", "rule", "inet", "noobtunnel", "forward", "oifname", `"` + iface + `"`, "accept"},
+		// Answers to connections this control node makes arrive addressed to
+		// this machine, which is the input hook, not the forward one.
+		{"add", "chain", "inet", "noobtunnel", "input", "{", "type", "filter", "hook", "input", "priority", "0", ";", "policy", "accept", ";", "}"},
+		{"add", "rule", "inet", "noobtunnel", "input", "iifname", `"` + iface + `"`, "accept"},
 	}
 	for _, step := range steps {
 		out, err := exec.CommandContext(ctx, nft, step...).CombinedOutput()

@@ -102,6 +102,7 @@ func (s *Server) RunChecks(ctx context.Context) []Check {
 
 	if runtime.GOOS == "linux" {
 		checks = append(checks, forwardingCheck())
+		checks = append(checks, s.inboundCheck(ctx, settings.Interface))
 		checks = append(checks, s.firewallCheck(ctx, settings.Interface))
 	}
 
@@ -271,6 +272,43 @@ func domainFix(detail string) string {
 		return "the address port 443 is bound to does not exist on this host; check the exit node or listen address"
 	default:
 		return "check journalctl -u noobtunnel-server for the reason port 443 could not be bound, then restart the control node"
+	}
+}
+
+// inboundCheck verifies the one rule that is easy to miss and impossible to
+// guess: this control node dials published targets itself, so the answers come
+// back addressed to it and arrive on the input chain. A host firewall that
+// rejects traffic on the mesh interface drops them, the agent side looks
+// perfect, and every target times out.
+func (s *Server) inboundCheck(ctx context.Context, iface string) Check {
+	if _, err := exec.LookPath("iptables"); err == nil {
+		if runQuiet(ctx, "iptables", "-C", "INPUT", "-i", iface, "-j", "ACCEPT") {
+			return Check{ID: "inbound", Title: "Inbound mesh traffic", Status: statusOK,
+				Detail: "iptables accepts traffic arriving on " + iface}
+		}
+		return Check{
+			ID: "inbound", Title: "Inbound mesh traffic", Status: statusFail,
+			Detail: "iptables does not accept traffic arriving on " + iface +
+				", so answers to the connections this control node makes are dropped",
+			Fix: "iptables -I INPUT -i " + iface + " -j ACCEPT (restart the control node to have this applied)",
+		}
+	}
+	if _, err := exec.LookPath("nft"); err == nil {
+		out, err := exec.CommandContext(ctx, "nft", "list", "ruleset").Output()
+		if err == nil && strings.Contains(string(out), iface) && strings.Contains(string(out), "input") {
+			return Check{ID: "inbound", Title: "Inbound mesh traffic", Status: statusOK,
+				Detail: "nftables accepts traffic arriving on " + iface}
+		}
+		return Check{
+			ID: "inbound", Title: "Inbound mesh traffic", Status: statusFail,
+			Detail: "no nftables rule accepts traffic arriving on " + iface,
+			Fix:    "nft add rule inet noobtunnel input iifname \"" + iface + "\" accept",
+		}
+	}
+	return Check{
+		ID: "inbound", Title: "Inbound mesh traffic", Status: statusWarn,
+		Detail: "neither iptables nor nft is installed, inbound traffic could not be verified",
+		Fix:    "apt-get install -y iptables",
 	}
 }
 
