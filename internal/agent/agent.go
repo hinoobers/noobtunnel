@@ -400,6 +400,7 @@ func (a *Agent) controlSession(ctx context.Context) error {
 				// rules are re-asserted rather than assumed.
 				a.allowMeshTraffic(ctx)
 				a.meshNATExempt(ctx, a.meshCIDR())
+				a.meshRawExempt(ctx, a.opts.Interface, a.carriedPrefixes())
 			}
 		}
 	}
@@ -654,6 +655,7 @@ func (a *Agent) syncCarriedForwarding(ctx context.Context) {
 	a.log.Info("the mesh routes networks through this agent: opening host forwarding",
 		"networks", strings.Join(carry, ", "))
 	a.allowMeshTraffic(ctx)
+	a.meshRawExempt(ctx, a.opts.Interface, carry)
 }
 
 // reconcile recomputes path ownership from the live device and applies changes.

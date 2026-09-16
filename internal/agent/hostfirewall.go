@@ -44,6 +44,50 @@ func (a *Agent) setupHost(ctx context.Context) {
 	a.allowMeshTraffic(ctx)
 }
 
+// meshRawExempt lets traffic arriving from the mesh past the host's raw table.
+//
+// Pterodactyl (wings) blocks container addresses there - a rule like
+// "-A PREROUTING -d 172.18.0.3/32 ! -i pterodactyl0 -j DROP" - and the raw table
+// runs before conntrack, before the routing decision and before FORWARD. A packet
+// from the mesh is therefore dropped with no counter anywhere in the paths people
+// look at: the firewall rules noobtunnel installs are correct and never see it,
+// nothing is logged, and the service looks dead.
+//
+// The exception is scoped to the addresses the control node routes through this
+// agent, and re-asserted, so the other program's rules cannot push it out of the
+// way.
+func (a *Agent) meshRawExempt(ctx context.Context, iface string, prefixes []string) {
+	if !a.opts.SetupSystem || len(prefixes) == 0 {
+		return
+	}
+	host := a.host()
+	iptables, err := host.LookPath("iptables")
+	if err != nil {
+		return
+	}
+	var problems []string
+	for _, prefix := range prefixes {
+		// The table comes before the operation, so the chain follows `-D`/`-I`
+		// where iptables expects it.
+		rule := []string{"PREROUTING", "-i", iface, "-d", prefix, "-j", "ACCEPT"}
+		for attempts := 0; attempts < 4; attempts++ {
+			if _, err := host.Run(ctx, iptables, append([]string{"-t", "raw", "-D"}, rule...)...); err != nil {
+				break
+			}
+		}
+		if _, err := host.Run(ctx, iptables, append([]string{"-t", "raw", "-I"}, rule...)...); err != nil {
+			problems = append(problems, fmt.Sprintf("iptables -t raw -I PREROUTING -i %s -d %s -j ACCEPT: %v", iface, prefix, err))
+		}
+	}
+	if len(problems) > 0 {
+		message := "host firewall: " + strings.Join(problems, "; ")
+		a.setLastError(message)
+		a.log.Warn("could not exempt mesh traffic in the host's raw table", "problems", message)
+		return
+	}
+	a.log.Debug("mesh traffic is exempt from the host's raw table", "networks", strings.Join(prefixes, ", "))
+}
+
 // meshNATExempt keeps the host's NAT rules from rewriting traffic that leaves an
 // advertised network for the mesh.
 //

@@ -16,6 +16,25 @@ func (timeoutError) Temporary() bool { return true }
 
 var _ net.Error = timeoutError{}
 
+// TestFirewallVerdictNamesARawTableBlock covers the rule that hid behind every
+// other check: Pterodactyl blocks container addresses in the raw table, which runs
+// before conntrack, routing and FORWARD - so nothing else counts the packet and
+// every layer above it looks healthy.
+func TestFirewallVerdictNamesARawTableBlock(t *testing.T) {
+	before := []string{"0 raw -A PREROUTING -d 172.18.0.3/32 ! -i pterodactyl0 -j DROP"}
+	after := []string{"8 raw -A PREROUTING -d 172.18.0.3/32 ! -i pterodactyl0 -j DROP"}
+	status, detail, hint := firewallVerdict(before, after, "cassandra", "noobtun")
+	if status != "fail" || !strings.Contains(detail, "before the routing decision") {
+		t.Fatalf("a raw table drop has to be called out: %s / %s", status, detail)
+	}
+	if !strings.Contains(detail, "172.18.0.3/32") {
+		t.Fatalf("the rule should be quoted: %s", detail)
+	}
+	if !strings.Contains(hint, "raw") || !strings.Contains(hint, "noobtun") {
+		t.Fatalf("the fix should name the table and the interface: %s", hint)
+	}
+}
+
 // TestFirewallVerdictIgnoresThisMachinesOwnTraffic covers the answer that sent us
 // looking at OUTPUT chains: the diagnosis makes the agent open connections of its
 // own, so those counters move too, and only the chains a routed packet passes

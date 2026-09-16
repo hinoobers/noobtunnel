@@ -236,6 +236,40 @@ func TestNATExemptionIgnoresWhatItCannotUse(t *testing.T) {
 	}
 }
 
+// TestCarriedAddressesAreExemptedFromTheRawTable covers the rule that hid behind
+// every other check: Pterodactyl blocks container addresses in the raw table,
+// which runs before conntrack, routing and FORWARD, so a packet from the mesh is
+// dropped with no counter in any of the places that were being inspected.
+func TestCarriedAddressesAreExemptedFromTheRawTable(t *testing.T) {
+	host := &fakeHost{iptables: true, existingIP: map[string]bool{}}
+	a := testAgent(host, true)
+	a.opts.Interface = "noobtun"
+	a.meshRawExempt(context.Background(), "noobtun", []string{"172.18.0.3/32"})
+
+	rule := []string{"iptables", "-t", "raw", "-I", "PREROUTING", "-i", "noobtun", "-d", "172.18.0.3/32", "-j", "ACCEPT"}
+	if !host.ran(rule...) {
+		t.Fatalf("the address has to be exempted from the raw table: %v", host.calls)
+	}
+	if !host.ran("iptables", "-t", "raw", "-D", "PREROUTING", "-i", "noobtun", "-d", "172.18.0.3/32", "-j", "ACCEPT") {
+		t.Fatalf("it should be removed first so it ends up above the other program's rules: %v", host.calls)
+	}
+
+	// Nothing carried means nothing to exempt; an operator who manages their own
+	// firewall is left alone.
+	quiet := &fakeHost{iptables: true}
+	testAgent(quiet, true).meshRawExempt(context.Background(), "noobtun", nil)
+	if len(quiet.calls) != 0 {
+		t.Fatalf("nothing to exempt: %v", quiet.calls)
+	}
+	off := &fakeHost{iptables: true}
+	managed := testAgent(off, true)
+	managed.opts.SetupSystem = false
+	managed.meshRawExempt(context.Background(), "noobtun", []string{"172.18.0.3/32"})
+	if len(off.calls) != 0 {
+		t.Fatalf("nothing should run with --setup-system=false: %v", off.calls)
+	}
+}
+
 // TestCountersSnapshotIsDiffable covers what the control node needs from an
 // agent: one line per rule with its packet count, so two snapshots can be
 // compared and the rule that consumed a packet named.

@@ -337,6 +337,19 @@ func firewallVerdict(before, after []string, agent, iface string) (status, detai
 		lines = append(lines, fmt.Sprintf("%d packet(s): %s", entry.count, entry.rule))
 	}
 	for _, entry := range grew {
+		// Rules in the raw table run before conntrack, before the routing decision
+		// and before FORWARD. Anything blocked there is invisible to every other
+		// check, and programs like Pterodactyl block container addresses exactly
+		// that way.
+		if strings.HasPrefix(entry.rule, "raw -A PREROUTING") {
+			return "fail",
+				"a rule before the routing decision consumed it on " + agent + ": " + strings.Join(lines, "; "),
+				"traffic from the mesh is blocked before it is routed (Pterodactyl blocks container addresses in the raw table). " +
+					"Update the agent - it now exempts the addresses the mesh routes through it - or add it by hand: " +
+					"iptables -t raw -I PREROUTING -i " + iface + " -d TARGET/32 -j ACCEPT"
+		}
+	}
+	for _, entry := range grew {
 		// A rule that accepted the mesh interface means iptables let the packet
 		// through, so whatever dropped it happens after the filter: the bridge,
 		// the neighbour lookup, or the machine behind it.
