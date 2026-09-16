@@ -40,6 +40,18 @@ check() {
 	if "$@" >/dev/null 2>&1; then pass "${description}"; else fail "${description}"; fi
 }
 
+# checksum is portable enough for both Linux and the Windows shell this test can
+# run under.
+checksum() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	elif command -v cksum >/dev/null 2>&1; then
+		cksum "$1" | awk '{print $1"-"$2}'
+	else
+		wc -c < "$1" | tr -d ' '
+	fi
+}
+
 make_fakes() {
 	mkdir -p "${FAKE}" "${DOCKER_BIN}" "${TARGET}" "${DOWNLOADS}" "${SYSCTL}"
 
@@ -96,8 +108,8 @@ case "${url}" in
 	*manifest.json)
 		echo '{"version":"test","binaries":[]}' > "${out}"
 		;;
-	*/download/noobtunnel_linux_*)
-		printf '\177ELF\002\001\001\000agent-binary' > "${out}"
+		*/download/noobtunnel_linux_*)
+		printf '\177ELF\002\001\001\000agent-binary-%s' "${FAKE_BINARY_TAG:-1}" > "${out}"
 		;;
 	*)
 		[ -n "${out}" ] && : > "${out}"
@@ -278,6 +290,51 @@ if grep -q "usermod" "${WORK}/log.txt"; then
 	fail "it changed group membership without a sudo user"
 else
 	pass "it leaves group membership alone when root ran it directly"
+fi
+
+printf '\n8. --update replaces the binary and restarts the container\n'
+reset_env
+install_fake_docker
+OUT="$(cd "${TARGET}" && run_installer "" --docker --server vpn.example.com:8443 --token nt_test_token)"
+check "the agent was installed first" test -f "${TARGET}/docker-compose.yml"
+COMPOSE_BEFORE="$(checksum "${TARGET}/docker-compose.yml")"
+ENV_BEFORE="$(checksum "${TARGET}/.env")"
+BIN_BEFORE="$(checksum "${TARGET}/noobtunnel")"
+: > "${WORK}/log.txt"
+
+OUT="$(cd "${TARGET}" && FAKE_BINARY_TAG=2 run_installer "" --update)"
+if [ "${DEBUG:-0}" != "0" ]; then printf '%s\n' "----- update run -----" "${OUT}"; fi
+if printf '%s' "${OUT}" | grep -q "updating the agent container"; then
+	pass "it says what it is updating"
+else
+	fail "it says what it is updating"
+fi
+if [ "${BIN_BEFORE}" != "$(checksum "${TARGET}/noobtunnel")" ]; then
+	pass "the agent binary was replaced"
+else
+	fail "the agent binary was replaced"
+fi
+check "the compose file was left alone" test "${COMPOSE_BEFORE}" = "$(checksum "${TARGET}/docker-compose.yml")"
+check "the enrollment settings were left alone" test "${ENV_BEFORE}" = "$(checksum "${TARGET}/.env")"
+if grep -q "compose up -d --build" "${WORK}/log.txt"; then
+	pass "the container was rebuilt and restarted"
+else
+	fail "the container was rebuilt and restarted"
+fi
+if printf '%s' "${OUT}" | grep -q "running the new build"; then
+	pass "it reports the new build"
+else
+	fail "it reports the new build"
+fi
+
+printf '\n9. --update without an agent explains itself\n'
+reset_env
+mkdir -p "${WORK}/empty-agent"
+OUT="$(cd "${WORK}/empty-agent" && run_installer "" --update)"
+if printf '%s' "${OUT}" | grep -q "no noobtunnel agent here to update"; then
+	pass "it says there is nothing to update"
+else
+	fail "it says there is nothing to update"
 fi
 
 printf '\n%s passed, %s failed\n\n' "${PASS}" "${FAIL}"

@@ -542,6 +542,26 @@ async function copyInstall(id) {
   }
 }
 
+// updateCommand turns an install command into the one that updates that machine
+// later: the same script, --update instead of an enrollment. Only the binary is
+// replaced, so the token, the settings and the mesh address stay as they are.
+function updateCommand(command) {
+  const match = /https:\/\/[^\s'"]+\/install\.sh/.exec(String(command || ''));
+  if (!match) return '';
+  return 'curl -fsSLk ' + match[0] + ' | sudo sh -s -- --update';
+}
+
+// updateHint is the block shown under an install command.
+function updateHint(command) {
+  const update = updateCommand(command);
+  if (!update) return null;
+  return h('div', { class: 'callout' },
+    h('strong', null, 'Updating that machine later'),
+    h('span', { class: 'muted', text: 'Downloads the newest agent binary and restarts it there. The machine keeps its identity and address, and nothing needs to be re-enrolled.' }),
+    h('div', { class: 'cmd', text: update }),
+    h('div', { class: 'cmd-actions' }, copyButton(update, 'Copy update command')));
+}
+
 function showInstallModal(agent, command) {
   const steps = h('ol', { class: 'steps' },
     h('li', null, 'Run the command on the Linux machine that should join the mesh.'),
@@ -555,7 +575,8 @@ function showInstallModal(agent, command) {
       copyButton(agent ? agent.token : '', 'Copy token only')),
     h('div', { class: 'callout' },
       h('strong', null, 'What happens on the target'),
-      steps)));
+      steps),
+    updateHint(command)));
 }
 
 async function copyAgentConfig(id) {
@@ -739,6 +760,7 @@ function showCreated(agent, command) {
         h('li', null, 'Paste the command into a terminal (root or sudo).'),
         h('li', null, 'The installer verifies the control node certificate fingerprint before trusting it.'),
         h('li', null, 'Watch it appear here as ' + agent.prefix + ' within a few seconds.'))),
+    updateHint(command),
     h('div', { class: 'modal-foot' },
       h('button', { class: 'btn btn-primary', 'data-action': 'modal-close' }, 'Done')));
   modal('Install ' + agent.name, 'Copy and run this on the new machine', body);

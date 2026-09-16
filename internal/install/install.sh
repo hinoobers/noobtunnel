@@ -25,6 +25,7 @@ DIRECT="1"
 KEEP="0"
 UNINSTALL="0"
 PURGE="0"
+UPDATE="0"
 METHOD=""
 SYSCTL_DIR="${NOOBTUNNEL_SYSCTL_DIR:-/etc/sysctl.d}"
 STATE_DIR="/var/lib/noobtunnel"
@@ -212,6 +213,9 @@ noobtunnel agent installer
                          systemd service; the compose files are written to the
                          current directory
   --service              run the agent as a systemd service (the default)
+  --update               download the newest agent binary and restart this
+                         machine's agent, container or service; keeps the
+                         machine's identity and address, needs no token
 EOF
 }
 
@@ -236,6 +240,7 @@ while [ "$#" -gt 0 ]; do
 		--purge)       PURGE="1"; shift ;;
 		--docker)      METHOD="docker"; shift ;;
 		--service)     METHOD="service"; shift ;;
+		--update)      UPDATE="1"; shift ;;
 		-h|--help)     usage; exit 0 ;;
 		*)             die "unknown option: $1 (try --help)" ;;
 	esac
@@ -272,8 +277,6 @@ if [ "$UNINSTALL" = "1" ]; then
 	exit 0
 fi
 
-[ -n "$SERVER" ] || die "--server is required"
-[ -n "$TOKEN" ] || die "--token is required"
 [ "$(uname -s)" = "Linux" ] || die "noobtunnel agents currently support Linux only"
 
 case "$(uname -m)" in
@@ -307,6 +310,109 @@ CURL="curl -fsSLk --retry 3 --connect-timeout 15"
 if [ -n "$PIN" ]; then
 	CURL="$CURL --pinnedpubkey sha256//$PIN"
 fi
+
+# file_value reads KEY=value from a configuration file, so an update finds the
+# control node without being told again.
+file_value() {
+	local key="$1" file="$2"
+	[ -f "$file" ] || return 0
+	sed -n "s/^${key}=//p" "$file" | tail -n1
+}
+
+# update_agent replaces the agent binary on this machine and restarts whichever
+# way it was installed: a Docker container in the current directory, or the
+# systemd service. The identity, the address and the configuration stay as they
+# are, so no enrollment token is needed.
+update_agent() {
+	if [ -f "${PWD}/docker-compose.yml" ] || [ -f "${PWD}/compose.yaml" ]; then
+		update_container
+		return 0
+	fi
+	if [ -f "${CONF_DIR}/agent.env" ] || [ -f "$UNIT" ]; then
+		update_service
+		return 0
+	fi
+	die "there is no noobtunnel agent here to update" \
+		"run this in the directory holding the agent's docker-compose.yml, or on a machine where the agent service is installed"
+}
+
+update_container() {
+	DIR="$PWD"
+	[ -n "$SERVER" ] || SERVER="$(file_value NOOBTUNNEL_SERVER "${DIR}/.env")"
+	[ -n "$SERVER" ] || die "the control node address is unknown" "pass it: --server HOST:PORT"
+	BASE="https://${SERVER}"
+	[ -w "$DIR" ] || die "${DIR} is not writable" "run this from the directory that holds the agent's files"
+	log "updating the agent container in ${DIR} (control node ${SERVER})"
+
+	TMP="${DIR}/noobtunnel.new"
+	# shellcheck disable=SC2086
+	$CURL -o "$TMP" "${BASE}/download/noobtunnel_linux_${ARCH}" || die "download failed" "check that ${SERVER} is reachable"
+	chmod 0755 "$TMP"
+	mv -f "$TMP" "${DIR}/noobtunnel"
+	give_to_caller "${DIR}/noobtunnel"
+	log "downloaded the newest agent binary"
+
+	ensure_docker
+	compose_run up -d --build ||
+		die "docker compose could not restart the container" "read the output above, then run: docker compose up -d --build"
+	sleep 3
+	if ! docker ps --format '{{.Names}}' | grep -qx 'noobtunnel-agent'; then
+		warn "the container is not running, its last log lines:"
+		compose_run logs --tail 20 noobtunnel-agent 2>/dev/null | sed 's/^/    /' || true
+		die "the agent container did not come back up" "read the log lines above"
+	fi
+	log "the agent container is running the new build"
+	cat <<EOF
+
+  Directory   ${DIR}
+  The mesh identity and address are unchanged.
+
+Follow it:
+  docker compose logs -f
+EOF
+}
+
+update_service() {
+	ENV_FILE="${CONF_DIR}/agent.env"
+	[ -n "$SERVER" ] || SERVER="$(file_value NOOBTUNNEL_SERVER "$ENV_FILE")"
+	[ -n "$SERVER" ] || die "the control node address is unknown" "pass it: --server HOST:PORT"
+	BASE="https://${SERVER}"
+	log "updating the noobtunnel agent service (control node ${SERVER})"
+
+	TMP="${BIN}.new"
+	mkdir -p "$(dirname "$BIN")"
+	# shellcheck disable=SC2086
+	$CURL -o "$TMP" "${BASE}/download/noobtunnel_linux_${ARCH}" || die "download failed" "check that ${SERVER} is reachable"
+	chmod 0755 "$TMP"
+	mv -f "$TMP" "$BIN"
+
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl restart "$SERVICE"
+		sleep 3
+		systemctl is-active --quiet "$SERVICE" ||
+			die "the agent service did not come back up" "look at: journalctl -u ${SERVICE} -n 30"
+		log "the agent service is running the new build"
+	else
+		warn "systemd is not available; restart the agent yourself"
+	fi
+	cat <<EOF
+
+  The mesh identity in ${STATE_DIR} and the assigned address are unchanged.
+
+Follow it:
+  noobtunnel status
+EOF
+}
+
+# Updating only replaces the binary, so it runs before the enrollment checks.
+if [ "$UPDATE" = "1" ]; then
+	update_agent
+	exit 0
+fi
+
+[ -n "$SERVER" ] || die "--server is required"
+[ -n "$TOKEN" ] || die "--token is required"
+BASE="https://${SERVER}"
 
 install_packages() {
 	if command -v apt-get >/dev/null 2>&1; then

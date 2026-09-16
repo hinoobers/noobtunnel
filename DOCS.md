@@ -8,6 +8,7 @@ security model and operations.
 - [Install](#install)
   - [Control node](#control-node)
   - [Add an agent](#add-an-agent)
+    - [Update an agent](#update-an-agent)
     - [Install an agent as a Docker container](#install-an-agent-as-a-docker-container)
   - [Reach a LAN through one agent](#reach-a-lan-through-one-agent)
   - [Publish services](#publish-services-resources-tab)
@@ -195,6 +196,22 @@ noobtunnel status                      # local view of the same state
 ip -brief addr show noobtun
 ping 10.77.0.3                         # another agent's mesh address
 ```
+
+#### Update an agent
+
+```sh
+curl -fsSLk https://YOUR.VPS.IP:8443/install.sh | sudo sh -s -- --update
+```
+
+Run it on the agent machine, in the agent's directory when it runs as a container.
+It downloads the newest agent binary from the control node and restarts whichever
+way the agent was installed — the Docker container or the systemd service. The
+machine keeps its identity, its assigned address and its settings, so no token is
+needed and nothing has to be re-enrolled. The **Add agent** window and the
+install dialog show this command with the right address, ready to copy.
+
+Re-running the install command also works, but it needs the token and writes the
+configuration again; `--update` is the one to use for a binary change.
 
 #### Install an agent as a Docker container
 

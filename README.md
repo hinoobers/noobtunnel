@@ -57,6 +57,16 @@ add `--docker` to it for the container (run it in the directory the container
 should live in, and it offers to install Docker if the machine does not have it).
 The agent appears in the UI within seconds and needs nothing opened on its side.
 
+To update an agent later, in the agent's directory or on the machine itself:
+
+```sh
+curl -fsSLk https://your-domain:8443/install.sh | sudo sh -s -- --update
+```
+
+It fetches the newest agent binary and restarts the container or the service. The
+machine keeps its identity and address, so there is no token to paste and nothing
+to re-enroll. The UI shows that command next to every install command.
+
 ## Remove it
 
 One command. It lists everything noobtunnel put on the machine, asks once, then

@@ -40,8 +40,15 @@ func stripLiterals(src string) string {
 		inSingle
 		inDouble
 		inBacktick
+		inRegex
 	)
 	state := normal
+	inClass := false
+	// last is the previous significant byte, which decides whether a "/" starts a
+	// regular expression or is a division. Without this, a regex containing a
+	// quote (as URL patterns do) starts a string as far as a naive scanner is
+	// concerned and swallows the rest of the file.
+	var last byte
 	for i := 0; i < len(src); i++ {
 		c := src[i]
 		switch state {
@@ -64,8 +71,15 @@ func stripLiterals(src string) string {
 			case c == '`':
 				state = inBacktick
 				out.WriteByte('`')
+			case c == '/' && regexAllowed(last):
+				state = inRegex
+				inClass = false
+				out.WriteByte(' ')
 			default:
 				out.WriteByte(c)
+				if !isSpaceByte(c) {
+					last = c
+				}
 			}
 		case inLineComment:
 			if c == '\n' {
@@ -102,6 +116,8 @@ func stripLiterals(src string) string {
 			if c == quote {
 				state = normal
 				out.WriteByte(quote)
+				// A string is a value: a following "/" divides.
+				last = ')'
 				continue
 			}
 			if c == '\n' {
@@ -109,9 +125,45 @@ func stripLiterals(src string) string {
 			} else {
 				out.WriteByte(' ')
 			}
+		case inRegex:
+			switch {
+			case c == '\\' && i+1 < len(src):
+				out.WriteString("  ")
+				i++
+			case c == '[':
+				inClass = true
+				out.WriteByte(' ')
+			case c == ']':
+				inClass = false
+				out.WriteByte(' ')
+			case c == '/' && !inClass:
+				state = normal
+				out.WriteByte(' ')
+				last = ')'
+			case c == '\n':
+				// A regular expression cannot span lines: stop rather than eating
+				// the rest of the file when this was not one after all.
+				state = normal
+				out.WriteByte('\n')
+			default:
+				out.WriteByte(' ')
+			}
 		}
 	}
 	return out.String()
+}
+
+// regexAllowed reports whether a "/" at this point starts a regular expression.
+func regexAllowed(prev byte) bool {
+	switch prev {
+	case 0, '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', '\n', '+', '-', '*', '%', '<', '>':
+		return true
+	}
+	return false
+}
+
+func isSpaceByte(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // TestUIFunctionsResolve catches typos in function names across the two script
