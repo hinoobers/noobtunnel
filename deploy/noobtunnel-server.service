@@ -1,0 +1,32 @@
+# Control node (VPS) systemd unit.
+#
+# scripts/install-server.sh writes this unit for you (it also sets up the
+# managed certificate for your domain). To do it by hand:
+#
+#   sudo install -m 0644 deploy/noobtunnel-server.service /etc/systemd/system/
+#   sudo install -m 0755 dist/noobtunnel_linux_amd64 /usr/local/bin/noobtunnel
+#   sudo systemctl daemon-reload && sudo systemctl enable --now noobtunnel-server
+#
+# The control node needs CAP_NET_ADMIN to create the WireGuard hub interface and
+# to enable IP forwarding, so it runs as root with a minimal environment.
+[Unit]
+Description=noobtunnel control node
+Documentation=https://github.com/noobtunnel/noobtunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/noobtunnel/server.env
+ExecStart=/usr/local/bin/noobtunnel server
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+ProtectHome=true
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=noobtunnel-server
+
+[Install]
+WantedBy=multi-user.target

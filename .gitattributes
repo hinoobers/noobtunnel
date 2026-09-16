@@ -1,0 +1,13 @@
+# Everything else that Git detects as text is checked out with Unix line
+# endings too, so a Windows checkout cannot break a script or an embedded asset.
+* text=auto eol=lf
+
+# Shell scripts must keep Unix line endings so they run on Linux targets.
+*.sh text eol=lf
+
+# Go sources are line ending agnostic but keep them consistent.
+*.go text eol=lf
+
+# Binaries must never be normalised.
+dist/** -text
+*.exe -text

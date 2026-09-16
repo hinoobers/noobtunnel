@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>noobtunnel</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/custom.css">
+</head>
+<body>
+<div id="app" class="app is-loading">
+  <div id="boot" class="boot">
+    <div class="boot-mark"></div>
+    <p>connecting to the control node…</p>
+  </div>
+</div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<template id="tpl-login">
+  <div class="login-wrap">
+    <form class="card login" data-form="login">
+      <div class="brand brand-lg">
+        <img class="brand-logo" src="/logo" alt="">
+        <span class="brand-text">noobtunnel</span>
+      </div>
+      <p class="muted login-sub">Sign in to the control node to manage your mesh.</p>
+      <label class="field">
+        <span>Username</span>
+        <input name="username" value="admin" autocomplete="username" required autofocus>
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <p class="form-error" data-error hidden></p>
+      <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      <p class="muted tiny" data-login-note hidden></p>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-shell">
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-logo" src="/logo" alt="">
+      <span class="brand-text">noobtunnel</span>
+    </div>
+    <nav class="tabs" data-tabs>
+      <button class="tab is-active" data-view="overview">Overview</button>
+      <button class="tab" data-view="agents">Agents</button>
+      <button class="tab" data-view="resources">Resources</button>
+      <button class="tab" data-view="domains">Domains</button>
+      <button class="tab" data-view="exitnodes">Exit nodes</button>
+      <button class="tab" data-view="users" data-admin-only hidden>Users</button>
+      <button class="tab" data-view="activity">Logs</button>
+      <button class="tab" data-view="settings">Settings</button>
+    </nav>
+    <div class="topbar-right">
+      <div class="menu" data-menu>
+        <button class="btn btn-icon" data-action="menu" aria-label="Account menu">⋯</button>
+        <div class="menu-pop" hidden>
+          <div class="menu-head">
+            <div class="menu-title" data-session-user>—</div>
+            <div class="menu-sub" data-session-role></div>
+          </div>
+          <button class="menu-item" data-action="refresh">Refresh state</button>
+          <button class="menu-item" data-action="copy-fingerprint">Copy certificate fingerprint</button>
+          <button class="menu-item" data-action="change-password">Change my password</button>
+          <button class="menu-item danger" data-action="logout">Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="content">
+    <section class="view" data-view-panel="overview">
+      <div class="stats" data-stats></div>
+      <div class="panel" data-health-panel hidden></div>
+      <div class="panel panel-topology">
+        <div class="panel-head">
+          <div>
+            <h2>Mesh topology</h2>
+            <p class="muted" data-topology-sub></p>
+          </div>
+          <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
+            <span class="chip chip-quiet mono" data-mesh-range></span>
+            <div class="legend">
+              <span><i class="line line-direct"></i>direct</span>
+              <span><i class="line line-relay"></i>relayed via hub</span>
+            </div>
+          </div>
+        </div>
+        <div class="topo" data-topology></div>
+      </div>
+    </section>
+
+    <section class="view" data-view-panel="agents" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Agents</h2>
+            <p class="muted" data-agents-sub></p>
+          </div>
+          <div class="row">
+            <input class="input" type="search" placeholder="Filter by name, address or key" data-agent-filter>
+            <button class="btn btn-primary" data-action="add-agent" data-admin-only>Add agent</button>
+          </div>
+        </div>
+        <div class="agent-grid" data-agent-grid></div>
+      </div>
+    </section>
+
+    <section class="view" data-view-panel="users" hidden>
+      <div class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Users</h2>
+            <p class="muted" data-users-sub></p>
+          </div>
+          <button class="btn btn-primary" data-action="add-user">Add user</button>
+        </div>
+        <div class="table-wrap" data-users-table></div>
+      </div>
+    </section>
+
+    <section class="view" data-view-panel="resources" hidden>
+      <div class="panel" data-resource-list>
+        <div class="panel-head">
+          <div>
+            <h2>Resources</h2>
+            <p class="muted" data-resources-sub></p>
+          </div>
+          <button class="btn btn-primary" data-action="add-resource" data-resources-add data-admin-only>Add resource</button>
+        </div>
+        <div class="table-wrap" data-resources-table></div>
+      </div>
+      <div data-resource-editor hidden></div>
+    </section>
+
+    <section class="view" data-view-panel="domains" hidden>
+      <div class="panel" data-domain-list>
+        <div class="panel-head">
+          <div>
+            <h2>Domains</h2>
+            <p class="muted" data-domains-sub></p>
+          </div>
+          <div class="row">
+            <button class="btn" data-action="manage-dns" data-admin-only>Automation</button>
+            <button class="btn btn-primary" data-action="add-domain" data-domains-add data-admin-only>Add domain</button>
+          </div>
+        </div>
+        <div class="table-wrap" data-domains-table></div>
+      </div>
+    </section>
+
+    <section class="view" data-view-panel="exitnodes" hidden>
+      <div class="panel" data-exitnode-list>
+        <div class="panel-head">
+          <div>
+            <h2>Exit nodes</h2>
+            <p class="muted" data-exitnodes-sub></p>
+          </div>
+          <button class="btn btn-primary" data-action="add-exitnode" data-exitnodes-add data-admin-only>Add exit node</button>
+        </div>
+        <div class="table-wrap" data-exitnodes-table></div>
+      </div>
+    </section>
+
+    <section class="view" data-view-panel="activity" hidden>
+      <nav class="tabs" data-tabs>
+        <button class="tab is-active" data-tab="requests">Requests</button>
+        <button class="tab" data-tab="activity">Activity</button>
+      </nav>
+      <div class="panel" data-tab-panel="requests">
+        <div class="panel-head">
+          <div>
+            <h2>Requests</h2>
+            <p class="muted" data-requests-sub></p>
+          </div>
+        </div>
+        <div class="charts" data-request-charts></div>
+        <div class="table-wrap" data-request-table></div>
+      </div>
+      <div class="panel" data-tab-panel="activity" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Activity</h2>
+            <p class="muted">Administrative changes on this control node.</p>
+          </div>
+        </div>
+        <ul class="events" data-events></ul>
+      </div>
+    </section>
+
+<section class="view" data-view-panel="settings" hidden>
+  <nav class="tabs" data-tabs>
+    <button class="tab is-active" data-tab="mesh">Mesh &amp; control node</button>
+    <button class="tab" data-tab="geoip">GeoLite</button>
+    <button class="tab" data-tab="branding">Branding</button>
+    <button class="tab" data-tab="tokens">API tokens</button>
+  </nav>
+
+  <div class="grid-2" data-tab-panel="mesh">
+  <form class="panel" data-form="settings">
+          <div class="panel-head"><h2>Mesh settings</h2></div>
+          <div class="fields">
+            <label class="field"><span>Mesh name</span><input name="meshName" required></label>
+            <label class="field"><span>Mesh address range</span><input name="meshCidr" spellcheck="false"></label>
+            <div class="field-error" data-settings-error hidden></div>
+            <label class="field"><span>MTU</span><input name="mtu" type="number" min="1280" max="1500"></label>
+            <label class="field"><span>WireGuard port (UDP)</span><input name="wgListenPort" type="number" min="1" max="65535"></label>
+            <label class="field"><span>Keepalive (seconds)</span><input name="keepaliveSec" type="number" min="0" max="3600"></label>
+            <label class="switch">
+              <input type="checkbox" name="directPaths">
+              <span><strong>Allow direct agent to agent paths</strong>
+              <em>Agents try to talk directly and fall back to the hub. Turn this off to relay everything.</em></span>
+            </label>
+          </div>
+          <div class="panel-foot">
+            <button class="btn btn-primary" type="submit" data-admin-only>Save settings</button>
+            <span class="muted tiny">Changing the address range reassigns addresses.</span>
+            <span class="muted tiny" data-readonly-note hidden>Your account is read only, settings cannot be changed.</span>
+          </div>
+        </form>
+
+  <div class="panel" data-admin-only>
+  <div class="panel-head"><h2>Control node</h2></div>
+  <dl class="kv" data-server-info></dl>
+  </div>
+  </div>
+
+  <div class="stack" data-tab-panel="tokens" hidden>
+  <div class="panel">
+            <div class="panel-head">
+              <div><h2>API tokens</h2><p class="muted">Use with <code>Authorization: Bearer …</code> for automation.</p></div>
+              <button class="btn" data-action="new-api-token">Create token</button>
+            </div>
+            <ul class="tokens" data-api-tokens></ul>
+          </div>
+  </div>
+
+  <div class="stack" data-tab-panel="branding" hidden>
+  <form class="panel" data-form="branding" data-admin-only>
+            <div class="panel-head"><h2>Branding</h2></div>
+            <div class="row" style="gap:14px;align-items:center">
+              <img class="brand-logo brand-logo-preview" src="/logo" alt="">
+              <label class="field" style="flex:1">
+                <span>Logo (PNG, JPEG, WEBP or SVG, up to 2 MB)</span>
+                <input type="file" name="logo" accept="image/*">
+              </label>
+            </div>
+            <div class="field-error" data-web-logo-error hidden></div>
+            <div class="panel-foot">
+              <button class="btn btn-primary" type="submit">Upload logo</button>
+              <button class="btn" type="button" data-action="reset-logo">Use default</button>
+            </div>
+  </form>
+
+  <form class="panel" data-form="brand-name" data-admin-only>
+            <div class="panel-head">
+              <div><h2>Service name</h2>
+              <p class="muted">Used in the header, the page title and on services the control node publishes.</p></div>
+            </div>
+            <div class="fields">
+              <label class="field"><span>Name</span>
+                <input name="brandName" maxlength="40" placeholder="noobtunnel" spellcheck="false"></label>
+              <div class="field-error" data-brand-error hidden></div>
+            </div>
+            <div class="panel-foot">
+              <button class="btn btn-primary" type="submit">Save name</button>
+            </div>
+  </form>
+
+  <form class="panel" data-form="brand-css" data-admin-only>
+            <div class="panel-head">
+              <div><h2>Custom CSS</h2>
+              <p class="muted">Added after the built-in stylesheet. Everything below starts as the default theme, edit it and save to restyle the whole UI.</p></div>
+              <span class="chip" data-css-status>bundled default</span>
+            </div>
+            <label class="field">
+              <span>Stylesheet</span>
+              <textarea name="css" rows="18" spellcheck="false" class="mono" style="white-space:pre;overflow-wrap:normal;overflow-x:auto"></textarea>
+            </label>
+            <div class="field-error" data-css-error hidden></div>
+            <div class="panel-foot">
+              <button class="btn btn-primary" type="submit">Save stylesheet</button>
+              <button class="btn" type="button" data-action="reload-css">Discard changes</button>
+              <button class="btn btn-danger" type="button" data-action="reset-css">Restore default</button>
+            </div>
+  </form>
+  </div>
+
+  <div class="stack" data-tab-panel="geoip" hidden>
+  <form class="panel" data-form="geoip" data-admin-only>
+            <div class="panel-head">
+              <div>
+                <h2>Country data</h2>
+                <p class="muted">MaxMind GeoLite2-Country, used by country rules on resources.</p>
+              </div>
+              <span class="chip" data-geoip-status>not configured</span>
+            </div>
+            <div class="fields">
+              <label class="field"><span>MaxMind account ID (optional)</span>
+                <input name="accountId" placeholder="123456" autocomplete="off"></label>
+              <label class="field"><span>MaxMind licence key</span>
+                <input type="password" name="licenseKey" placeholder="leave empty to keep the stored key" autocomplete="new-password"></label>
+              <p class="muted tiny" data-geoip-detail></p>
+              <div class="field-error" data-geoip-error hidden></div>
+            </div>
+            <div class="panel-foot">
+              <button class="btn btn-primary" type="submit">Save and fetch</button>
+              <button class="btn" type="button" data-action="geoip-clear">Remove credentials</button>
+</div>
+</form>
+</div>
+</section>
+  </main>
+</div>
+</template>
+
+<div id="modal-root"></div>
+<script src="/assets/app.js"></script>
+<script src="/assets/views.js"></script>
+<script src="/assets/users_api.js"></script>
+<script src="/assets/resources_api.js"></script>
+<script src="/assets/exitnodes_api.js"></script>
+<script src="/assets/dns_api.js"></script>
+<script src="/assets/branding_api.js"></script>
+<script src="/assets/geoip_api.js"></script>
+<script src="/assets/logs_api.js"></script>
+</body>
+</html>
