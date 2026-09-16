@@ -96,41 +96,46 @@ func (a *Agent) meshNATExempt(ctx context.Context, meshCIDR string) {
 // "-A INPUT -j REJECT --reject-with icmp-host-prohibited") answers every packet
 // that arrives on the mesh interface with ICMP host-prohibited, which the control
 // node's proxy then reports as "connect: no route to host" while the service on
-// this machine is perfectly healthy. Forwarding rules are added only when this
-// agent advertises networks for other agents to reach.
+// this machine is perfectly healthy.
+//
+// Forwarding is opened the same way and unconditionally: the control node dials
+// published targets through this machine, and a host that accepts a packet on the
+// mesh interface and does not forward it drops it in silence.
 func (a *Agent) allowMeshTraffic(ctx context.Context) {
 	iface := a.opts.Interface
 	if iface == "" {
 		iface = "noobtun"
 	}
-	// Whether the mesh routes anything through this agent: what it offered at
-	// enrollment, or what the control node resolved to it since.
+	// Accepting mesh traffic, and forwarding for it, is not conditional on what
+	// this machine happened to advertise at enrollment: the control node can pin a
+	// published target's address to this agent at any moment, and a network it
+	// routes here that the host refuses to forward is a SYN that arrives and is
+	// dropped - the one failure that looks identical to a dead service from
+	// everywhere else. A host that carries nothing simply never receives anything.
 	advertises := a.advertises()
 	var problems []string
 
 	switch {
 	case a.ufwActive(ctx):
+		// ufw keeps its own chains, so its default deny has to be opened for the
+		// mesh interface as well.
 		if err := a.ufw("allow", "in", "on", iface); err != nil {
 			problems = append(problems, "ufw allow in on "+iface+": "+err.Error())
 		}
-		if advertises {
-			// ufw route rules are the FORWARD chain: traffic relayed between the
-			// mesh and the networks this agent advertises.
-			if err := a.ufw("route", "allow", "in", "on", iface); err != nil {
-				problems = append(problems, "ufw route allow in on "+iface+": "+err.Error())
-			}
-			if err := a.ufw("route", "allow", "out", "on", iface); err != nil {
-				problems = append(problems, "ufw route allow out on "+iface+": "+err.Error())
-			}
+		// ufw route rules are the FORWARD chain: traffic relayed between the mesh
+		// and the networks behind this machine.
+		if err := a.ufw("route", "allow", "in", "on", iface); err != nil {
+			problems = append(problems, "ufw route allow in on "+iface+": "+err.Error())
+		}
+		if err := a.ufw("route", "allow", "out", "on", iface); err != nil {
+			problems = append(problems, "ufw route allow out on "+iface+": "+err.Error())
 		}
 	default:
-		problems = append(problems, a.iptablesAllow(ctx, iface, advertises)...)
+		problems = append(problems, a.iptablesAllow(ctx, iface, true)...)
 	}
 
-	if advertises {
-		if err := a.enableForwarding(ctx); err != nil {
-			problems = append(problems, err.Error())
-		}
+	if err := a.enableForwarding(ctx); err != nil {
+		problems = append(problems, err.Error())
 	}
 	if len(problems) > 0 {
 		// Not fatal: the agent itself is fine, but the mesh traffic may be. Say so

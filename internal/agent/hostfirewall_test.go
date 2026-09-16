@@ -83,12 +83,17 @@ func TestMeshTrafficIsAcceptedThroughUfw(t *testing.T) {
 	if !host.ran("ufw", "allow", "in", "on", "noobtun") {
 		t.Fatalf("the mesh interface was not allowed through ufw: %v", host.calls)
 	}
-	for _, call := range host.calls {
-		if strings.Contains(strings.Join(call, " "), "route") {
-			t.Fatalf("an agent that advertises nothing needs no forwarding rule: %v", call)
-		}
-		if strings.HasPrefix(strings.Join(call, " "), "sysctl") {
-			t.Fatalf("an agent that advertises nothing needs no IP forwarding: %v", call)
+	// Forwarding is opened whether or not this agent advertises anything: the
+	// control node can pin a published target's address to it at any moment, and a
+	// packet that arrives on the mesh interface and is not forwarded is dropped in
+	// silence, which reads as a dead service.
+	for _, want := range [][]string{
+		{"ufw", "route", "allow", "in", "on", "noobtun"},
+		{"ufw", "route", "allow", "out", "on", "noobtun"},
+		{"sysctl", "-w", "net.ipv4.ip_forward=1"},
+	} {
+		if !host.ran(want...) {
+			t.Fatalf("expected %q to run, calls: %v", strings.Join(want, " "), host.calls)
 		}
 	}
 }
