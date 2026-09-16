@@ -21,7 +21,44 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/wg"
 )
 
+// loadServerEnvFile reads the installer's /etc/noobtunnel/server.env and applies
+// the keys that are not already set in the environment. Keys in the file that are
+// overridden on the command line still win, because flags are parsed after this.
+func loadServerEnvFile() {
+	path := os.Getenv("NOOBTUNNEL_ENV_FILE")
+	if path == "" {
+		path = "/etc/noobtunnel/server.env"
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.Trim(strings.TrimSpace(value), `"'`)
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, value)
+		}
+	}
+}
+
 func runServer(args []string) error {
+	// Running the control node by hand (for --print-info, or a first start)
+	// should see the same configuration the service uses: the domain and the ACME
+	// email are flags, not stored settings, so without this the report says "no
+	// public hostname" while the service is happily serving one.
+	loadServerEnvFile()
 	fs := newFlagSet("server")
 	var (
 		stateDir    = fs.String("state-dir", env("NOOBTUNNEL_STATE_DIR", defaultStateDir()), "directory for state, keys and certificates")
