@@ -639,6 +639,19 @@ noobtunnel status                 # this machine's mesh state
 noobtunnel user list              # control node accounts
 noobtunnel keygen                 # a WireGuard key pair
 noobtunnel install --server … --token …   # print an install command from the CLI
+noobtunnel server --print-info   # hub, peers and host checks while the service runs
+```
+
+`--print-info` runs a second, short-lived copy of the control node next to the
+running one. It reads the kernel (the hub interface, its peers, the handshakes)
+and the host checks, which is what makes it useful while the service runs — but it
+does not bind the published ports, because the running service already has them.
+That part of the report says so instead of reporting a bind failure. To see what
+the live service is actually listening on:
+
+```sh
+sudo ss -tlnp | grep noobtunnel
+journalctl -u noobtunnel-server | grep "published resource"
 ```
 
 ### Accounts and roles, and getting back in

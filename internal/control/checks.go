@@ -156,34 +156,46 @@ func (s *Server) RunChecks(ctx context.Context) []Check {
 	checks = append(checks, Check{ID: "state", Title: "State directory", Status: statusInfo, Detail: s.store.Path()})
 
 	if resources := s.store.Resources(); len(resources) > 0 {
-		stats := s.proxies.Stats()
-		var listening, failed []string
-		for _, r := range resources {
-			if !r.Enabled {
-				continue
-			}
-			if stat, ok := stats[r.ID]; ok && stat.Listening {
-				listening = append(listening, r.Name)
-				continue
-			}
-			detail := "not listening"
-			if stat, ok := stats[r.ID]; ok && stat.LastError != "" {
-				detail = stat.LastError
-			}
-			failed = append(failed, r.Name+": "+detail)
-		}
-		switch {
-		case len(failed) > 0:
+		if !s.proxies.Started() {
+			// Nothing has tried to bind yet: this is a report or a one-off
+			// command, not the process that serves the resources.
 			checks = append(checks, Check{
-				ID: "resources", Title: "Published services", Status: statusFail,
-				Detail: strings.Join(failed, "; "),
-				Fix:    "free the port or change the listen port in the Resources tab",
+				ID: "resources", Title: "Published services", Status: statusInfo,
+				Detail: fmt.Sprintf("%d configured; the running control node serves them, and this report does not bind their ports", len(resources)),
 			})
-		case len(listening) > 0:
-			checks = append(checks, Check{
-				ID: "resources", Title: "Published services", Status: statusOK,
-				Detail: fmt.Sprintf("%d listening (%s)", len(listening), strings.Join(listening, ", ")),
-			})
+		} else {
+			stats := s.proxies.Stats()
+			var listening, failed []string
+			for _, r := range resources {
+				if !r.Enabled {
+					continue
+				}
+				if stat, ok := stats[r.ID]; ok && stat.Listening {
+					listening = append(listening, r.Name)
+					continue
+				}
+				detail := "not listening"
+				if stat, ok := stats[r.ID]; ok && stat.LastError != "" {
+					detail = stat.LastError
+					if holder := portHolder(context.Background(), r.EffectiveListenPort()); holder != "" {
+						detail += " (port " + itoa(r.EffectiveListenPort()) + " is held by " + holder + ")"
+					}
+				}
+				failed = append(failed, r.Name+": "+detail)
+			}
+			switch {
+			case len(failed) > 0:
+				checks = append(checks, Check{
+					ID: "resources", Title: "Published services", Status: statusFail,
+					Detail: strings.Join(failed, "; "),
+					Fix:    "free the port or change the listen port in the Resources tab",
+				})
+			case len(listening) > 0:
+				checks = append(checks, Check{
+					ID: "resources", Title: "Published services", Status: statusOK,
+					Detail: fmt.Sprintf("%d listening (%s)", len(listening), strings.Join(listening, ", ")),
+				})
+			}
 		}
 	}
 	return checks
@@ -240,10 +252,23 @@ func (s *Server) domainCheck() Check {
 	}
 	stat, ok := s.proxies.Stats()[proxy.ControlResourceID]
 	switch {
+	case !s.proxies.Started():
+		// The port is bound by the running service, not by this process: a
+		// report that says "could not bind" here is describing a bind it never
+		// attempted.
+		return Check{
+			ID: "domain", Title: "Public hostname", Status: statusInfo,
+			Detail: domain + " is served by the running control node; this report does not bind its ports, so it cannot see them",
+		}
 	case !ok || !stat.Listening:
 		detail := "the control node could not bind port 443"
 		if ok && stat.LastError != "" {
 			detail = stat.LastError
+		}
+		// Naming the process that holds the port turns "could not bind" into
+		// something an operator can act on in one step.
+		if holder := portHolder(context.Background(), 443); holder != "" {
+			detail += " (port 443 is held by " + holder + ")"
 		}
 		return Check{
 			ID: "domain", Title: "Public hostname", Status: statusFail,
@@ -347,4 +372,40 @@ func (s *Server) firewallCheck(ctx context.Context, iface string) Check {
 
 func runQuiet(ctx context.Context, name string, args ...string) bool {
 	return exec.CommandContext(ctx, name, args...).Run() == nil
+}
+
+// portHolder names the process listening on a TCP port, so a bind failure says
+// who to stop instead of leaving the operator to look it up. Empty when it
+// cannot be determined, which is always better than a wrong name.
+func portHolder(ctx context.Context, port int) string {
+	if port <= 0 {
+		return ""
+	}
+	ss, err := exec.LookPath("ss")
+	if err != nil {
+		return ""
+	}
+	out, err := exec.CommandContext(ctx, ss, "-H", "-ltnp").Output()
+	if err != nil {
+		return ""
+	}
+	suffix := ":" + itoa(port) + " "
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, suffix) {
+			continue
+		}
+		// ss prints the owner as: users:(("nginx",pid=812,fd=6))
+		marker := "((\""
+		start := strings.Index(line, marker)
+		if start < 0 {
+			continue
+		}
+		rest := line[start+len(marker):]
+		end := strings.IndexByte(rest, '"')
+		if end <= 0 {
+			continue
+		}
+		return rest[:end]
+	}
+	return ""
 }

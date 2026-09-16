@@ -266,6 +266,10 @@ type Manager struct {
 	groups map[string]*group
 	stats  map[uint32]*resourceStats
 	closed bool
+	// started records that the first reconcile has run, so a caller can tell
+	// "nothing is listening" from "the listeners were never started in this
+	// process" - which is what a short-lived report looks like.
+	started atomic.Bool
 }
 
 // New creates a manager.
@@ -401,7 +405,14 @@ func (m *Manager) Reconcile(specs []Spec) {
 		m.log.Info("published resource", "listen", key, "resources", strings.Join(names, ", "))
 	}
 	m.mu.Unlock()
+	m.started.Store(true)
 }
+
+// Started reports whether this manager has ever run a reconcile pass. The
+// listeners are started by the running control node's resource loop, so a
+// process that only reads the state (a report, a one-off command) has not
+// started any of them and cannot say whether they are up.
+func (m *Manager) Started() bool { return m.started.Load() }
 
 // controlSpec is the synthetic resource that serves the control node's own UI.
 // It deliberately has no targets: those requests never leave this process.
