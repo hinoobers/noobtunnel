@@ -348,6 +348,16 @@ download_binaries() {
 	done
 	# Verify checksums when the source publishes them.
 	if download_file "${base}/SHA256SUMS" "${dest}/SHA256SUMS" 2>/dev/null; then
+		# The published list is meant to be Unix, but a copy that travelled
+		# through Windows carries carriage returns and sha256sum would then look
+		# for a file whose name ends in ^M. Normalising it costs nothing when
+		# there is nothing to strip.
+		if command -v tr >/dev/null 2>&1 &&
+			tr -d '\r' < "${dest}/SHA256SUMS" > "${dest}/SHA256SUMS.lf" 2>/dev/null; then
+			mv -f "${dest}/SHA256SUMS.lf" "${dest}/SHA256SUMS" || true
+		else
+			rm -f "${dest}/SHA256SUMS.lf" || true
+		fi
 		if command -v sha256sum >/dev/null 2>&1; then
 			if ! (cd "${dest}" && sha256sum -c SHA256SUMS --ignore-missing >/dev/null 2>&1); then
 				warn "the downloaded binaries do not match the published checksums"

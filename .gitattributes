@@ -11,3 +11,8 @@
 # Binaries must never be normalised.
 dist/** -text
 *.exe -text
+
+# The checksum list is read by sha256sum on Linux, which treats a carriage
+# return as part of the file name. Keep it Unix-only even when it is generated
+# on a Windows machine.
+dist/SHA256SUMS text eol=lf

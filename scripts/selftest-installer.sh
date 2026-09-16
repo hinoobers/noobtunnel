@@ -454,7 +454,9 @@ for arch in amd64 arm64 armv7 386; do
 	printf '\177ELF\002\001\001\000noobtunnel' > "${WORK}/downloads/noobtunnel_linux_${arch}"
 done
 if command -v sha256sum >/dev/null 2>&1; then
-	(cd "${WORK}/downloads" && sha256sum noobtunnel_linux_* > SHA256SUMS)
+	# The published list is generated on a Windows machine, so it arrives with
+	# carriage returns; the installer has to cope with that.
+	(cd "${WORK}/downloads" && sha256sum noobtunnel_linux_* | sed 's/$/\r/' > SHA256SUMS)
 fi
 OUT="$(printf '%s\n' "noobtunnel.mydomain.com
 you@example.com
@@ -469,6 +471,11 @@ if printf '%s' "${OUT}" | grep -q "downloaded:"; then
 	pass "it downloads the binaries"
 else
 	fail "it downloads the binaries"
+fi
+if printf '%s' "${OUT}" | grep -q "checksums verified"; then
+	pass "it verifies downloaded binaries against a Windows style checksum list"
+else
+	fail "it verifies downloaded binaries against a Windows style checksum list"
 fi
 check "the downloaded control node was installed" \
 	grep -q "noobtunnel" "${SYSROOT}/usr/local/bin/noobtunnel"

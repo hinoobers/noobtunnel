@@ -62,7 +62,11 @@ $sums = Get-ChildItem -Path $out -Filter "noobtunnel_*" | Where-Object { $_.Name
     $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
     "$hash  $($_.Name)"
 }
-$sums | Set-Content -Path (Join-Path $out "SHA256SUMS")
+# Unix line endings, and no byte order mark: the checksum file is consumed by
+# sha256sum on Linux, where a stray carriage return breaks every entry.
+$newline = [string][char]10
+$sumFile = Join-Path $out "SHA256SUMS"
+[System.IO.File]::WriteAllText($sumFile, ($sums -join $newline) + $newline, (New-Object System.Text.UTF8Encoding $false))
 
 Write-Host ""
 Write-Host "artifacts in $out"

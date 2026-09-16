@@ -363,9 +363,12 @@ remove_files() {
 
 remove_unsupported_extras() {
 	step "Looking for anything left behind"
-	local leftovers=""
+	local leftovers="" search="/"
+	# Test hook: with a fake root, only that fake root is audited. On a real
+	# machine the whole filesystem is searched, which is the point of the check.
+	[ -n "${SYSROOT}" ] && search="${SYSROOT}"
 	if command -v find >/dev/null 2>&1; then
-		leftovers="$(find / -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run/systemd \) -prune -o \
+		leftovers="$(find "${search}" -xdev \( -path /proc -o -path /sys -o -path /dev -o -path /run/systemd \) -prune -o \
 			-iname '*noobtunnel*' -print 2>/dev/null |
 			grep -vxF "${ROOT}" || true)"
 	fi
