@@ -94,12 +94,15 @@ type Agent struct {
 	// hostRunner runs host commands (the firewall setup); injectable for tests.
 	hostRunner hostRunner
 
-	mu          sync.Mutex
-	session     *sessionState
-	forwards    map[int]*forwarder
-	direct      map[uint32]bool
-	candidate   map[uint32]time.Time
-	lastApplied string
+	mu       sync.Mutex
+	session  *sessionState
+	forwards map[int]*forwarder
+	// forwardErrors remembers why a forward is not running, so a retry that fails
+	// the same way does not repeat the warning.
+	forwardErrors map[int]string
+	direct        map[uint32]bool
+	candidate     map[uint32]time.Time
+	lastApplied   string
 	// forwardedFor remembers the last carried set the host was opened for, so the
 	// firewall commands are not repeated on every membership message.
 	forwardedFor string
@@ -118,6 +121,9 @@ type sessionState struct {
 	// carry is what the control node resolved to this agent, which is what it has
 	// to forward for.
 	carry []string
+	// forwards are the loopback services the control node wants carried by this
+	// agent.
+	forwards []proto.Forward
 }
 
 // New creates an agent.
@@ -396,6 +402,9 @@ func (a *Agent) controlSession(ctx context.Context) error {
 			}
 		case <-natTicker.C:
 			a.ensureRoutes(ctx)
+			// A forward that could not bind yet is retried here, once the mesh
+			// address exists.
+			a.syncForwards(ctx)
 			if runtime.GOOS == "linux" {
 				// Docker reinstates its own chains in front of ours, so the mesh
 				// rules are re-asserted rather than assumed.
@@ -498,6 +507,7 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 			welcome:    welcome,
 			peers:      map[uint32]proto.Peer{},
 			generation: welcome.Generation,
+			forwards:   welcome.Forwards,
 		}
 		for _, p := range welcome.Peers {
 			a.session.peers[p.ID] = p
@@ -519,11 +529,14 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 			a.meshRawExempt(context.Background(), a.opts.Interface, a.carriedPrefixes())
 			a.syncCarriedForwarding(context.Background())
 		}
-		// Services that only listen on this machine's loopback are carried by this
-		// agent, because a loopback address means "this machine" to whoever dials
-		// it.
-		a.syncForwards(context.Background(), welcome.Forwards)
-		return a.applyDevice(context.Background(), true)
+		if err := a.applyDevice(context.Background(), true); err != nil {
+			return err
+		}
+		// Only now does the interface have the mesh address a forward has to bind
+		// on: before that, listening on it fails with "cannot assign requested
+		// address".
+		a.syncForwards(context.Background())
+		return nil
 	case proto.TError:
 		var e proto.Error
 		_ = json.Unmarshal(msg.raw, &e)
@@ -549,8 +562,13 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 		if a.setCarry(p.Carry) && runtime.GOOS == "linux" {
 			go a.syncCarriedForwarding(context.Background())
 		}
-		a.syncForwards(context.Background(), p.Forwards)
-		return a.reconcile(context.Background())
+		// The control node may have published or removed a loopback service.
+		a.setForwards(p.Forwards)
+		if err := a.reconcile(context.Background()); err != nil {
+			return err
+		}
+		a.syncForwards(context.Background())
+		return nil
 	case proto.TPing:
 		var ping proto.Ping
 		if err := json.Unmarshal(msg.raw, &ping); err != nil {
@@ -622,6 +640,17 @@ func (a *Agent) setCarry(prefixes []string) bool {
 	}
 	a.session.carry = append([]string(nil), prefixes...)
 	return true
+}
+
+// setForwards remembers the loopback services the control node wants carried by
+// this agent, so a later pass can retry one that could not start yet.
+func (a *Agent) setForwards(forwards []proto.Forward) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.session == nil {
+		return
+	}
+	a.session.forwards = append([]proto.Forward(nil), forwards...)
 }
 
 // carriedPrefixes is what the control node resolved to this agent.

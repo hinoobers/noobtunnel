@@ -12,6 +12,53 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/proto"
 )
 
+// TestAForwardIsRetriedOnceTheAddressExists covers the failure the operator sees
+// as "could not carry a loopback service ... bind: cannot assign requested
+// address": the listener is opened before the device has its mesh address. The
+// attempt has to be repeated rather than dropped, or the service stays published
+// and unreachable.
+func TestAForwardIsRetriedOnceTheAddressExists(t *testing.T) {
+	service, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+
+	a := &Agent{
+		opts:       Options{Interface: "noobtun"},
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		hostRunner: &fakeHost{},
+	}
+	// An address this machine does not have yet, which is what an agent sees
+	// before its device is configured.
+	a.session = &sessionState{
+		welcome: proto.Welcome{Address: "10.77.0.99"},
+		peers:   map[uint32]proto.Peer{},
+	}
+	port := freeTCPPort(t)
+	a.setForwards([]proto.Forward{{Port: port, Target: service.Addr().String()}})
+	a.syncForwards(context.Background())
+	a.mu.Lock()
+	_, carried := a.forwards[port]
+	a.mu.Unlock()
+	if carried {
+		t.Fatal("binding an address this machine does not have should fail")
+	}
+
+	// The device comes up, and the next pass carries it.
+	a.mu.Lock()
+	a.session.welcome.Address = "127.0.0.1"
+	a.mu.Unlock()
+	a.syncForwards(context.Background())
+	a.mu.Lock()
+	f, carried := a.forwards[port]
+	a.mu.Unlock()
+	if !carried {
+		t.Fatal("the forward should be retried once the address exists")
+	}
+	f.stop()
+}
+
 // TestLoopbackServiceIsCarriedOnTheMeshAddress covers the case a mesh cannot reach
 // by itself: a service that only listens on its machine's loopback. `127.0.0.1`
 // means the machine that dials it, so the agent listens on its own mesh address
@@ -53,10 +100,12 @@ func TestLoopbackServiceIsCarriedOnTheMeshAddress(t *testing.T) {
 	}
 
 	port := freeTCPPort(t)
-	a.syncForwards(context.Background(), []proto.Forward{
-		{Port: port, Target: service.Addr().String()},
+	a.setForwards([]proto.Forward{{Port: port, Target: service.Addr().String()}})
+	a.syncForwards(context.Background())
+	t.Cleanup(func() {
+		a.setForwards(nil)
+		a.syncForwards(context.Background())
 	})
-	t.Cleanup(func() { a.syncForwards(context.Background(), nil) })
 	a.mu.Lock()
 	carried := len(a.forwards)
 	a.mu.Unlock()
@@ -84,15 +133,15 @@ func TestLoopbackServiceIsCarriedOnTheMeshAddress(t *testing.T) {
 
 	// The same forward is kept, not restarted, when the control node repeats it.
 	previous := a.forwards[port]
-	a.syncForwards(context.Background(), []proto.Forward{
-		{Port: port, Target: service.Addr().String()},
-	})
+	a.setForwards([]proto.Forward{{Port: port, Target: service.Addr().String()}})
+	a.syncForwards(context.Background())
 	if a.forwards[port] != previous {
 		t.Fatal("an unchanged forward should keep its listener")
 	}
 
 	// And stopped when the control node drops it.
-	a.syncForwards(context.Background(), nil)
+	a.setForwards(nil)
+	a.syncForwards(context.Background())
 	if _, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second); err == nil {
 		t.Fatal("a forward that is no longer wanted should stop listening")
 	}

@@ -34,12 +34,17 @@ type forwarder struct {
 }
 
 // syncForwards starts the forwards that should be running and stops the rest.
-func (a *Agent) syncForwards(ctx context.Context, forwards []proto.Forward) {
+//
+// It is called again on a timer: binding the agent's mesh address fails until the
+// device has that address, and a listener that could not be opened has to be
+// retried rather than quietly forgotten.
+func (a *Agent) syncForwards(ctx context.Context) {
 	a.mu.Lock()
 	if a.session == nil {
 		a.mu.Unlock()
 		return
 	}
+	forwards := append([]proto.Forward(nil), a.session.forwards...)
 	mesh, err := netip.ParseAddr(a.session.welcome.Address)
 	if err != nil {
 		a.mu.Unlock()
@@ -70,11 +75,28 @@ func (a *Agent) syncForwards(ctx context.Context, forwards []proto.Forward) {
 			continue
 		}
 		if err := f.start(ctx, mesh); err != nil {
-			a.log.Warn("could not carry a loopback service", "port", port, "target", f.target, "error", err)
-		} else {
-			a.log.Info("carrying a loopback service for the control node",
-				"listen", net.JoinHostPort(mesh.String(), strconv.Itoa(port)), "target", f.target)
+			// Not carried, so a later pass tries again - the address may only need
+			// to come up first.
+			a.mu.Lock()
+			if a.forwards[port] == f {
+				delete(a.forwards, port)
+			}
+			if a.forwardErrors == nil {
+				a.forwardErrors = map[int]string{}
+			}
+			changed := a.forwardErrors[port] != err.Error()
+			a.forwardErrors[port] = err.Error()
+			a.mu.Unlock()
+			if changed {
+				a.log.Warn("could not carry a loopback service", "port", port, "target", f.target, "error", err)
+			}
+			continue
 		}
+		a.mu.Lock()
+		delete(a.forwardErrors, port)
+		a.mu.Unlock()
+		a.log.Info("carrying a loopback service for the control node",
+			"listen", net.JoinHostPort(mesh.String(), strconv.Itoa(port)), "target", f.target)
 	}
 }
 
