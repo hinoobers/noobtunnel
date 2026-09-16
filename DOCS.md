@@ -836,6 +836,32 @@ the agents already there), so demo runs persist too.
   intercept that pair's traffic. It does not forward packets for non-members. The
   state file contains enrollment tokens — treat it as a secret (it is `0600`).
 
+### Country rules and the IP API
+
+Country rules on a resource ("block everything except EE", say) need to know where
+a client address is from. That answer comes from an **IP API** you run yourself:
+open **Settings -> IP API** and give it a hostname and a token. No path is needed —
+the control node asks `GET https://<hostname>/checkip?ip=<address>` and reads the
+documented JSON answer. The token, when set, is sent as
+`Authorization: Bearer <token>`.
+
+The country is taken from the first field of that answer that has one: the abuse
+report, then the allocation, then the network's ASN. Which one answered is reported
+with the answer, so a rule that matched unexpectedly can be understood. The
+security signals the API also returns (Tor, hosting, proxy) are recorded with it.
+
+Answers are cached for twelve hours, and a failed lookup is remembered for a
+minute: the proxy asks for a country while it is handling a request, so the API is
+consulted once per address, not once per request. Until a host is configured,
+country rules simply have no data and stay inactive. `Settings -> IP API` shows
+whether the host and token work, and can test them against `1.1.1.1`.
+
+The same settings can be given at startup:
+
+```sh
+noobtunnel server --ipapi-host iplog.example.com --ipapi-token TOKEN
+```
+
 ## Operations
 
 State on the control node lives in `/var/lib/noobtunnel/state.json` (mesh keys,
@@ -887,7 +913,7 @@ before touching anything:
 
 Then it asks once (`Type YES to remove all of it`) and deletes the services,
 binaries, `/etc/noobtunnel`, `/var/lib/noobtunnel` (mesh keys, agent tokens,
-accounts, certificates, GeoLite data), the WireGuard interfaces and routes,
+accounts, certificates), the WireGuard interfaces and routes,
 the iptables/nft and firewall rules, `/etc/sysctl.d/99-noobtunnel.conf`, and the
 copy of noobtunnel you ran it from. It finishes by searching the filesystem for
 anything left with "noobtunnel" in the name and reporting it.

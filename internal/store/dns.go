@@ -245,28 +245,29 @@ func buildDNSProvider(in DNSProviderInput) (DNSProvider, error) {
 	return provider, nil
 }
 
-// GeoIPConfig holds the MaxMind credentials used for country access rules.
+// GeoIPConfig holds the IP API country lookups use.
 type GeoIPConfig struct {
-	// LicenseKey is a secret: it lives in the state file (0600) and is never
-	// returned by the API.
-	LicenseKey string `json:"licenseKey,omitempty"`
-	// AccountID is optional; with it the newer authenticated endpoint is used.
-	AccountID string `json:"accountId,omitempty"`
+	// Host is the API's hostname, for example iplog.example.com. The country
+	// lookup is GET https://<host>/checkip?ip=<address>.
+	Host string `json:"host,omitempty"`
+	// Token is a secret: it lives in the state file (0600) and is never returned
+	// by the API.
+	Token string `json:"token,omitempty"`
 }
 
-// GeoIP returns the stored MaxMind credentials.
+// GeoIP returns the stored IP API settings.
 func (s *Store) GeoIP() GeoIPConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.st.GeoIP
 }
 
-// SetGeoIP stores MaxMind credentials; an empty licence key clears them.
+// SetGeoIP stores the IP API settings; an empty host clears them.
 func (s *Store) SetGeoIP(cfg GeoIPConfig) error {
 	return s.Update(func(st *State) error {
 		st.GeoIP = GeoIPConfig{
-			LicenseKey: strings.TrimSpace(cfg.LicenseKey),
-			AccountID:  strings.TrimSpace(cfg.AccountID),
+			Host:  strings.TrimSpace(cfg.Host),
+			Token: strings.TrimSpace(cfg.Token),
 		}
 		return nil
 	})

@@ -7,119 +7,122 @@ import (
 	"strings"
 	"time"
 
+	"github.com/noobtunnel/noobtunnel/internal/geoip"
 	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
-// geoIPCredentials prefers the command line over the stored configuration, so a
-// server started with flags always wins.
-func (s *Server) geoIPCredentials() store.GeoIPConfig {
-	stored := s.store.GeoIP()
-	key := s.opts.GeoIPLicenceKey
-	if key == "" {
-		key = stored.LicenseKey
-	}
-	account := s.opts.GeoIPAccountID
-	if account == "" {
-		account = stored.AccountID
-	}
-	return store.GeoIPConfig{LicenseKey: key, AccountID: account}
-}
-
-// GeoIPStatus describes the country database for the UI.
+// GeoIPStatus describes the IP API for the settings panel.
 type GeoIPStatus struct {
 	Configured bool   `json:"configured"`
-	HasKey     bool   `json:"hasKey"`
-	AccountID  string `json:"accountId,omitempty"`
+	HasToken   bool   `json:"hasToken"`
+	Host       string `json:"host,omitempty"`
 	Ready      bool   `json:"ready"`
-	Networks   int    `json:"networks,omitempty"`
-	Source     string `json:"source,omitempty"`
-	LoadedAt   string `json:"loadedAt,omitempty"`
+	Cached     int    `json:"cached,omitempty"`
+	Lookups    int    `json:"lookups,omitempty"`
+	LastAt     string `json:"lastAt,omitempty"`
 	LastError  string `json:"lastError,omitempty"`
 }
 
-// geoIPStatus reports the current state of country data.
+// geoIPStatus reports the current state of country lookups.
 func (s *Server) geoIPStatus() GeoIPStatus {
 	credentials := s.geoIPCredentials()
 	status := GeoIPStatus{
-		Configured: credentials.LicenseKey != "",
-		HasKey:     credentials.LicenseKey != "",
-		AccountID:  credentials.AccountID,
+		Configured: credentials.Host != "",
+		HasToken:   credentials.Token != "",
+		Host:       credentials.Host,
 	}
 	s.mu.Lock()
-	db := s.geoIP
-	status.LastError = s.geoIPError
+	api := s.geoIP
 	s.mu.Unlock()
-	if db != nil && db.Loaded() {
-		source, networks, loaded := db.Info()
-		status.Ready = true
-		status.Source = source
-		status.Networks = networks
-		status.LoadedAt = loaded.Format(timeLayout)
+	if api == nil {
+		return status
+	}
+	_, cached, lookups, lastAt, lastError := api.Stats()
+	status.Ready = api.Ready()
+	status.Cached = cached
+	status.Lookups = lookups
+	status.LastError = lastError
+	if !lastAt.IsZero() {
+		status.LastAt = lastAt.Format(timeLayout)
 	}
 	return status
 }
 
-// geoIPDir is where the database is cached.
-func (s *Server) geoIPDir() string {
-	if s.opts.GeoIPDir != "" {
-		return s.opts.GeoIPDir
-	}
-	return s.opts.StateDir + "/geoip"
-}
-
-// GeoIPLookupForTest exposes the country lookup so tests can assert that a saved
-// database is actually consulted (there is no country data on a test machine).
+// GeoIPLookupForTest exposes the lookup so tests can assert that a configured API
+// is actually consulted, and that a country rule sees its answer.
 func (s *Server) GeoIPLookupForTest(addr string) string {
 	s.mu.Lock()
-	db := s.geoIP
+	api := s.geoIP
 	s.mu.Unlock()
-	if db == nil {
+	if api == nil {
 		return ""
 	}
 	parsed, err := netip.ParseAddr(addr)
 	if err != nil {
 		return ""
 	}
-	return db.Lookup(parsed)
+	return api.Country(parsed)
 }
 
-// handleGeoIP reads or updates the MaxMind credentials.
+// handleGeoIP reads or updates the IP API settings, and can test them.
 func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"geoip": s.geoIPStatus()})
 	case http.MethodPost:
 		var body struct {
-			LicenseKey string `json:"licenseKey"`
-			AccountID  string `json:"accountId"`
-			Clear      bool   `json:"clear"`
-			Fetch      bool   `json:"fetch"`
+			Host  string `json:"host"`
+			Token string `json:"token"`
+			Clear bool   `json:"clear"`
+			// Check looks up one address with the settings as they are saved, so
+			// the panel can say whether the host and token work.
+			Check bool `json:"check"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		cfg := store.GeoIPConfig{LicenseKey: body.LicenseKey, AccountID: body.AccountID}
-		if body.Clear {
+		cfg := store.GeoIPConfig{Host: body.Host, Token: body.Token}
+		switch {
+		case body.Clear:
 			cfg = store.GeoIPConfig{}
-		} else if strings.TrimSpace(body.LicenseKey) == "" {
-			// Leaving the field empty keeps the stored key.
-			cfg.LicenseKey = s.store.GeoIP().LicenseKey
+		case strings.TrimSpace(body.Host) == "":
+			// Leaving the field empty keeps what is stored; the token is kept
+			// unless a new one is typed.
+			cfg.Host = s.store.GeoIP().Host
+			if strings.TrimSpace(body.Token) == "" {
+				cfg.Token = s.store.GeoIP().Token
+			}
+		case strings.TrimSpace(body.Token) == "":
+			cfg.Token = s.store.GeoIP().Token
 		}
 		if err := s.store.SetGeoIP(cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 			return
 		}
-		s.recordEvent("geoip", "MaxMind credentials updated")
-		if body.Fetch && !body.Clear {
-			ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
-			err := s.loadGeoIP(ctx, s.geoIPDir())
+		api := s.geoIPClient()
+		api.Clear()
+		s.useGeoIP(api)
+		if body.Clear {
+			s.recordEvent("geoip", "IP API removed")
+		} else {
+			s.recordEvent("geoip", "IP API updated")
+		}
+		if body.Check && !body.Clear {
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			info, err := api.Lookup(ctx, netip.MustParseAddr("1.1.1.1"))
 			cancel()
 			s.broadcastState()
 			if err != nil {
 				writeJSON(w, http.StatusOK, map[string]any{"geoip": s.geoIPStatus(), "error": err.Error()})
 				return
 			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"geoip":      s.geoIPStatus(),
+				"check":      info,
+				"checkedFor": "1.1.1.1",
+			})
+			return
 		}
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"geoip": s.geoIPStatus()})
@@ -127,3 +130,6 @@ func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("use GET or POST"))
 	}
 }
+
+// geoipLookupInfo is the lookup shape the panel shows after a test.
+type geoipLookupInfo = geoip.Lookup

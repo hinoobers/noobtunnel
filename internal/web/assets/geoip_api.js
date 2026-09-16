@@ -1,7 +1,7 @@
 'use strict';
-/* MaxMind credentials for country access rules. */
+/* The IP API that answers country lookups for country rules on resources. */
 
-// renderGeoIP shows the state of the country database.
+// renderGeoIP shows the state of the country lookup.
 function renderGeoIP() {
   if (!shell || !shell.geoipForm) return;
   const geo = (state.data.server && state.data.server.geoip) || {};
@@ -9,23 +9,25 @@ function renderGeoIP() {
   if (!chip) return;
   if (geo.ready) {
     chip.className = 'chip chip-direct';
-    chip.textContent = geo.networks + ' networks';
-  } else if (geo.hasKey) {
+    chip.textContent = geo.lookups + ' lookup' + (geo.lookups === 1 ? '' : 's') + ' answered';
+  } else if (geo.configured) {
     chip.className = 'chip chip-warn';
-    chip.textContent = 'key saved, not loaded';
+    chip.textContent = 'set, no answer yet';
   } else {
     chip.className = 'chip chip-off';
     chip.textContent = 'not configured';
   }
   if (shell.geoipDetail) {
-    shell.geoipDetail.textContent = geo.ready
-      ? 'Loaded ' + relTime(geo.loadedAt) + ' from ' + (geo.source || 'cache') + '.'
-      : (geo.lastError
-        ? 'Last attempt failed: ' + geo.lastError
-        : 'Country rules stay inactive until the database is loaded.');
+    const parts = [];
+    if (geo.configured) parts.push('Host ' + geo.host + (geo.hasToken ? ' with a token' : ' without a token'));
+    if (geo.lastAt) parts.push('last answer ' + relTime(geo.lastAt));
+    if (geo.cached) parts.push(geo.cached + ' address' + (geo.cached === 1 ? '' : 'es') + ' cached');
+    if (geo.lastError) parts.push('last error: ' + geo.lastError);
+    if (!geo.configured) parts.push('Country rules stay inactive until an API is configured.');
+    shell.geoipDetail.textContent = parts.join(' \u00b7 ');
   }
-  const account = shell.geoipForm.querySelector('input[name=accountId]');
-  if (account && document.activeElement !== account && geo.accountId) account.value = geo.accountId;
+  const host = shell.geoipForm.querySelector('input[name=host]');
+  if (host && document.activeElement !== host && geo.host) host.value = geo.host;
 }
 
 async function saveGeoIP(event) {
@@ -38,18 +40,20 @@ async function saveGeoIP(event) {
     const result = await api('/api/geoip', {
       method: 'POST',
       body: {
-        licenseKey: String(data.get('licenseKey') || ''),
-        accountId: String(data.get('accountId') || ''),
-        fetch: true,
+        host: String(data.get('host') || ''),
+        token: String(data.get('token') || ''),
+        check: true,
       },
     });
-    form.querySelector('input[name=licenseKey]').value = '';
+    form.querySelector('input[name=token]').value = '';
     await refresh();
     if (result && result.error) {
-      toast('Saved, but the download failed: ' + result.error, 'fail');
+      toast('Saved, but the API did not answer: ' + result.error, 'fail');
       return;
     }
-    toast('Country data loaded', 'ok');
+    const country = result && result.check ? result.check.country : '';
+    toast('API answered for ' + (result.checkedFor || 'a test address') +
+      (country ? ' with ' + country : ''), 'ok');
   } catch (err) {
     error.hidden = false;
     error.textContent = err.message;
@@ -60,7 +64,7 @@ async function clearGeoIP() {
   try {
     await api('/api/geoip', { method: 'POST', body: { clear: true } });
     await refresh();
-    toast('Credentials removed', 'ok');
+    toast('IP API removed', 'ok');
   } catch (err) {
     toast(err.message, 'fail');
   }

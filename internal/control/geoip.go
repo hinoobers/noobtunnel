@@ -2,69 +2,72 @@ package control
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"time"
+	"net/netip"
+	"strings"
 
 	"github.com/noobtunnel/noobtunnel/internal/geoip"
+	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
-// startGeoIP loads the country database in the background: a slow download must
-// not delay the control node coming up, and country rules simply stay inert
-// until it is ready.
+// startGeoIP points the country lookup at the operator's IP API.
+//
+// There is nothing to download and nothing to keep fresh: the API answers per
+// address, and the client caches the answers. Until a host is configured, country
+// rules simply have no data to match against.
 func (s *Server) startGeoIP(ctx context.Context) {
-	dir := s.opts.GeoIPDir
-	if dir == "" {
-		dir = filepath.Join(s.opts.StateDir, "geoip")
-	}
-	if _, err := os.Stat(dir); err != nil && s.geoIPCredentials().LicenseKey == "" {
-		// Nothing local and no licence key: country rules stay disabled.
+	api := s.geoIPClient()
+	s.useGeoIP(api)
+	if !api.Configured() {
 		return
 	}
-	s.wg.Add(1)
+	// A lookup of a well known address tells the operator straight away whether
+	// the host and token work.
 	go func() {
-		defer s.wg.Done()
-		if s.loadGeoIP(ctx, dir) == nil {
+		info, err := api.Lookup(ctx, netip.MustParseAddr("1.1.1.1"))
+		if err != nil {
+			s.log.Warn("the IP API did not answer", "error", err)
 			return
 		}
-		// Without a licence key there is nothing to download; a local database is
-		// still useful, so only retry when downloading is possible.
-		if s.geoIPCredentials().LicenseKey == "" {
-			return
-		}
-		ticker := time.NewTicker(12 * time.Hour)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if s.loadGeoIP(ctx, dir) == nil {
-					return
-				}
-			}
-		}
+		s.log.Info("IP API ready", "country", info.Country, "from", info.CountryFrom)
+		s.broadcastState()
 	}()
 }
 
-// loadGeoIP loads a cached database or downloads a fresh one.
-func (s *Server) loadGeoIP(ctx context.Context, dir string) error {
-	db, err := geoip.LoadOrDownload(ctx, geoip.Options{
-		// Credentials come from the settings panel when no flags were given.
-		AccountID:  s.geoIPCredentials().AccountID,
-		LicenseKey: s.geoIPCredentials().LicenseKey,
-		Dir:        dir,
-	})
-	if err != nil {
-		s.log.Warn("country rules are disabled", "error", err)
-		return err
+// geoIPClient builds the lookup client from the flags first, then the stored
+// settings, so a control node started with --ipapi-host needs no UI step.
+func (s *Server) geoIPClient() *geoip.API {
+	settings := s.store.GeoIP()
+	host := strings.TrimSpace(s.opts.IPAPIHost)
+	if host == "" {
+		host = settings.Host
 	}
-	s.useGeoIP(db)
-	_, blocks, _ := db.Info()
-	s.log.Info("country database ready", "networks", blocks, "directory", dir)
+	token := strings.TrimSpace(s.opts.IPAPIToken)
+	if token == "" {
+		token = settings.Token
+	}
+	return geoip.New(host, token)
+}
+
+// geoIPCredentials is what the control node would use right now, for the panel.
+func (s *Server) geoIPCredentials() store.GeoIPConfig {
+	settings := s.store.GeoIP()
+	host := strings.TrimSpace(s.opts.IPAPIHost)
+	if host == "" {
+		host = settings.Host
+	}
+	token := strings.TrimSpace(s.opts.IPAPIToken)
+	if token == "" {
+		token = settings.Token
+	}
+	return store.GeoIPConfig{Host: host, Token: token}
+}
+
+// useGeoIP swaps the client in and gives it to the proxy, which is what country
+// rules on resources are evaluated against.
+func (s *Server) useGeoIP(api *geoip.API) {
 	s.mu.Lock()
-	s.geoIP = db
+	s.geoIP = api
 	s.mu.Unlock()
+	s.wireCountryLookup(api)
 	s.broadcastState()
-	return nil
 }

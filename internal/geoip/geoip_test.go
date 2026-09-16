@@ -1,232 +1,218 @@
 package geoip
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"bytes"
-	"compress/gzip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
-	"os"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
-const blocksCSV = `network,geoname_id,registered_country_geoname_id,represented_country_geoname_id,is_anonymous_proxy,is_satellite_provider
-203.0.113.0/24,588,588,,0,0
-198.51.100.0/24,,588,,0,0
-1.2.0.0/16,,588,,0,0
-10.0.0.0/8,999,999,,0,0
-`
+// fakeAPI answers /checkip the way the documented IP API does, counting how often
+// it was asked.
+type fakeAPI struct {
+	server *httptest.Server
+	calls  atomic.Int64
+	// status and body let a test make the API fail.
+	status int
+	body   string
+	// tokens records the Authorization header it was given.
+	tokens []string
+}
 
-const locationsCSV = `geoname_id,locale_code,continent_code,continent_name,country_iso_code,country_name
-588,en,EU,Europe,EE,Estonia
-999,en,EU,Europe,XX,Nowhere
-`
-
-func tarball(t *testing.T) []byte {
+func newFakeAPI(t *testing.T) *fakeAPI {
 	t.Helper()
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	archive := tar.NewWriter(gz)
-	write := func(name string, body string) {
-		if err := archive.WriteHeader(&tar.Header{Name: name, Mode: 0o600, Size: int64(len(body))}); err != nil {
-			t.Fatal(err)
+	fake := &fakeAPI{status: http.StatusOK}
+	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fake.calls.Add(1)
+		fake.tokens = append(fake.tokens, r.Header.Get("Authorization"))
+		if r.URL.Path != "/checkip" {
+			http.NotFound(w, r)
+			return
 		}
-		if _, err := archive.Write([]byte(body)); err != nil {
-			t.Fatal(err)
+		if r.URL.Query().Get("ip") == "" {
+			http.Error(w, "ip is required", http.StatusBadRequest)
+			return
 		}
-	}
-	write("GeoLite2-Country_20260101/GeoLite2-Country-Blocks-IPv4.csv", blocksCSV)
-	write("GeoLite2-Country_20260101/GeoLite2-Country-Locations-en.csv", locationsCSV)
-	if err := archive.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gz.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-// zipArchive builds the GeoLite2-Country-CSV style archive MaxMind serves.
-func zipArchive(t *testing.T) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	archive := zip.NewWriter(&buf)
-	write := func(name, body string) {
-		w, err := archive.Create(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := w.Write([]byte(body)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("GeoLite2-Country-CSV_20260101/GeoLite2-Country-Blocks-IPv4.csv", blocksCSV)
-	write("GeoLite2-Country-CSV_20260101/GeoLite2-Country-Locations-en.csv", locationsCSV)
-	if err := archive.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buf.Bytes()
-}
-
-func TestLoadZip(t *testing.T) {
-	raw := zipArchive(t)
-	db := New()
-	if err := db.LoadZip(bytes.NewReader(raw), int64(len(raw))); err != nil {
-		t.Fatal(err)
-	}
-	if got := db.Lookup(netip.MustParseAddr("203.0.113.10")); got != "EE" {
-		t.Fatalf("lookup = %q, want EE", got)
-	}
-}
-
-// TestTarballWithoutCSVsExplainsItself covers the exact problem a user hit: the
-// GeoLite2-Country tarball only contains the .mmdb, so the error must say which
-// download to use instead of looking like a broken download.
-func TestTarballWithoutCSVsExplainsItself(t *testing.T) {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	archive := tar.NewWriter(gz)
-	body := "not a csv"
-	if err := archive.WriteHeader(&tar.Header{Name: "GeoLite2-Country_20260101/GeoLite2-Country.mmdb", Mode: 0o600, Size: int64(len(body))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := archive.Write([]byte(body)); err != nil {
-		t.Fatal(err)
-	}
-	archive.Close()
-	gz.Close()
-	err := New().LoadTarball(bytes.NewReader(buf.Bytes()))
-	if err == nil {
-		t.Fatal("a tarball without CSVs should fail")
-	}
-	if !strings.Contains(err.Error(), "GeoLite2-Country-CSV") {
-		t.Fatalf("the error should name the right download: %v", err)
-	}
-}
-
-func TestLoadTarballAndLookup(t *testing.T) {
-	db := New()
-	if err := db.LoadTarball(bytes.NewReader(tarball(t))); err != nil {
-		t.Fatal(err)
-	}
-	if !db.Loaded() {
-		t.Fatal("the database should be loaded")
-	}
-	if got := db.Lookup(netip.MustParseAddr("203.0.113.10")); got != "EE" {
-		t.Fatalf("lookup = %q, want EE", got)
-	}
-	// A row without a country code falls back to the locations table.
-	if got := db.Lookup(netip.MustParseAddr("198.51.100.7")); got != "EE" {
-		t.Fatalf("lookup via geoname_id = %q, want EE", got)
-	}
-	if got := db.Lookup(netip.MustParseAddr("1.2.3.4")); got != "EE" {
-		t.Fatalf("lookup = %q, want EE", got)
-	}
-	if got := db.Lookup(netip.MustParseAddr("10.1.1.1")); got != "XX" {
-		t.Fatalf("lookup = %q, want XX", got)
-	}
-	if got := db.Lookup(netip.MustParseAddr("8.8.8.8")); got != NotFound {
-		t.Fatalf("an address outside the list should be unknown, got %q", got)
-	}
-	if got := db.Lookup(netip.Addr{}); got != NotFound {
-		t.Fatalf("an invalid address should be unknown, got %q", got)
-	}
-}
-
-func TestLoadDirectoryCSVs(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "GeoLite2-Country-Blocks-IPv4.csv"), []byte(blocksCSV), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "GeoLite2-Country-Locations-en.csv"), []byte(locationsCSV), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	db := New()
-	if err := db.LoadDirectory(dir); err != nil {
-		t.Fatal(err)
-	}
-	if got := db.Lookup(netip.MustParseAddr("203.0.113.1")); got != "EE" {
-		t.Fatalf("lookup = %q", got)
-	}
-	// A directory with nothing usable is an error, not a silent empty database.
-	if err := New().LoadDirectory(t.TempDir()); err == nil {
-		t.Fatal("an empty directory should fail to load")
-	}
-}
-
-// TestDownloadAndCache exercises the download path against a local server: the
-// licence key is sent, the archive is cached, and a second run uses the cache
-// without another request.
-func TestDownloadAndCache(t *testing.T) {
-	archive := zipArchive(t)
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		if key := r.URL.Query().Get("license_key"); key != "test-key" {
-			t.Errorf("the licence key was not sent: %q", key)
-		}
-		_, _ = w.Write(archive)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(fake.status)
+		_, _ = w.Write([]byte(fake.body))
 	}))
-	defer server.Close()
+	t.Cleanup(fake.server.Close)
+	return fake
+}
 
-	dir := t.TempDir()
-	opts := Options{LicenseKey: "test-key", URL: server.URL, Dir: dir}
-	db, err := LoadOrDownload(context.Background(), opts)
+// answer is the response the user's API returns, trimmed to what matters.
+const answer = `{
+  "cache": "hit",
+  "data": {
+    "ip": "1.1.1.1",
+    "is_tor": false,
+    "asns": [{"asn": 13335, "name": "CLOUDFLARENET - Cloudflare, Inc.", "country_code": "US"}],
+    "allocation": {"registry": "apnic", "country_code": "AU", "status": "assigned"},
+    "abuse": {"abuse_confidence_score": 7, "country_code": "AU", "is_whitelisted": true},
+    "security": {
+      "hosting": {"detected": true, "confidence": "likely"},
+      "proxy": {"detected": false, "type": null}
+    }
+  }
+}`
+
+// TestLookupReadsTheDocumentedAnswer covers the fields country rules need, and the
+// order they are taken from: the abuse report first, then the allocation, then the
+// network's ASN.
+func TestLookupReadsTheDocumentedAnswer(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.body = answer
+	api := New(fake.server.URL, "secret-token")
+
+	info, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !db.Loaded() || requests != 1 {
-		t.Fatalf("expected one download, got %d requests", requests)
+	if info.Country != "AU" || info.CountryFrom != "abuse" {
+		t.Fatalf("country = %q from %q, want AU from the abuse report", info.Country, info.CountryFrom)
 	}
-	if _, err := os.Stat(filepath.Join(dir, cacheName)); err != nil {
-		t.Fatalf("the archive should be cached: %v", err)
+	if !info.Hosting || info.Proxy || info.IsTor {
+		t.Fatalf("security signals = %+v", info)
 	}
-	// A second start uses the cache.
-	if _, err := LoadOrDownload(context.Background(), opts); err != nil {
+	if info.AbuseScore != 7 || !strings.Contains(info.ASN, "CLOUDFLARENET") {
+		t.Fatalf("asn/abuse = %+v", info)
+	}
+	if got := fake.tokens[0]; got != "Bearer secret-token" {
+		t.Fatalf("the token should be sent as a bearer token, got %q", got)
+	}
+}
+
+// TestLookupFallsBackToTheAllocationAndTheASN keeps a country available when the
+// API has no abuse record for the address.
+func TestLookupFallsBackToTheAllocationAndTheASN(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.body = `{"data": {"allocation": {"country_code": "de"}}}`
+	api := New(fake.server.URL, "")
+	info, err := api.Lookup(context.Background(), netip.MustParseAddr("9.9.9.9"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if requests != 1 {
-		t.Fatalf("the cached archive should be reused, got %d requests", requests)
+	if info.Country != "DE" || info.CountryFrom != "allocation" {
+		t.Fatalf("country = %q from %q, want DE from the allocation", info.Country, info.CountryFrom)
+	}
+
+	fake.body = `{"data": {"asns": [{"asn": 1, "name": "EXAMPLE", "country_code": "se"}]}}`
+	other := New(fake.server.URL, "")
+	info, err = other.Lookup(context.Background(), netip.MustParseAddr("9.9.9.10"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Country != "SE" || info.CountryFrom != "asn" {
+		t.Fatalf("country = %q from %q, want SE from the ASN", info.Country, info.CountryFrom)
 	}
 }
 
-func TestDownloadRejectsBadCredentials(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer server.Close()
-	_, err := LoadOrDownload(context.Background(), Options{LicenseKey: "bad", URL: server.URL, Dir: t.TempDir()})
-	if err == nil {
-		t.Fatal("a 401 should surface as an error")
-	}
-	if !bytes.Contains([]byte(err.Error()), []byte("licence key")) {
-		t.Fatalf("the error should mention the licence key: %v", err)
-	}
-	// Without a key there is nothing to try.
-	if _, err := Download(context.Background(), Options{Dir: t.TempDir()}); err == nil {
-		t.Fatal("a missing licence key should fail fast")
-	}
-}
-
-func TestBasicAuthWhenAccountIDIsSet(t *testing.T) {
-	archive := zipArchive(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != "12345" || pass != "test-key" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+// TestAnswersAreCached covers what makes this usable in the request path: the API
+// is asked once per address, not once per request, because the proxy asks for a
+// country while it is handling one.
+func TestAnswersAreCached(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.body = answer
+	api := New(fake.server.URL, "")
+	addr := netip.MustParseAddr("1.1.1.1")
+	for i := 0; i < 5; i++ {
+		if got := api.Country(addr); got != "AU" {
+			t.Fatalf("lookup %d answered %q", i, got)
 		}
-		_, _ = w.Write(archive)
+	}
+	if got := fake.calls.Load(); got != 1 {
+		t.Fatalf("the API should be asked once, it was asked %d times", got)
+	}
+	// Configuring a different API drops what came from the old one.
+	fake.body = `{"data": {"allocation": {"country_code": "FR"}}}`
+	api.Configure(fake.server.URL, "other")
+	if got := api.Country(addr); got != "FR" {
+		t.Fatalf("a new configuration should be asked again, got %q", got)
+	}
+}
+
+// TestFailuresAreReportedAndRemembered keeps a broken API from being hammered: the
+// reason is recorded, and the next request within the failure window does not try
+// again.
+func TestFailuresAreReportedAndRemembered(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.status = http.StatusUnauthorized
+	fake.body = `{"error": "token is broken"}`
+	api := New(fake.server.URL, "bad-token")
+
+	if _, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1")); err == nil {
+		t.Fatal("a rejected token has to be reported")
+	} else if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("the error should name the status: %v", err)
+	}
+	_, _, _, _, lastError := api.Stats()
+	if !strings.Contains(lastError, "401") {
+		t.Fatalf("the failure should be remembered for the panel: %q", lastError)
+	}
+	before := fake.calls.Load()
+	if got := api.Country(netip.MustParseAddr("1.1.1.1")); got != "" {
+		t.Fatalf("a failed lookup has no country, got %q", got)
+	}
+	if fake.calls.Load() != before {
+		t.Fatal("a failure should not be retried on every request")
+	}
+}
+
+// TestNothingIsAskedWithoutAnAPI keeps country rules inert rather than chatty when
+// no API is configured.
+func TestNothingIsAskedWithoutAnAPI(t *testing.T) {
+	api := New("", "")
+	if api.Configured() || api.Ready() {
+		t.Fatal("an unconfigured client is neither configured nor ready")
+	}
+	if _, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1")); err != ErrNotConfigured {
+		t.Fatalf("err = %v, want ErrNotConfigured", err)
+	}
+	if got := api.Country(netip.MustParseAddr("1.1.1.1")); got != "" {
+		t.Fatalf("no API means no country, got %q", got)
+	}
+}
+
+// TestHostNormalisation accepts what an operator types: a bare hostname, a URL
+// with a scheme and a trailing slash.
+func TestHostNormalisation(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"iplog.example.com", "https://iplog.example.com"},
+		{"https://iplog.example.com/", "https://iplog.example.com"},
+		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
+		{"  iplog.example.com  ", "https://iplog.example.com"},
+		{"", ""},
+	} {
+		api := New(tc.in, "")
+		host, _, _, _, _ := api.Stats()
+		if host != tc.want {
+			t.Fatalf("New(%q) host = %q, want %q", tc.in, host, tc.want)
+		}
+	}
+}
+
+// TestTheRequestIsTheDocumentedOne pins the endpoint: <host>/checkip?ip=<address>.
+func TestTheRequestIsTheDocumentedOne(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.String()
+		var decoded struct {
+			Data json.RawMessage `json:"data"`
+		}
+		_ = decoded
+		_, _ = w.Write([]byte(answer))
 	}))
 	defer server.Close()
-	if _, err := LoadOrDownload(context.Background(), Options{
-		AccountID: "12345", LicenseKey: "test-key", URL: server.URL, Dir: t.TempDir(),
-	}); err != nil {
-		t.Fatalf("basic auth download failed: %v", err)
+	api := New(server.URL, "")
+	if _, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1")); err != nil {
+		t.Fatal(err)
+	}
+	if got != "/checkip?ip=1.1.1.1" {
+		t.Fatalf("the request was %q, want /checkip?ip=1.1.1.1", got)
 	}
 }

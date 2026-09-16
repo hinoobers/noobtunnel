@@ -18,6 +18,15 @@ func TestSettingsIsSplitIntoTabs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The country data tab is the operator's own IP API, not a bundled database.
+	if !strings.Contains(template, ">IP API<") {
+		t.Error("the Settings tab for country lookups should be called IP API")
+	}
+	for _, gone := range []string{"GeoLite", "MaxMind", "licence key"} {
+		if strings.Contains(template, gone) {
+			t.Errorf("the settings panel still mentions %q", gone)
+		}
+	}
 	wanted := []string{"mesh", "geoip", "branding", "tokens"}
 	for _, view := range wanted {
 		if !queryMatches(root, `[data-tab="`+view+`"]`) {

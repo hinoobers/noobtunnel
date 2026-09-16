@@ -72,13 +72,12 @@ type Options struct {
 	// DNSFactory builds the client used to update domain records. Tests inject a
 	// client pointed at a fake provider.
 	DNSFactory func(provider store.DNSProvider) (DNSClient, error)
-	// GeoIPLicenceKey (and account id) enable country rules: the control node
-	// downloads the MaxMind GeoLite2-Country database at startup.
-	GeoIPLicenceKey string
-	GeoIPAccountID  string
-	// GeoIPDir holds a database the operator downloaded, and is where a
-	// downloaded one is cached.
-	GeoIPDir string
+	// IPAPIHost is the hostname of the IP API that answers country lookups, for
+	// example iplog.example.com. Empty leaves country rules inert until it is set
+	// in the settings panel.
+	IPAPIHost string
+	// IPAPIToken is the token that API expects, sent as a bearer token.
+	IPAPIToken string
 	// DialTimeout bounds agent ping responses.
 	PingTimeout time.Duration
 
@@ -108,11 +107,11 @@ type Server struct {
 	pingSeq   atomic.Uint64
 	genSeq    atomic.Uint64
 
-	mu         sync.Mutex
-	geoIP      *geoip.Database
-	geoIPError string
-	requests   *requestLog
-	errors     *errorLog
+	mu sync.Mutex
+	// geoIP is the client for the operator's IP API, used by country rules.
+	geoIP    *geoip.API
+	requests *requestLog
+	errors   *errorLog
 	// reportedErrors remembers the last failure reported per resource, target and
 	// agent, so the Errors view gets one entry per change rather than one per
 	// reconcile pass.
@@ -1675,7 +1674,7 @@ func (s *Server) RuntimeInfo() map[string]any {
 	hubErr := s.hubErr
 	hubStatus := s.hubStatus
 	endpoints := len(s.endpoints)
-	geoReady := s.geoIP != nil && s.geoIP.Loaded()
+	geoReady := s.geoIP != nil && s.geoIP.Ready()
 	s.mu.Unlock()
 	return map[string]any{
 		"version":        version.Version,

@@ -85,7 +85,7 @@ banner() {
   ================================================================
   This removes noobtunnel from this machine: the control node and agent
   services, the binaries, /etc/noobtunnel, /var/lib/noobtunnel (mesh keys,
-  agent tokens, accounts, certificates, GeoLite data), the firewall rules
+  agent tokens, accounts, certificates), the firewall rules
   and routing rules it added, and the noobtunnel copy you ran this from.
   Everything noobtunnel created is listed below before anything is removed.
   The mesh itself is gone for good: connected agents are cut off.

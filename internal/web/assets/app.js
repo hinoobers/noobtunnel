@@ -213,6 +213,8 @@ function viewFromPath(pathname) {
 function setView(view, push = true) {
   if (!VIEW_PATHS.includes(view)) return;
   state.view = view;
+  // A highlight belongs to the visit that asked for it: leaving Logs drops it.
+  if (view !== 'logs') state.errorMatch = '';
   if (push && typeof window !== 'undefined' && window.history && window.history.pushState) {
     const target = view === 'overview' ? '/' : '/' + view;
     if (window.location.pathname !== target) window.history.pushState({ view }, '', target);
@@ -509,6 +511,7 @@ async function handleGlobalAction(event) {
     case 'add-agent': openAddAgent(); break;
     case 'clear-errors': await clearErrors(); break;
     case 'diagnose-target': await diagnoseTarget(actionEl.dataset.resource, actionEl.dataset.target); break;
+    case 'show-error': await showError(actionEl.dataset.match); break;
     case 'add-user': openAddUser(); break;
     case 'user-password': openUserPassword(actionEl.dataset.username, actionEl.dataset.id); break;
     case 'user-role': openRoleModal(actionEl.dataset.id); break;

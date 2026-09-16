@@ -19,7 +19,6 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/agent"
 	"github.com/noobtunnel/noobtunnel/internal/control"
 	"github.com/noobtunnel/noobtunnel/internal/dns"
-	"github.com/noobtunnel/noobtunnel/internal/geoip"
 	"github.com/noobtunnel/noobtunnel/internal/store"
 	"github.com/noobtunnel/noobtunnel/internal/wg"
 	"net/http/httptest"
@@ -490,27 +489,35 @@ func containsString(list []string, want string) bool {
 // hubKey returns the control node's WireGuard public key.
 func hubKey(h *harness) string { return h.server.Store().Hub().PublicKey }
 
-// fakeMaxMind serves a GeoLite2 tarball to the control node under test.
-type fakeMaxMind struct {
+// fakeIPAPI serves the documented /checkip answer, so country lookups can be
+// exercised without touching the network.
+type fakeIPAPI struct {
 	server *httptest.Server
+	calls  int
+	// token is what the API expects; it is reported back so a test can assert the
+	// control node sent it.
+	token string
 }
 
-func newFakeMaxMind(t *testing.T) *fakeMaxMind {
+func newFakeIPAPI(t *testing.T, country string) *fakeIPAPI {
 	t.Helper()
-	archive := testGeoIPTarball(t)
-	fake := &fakeMaxMind{}
+	fake := &fakeIPAPI{token: "test-token"}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, _, ok := r.BasicAuth(); !ok && r.URL.Query().Get("license_key") == "" {
-			w.WriteHeader(http.StatusUnauthorized)
+		fake.calls++
+		if r.URL.Path != "/checkip" || r.URL.Query().Get("ip") == "" {
+			http.Error(w, "ip is required", http.StatusBadRequest)
 			return
 		}
-		_, _ = w.Write(archive)
+		if fake.token != "" && r.Header.Get("Authorization") != "Bearer "+fake.token {
+			http.Error(w, "token is broken", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"cache":"hit","data":{"ip":"`+r.URL.Query().Get("ip")+
+			`","is_tor":false,"asns":[{"asn":13335,"name":"EXAMPLE-NET","country_code":"`+country+
+			`"}],"allocation":{"country_code":"`+country+`"},"abuse":{"abuse_confidence_score":0,"country_code":"`+country+
+			`"},"security":{"hosting":{"detected":false},"proxy":{"detected":false}}}}`)
 	}))
 	t.Cleanup(fake.server.Close)
 	return fake
-}
-
-// attach makes the control node download from the fake instead of MaxMind.
-func (f *fakeMaxMind) attach(opts *control.Options) {
-	geoip.SetDownloadURLForTest(f.server.URL)
 }

@@ -208,7 +208,7 @@
 <section class="view" data-view-panel="settings" hidden>
   <nav class="tabs" data-tabs>
     <button class="tab is-active" data-tab="mesh">Mesh &amp; control node</button>
-    <button class="tab" data-tab="geoip">GeoLite</button>
+    <button class="tab" data-tab="geoip">IP API</button>
     <button class="tab" data-tab="branding">Branding</button>
     <button class="tab" data-tab="tokens">API tokens</button>
   </nav>
@@ -308,21 +308,24 @@
             <div class="panel-head">
               <div>
                 <h2>Country data</h2>
-                <p class="muted">MaxMind GeoLite2-Country, used by country rules on resources.</p>
+                <p class="muted">An IP API that answers country lookups, used by country rules on resources.
+                The control node asks <code>/checkip?ip=ADDRESS</code> on the host below.</p>
               </div>
               <span class="chip" data-geoip-status>not configured</span>
             </div>
             <div class="fields">
-              <label class="field"><span>MaxMind account ID (optional)</span>
-                <input name="accountId" placeholder="123456" autocomplete="off"></label>
-              <label class="field"><span>MaxMind licence key</span>
-                <input type="password" name="licenseKey" placeholder="leave empty to keep the stored key" autocomplete="new-password"></label>
+              <label class="field"><span>API hostname</span>
+                <input name="host" placeholder="iplog.example.com" spellcheck="false" autocomplete="off"></label>
+              <label class="field"><span>API token</span>
+                <input type="password" name="token" placeholder="leave empty to keep the stored token" autocomplete="new-password"></label>
+              <p class="muted tiny">The token is sent as <code>Authorization: Bearer …</code>. No path is needed:
+              the lookup path is added for you.</p>
               <p class="muted tiny" data-geoip-detail></p>
               <div class="field-error" data-geoip-error hidden></div>
             </div>
             <div class="panel-foot">
-              <button class="btn btn-primary" type="submit">Save and fetch</button>
-              <button class="btn" type="button" data-action="geoip-clear">Remove credentials</button>
+              <button class="btn btn-primary" type="submit">Save and check</button>
+              <button class="btn" type="button" data-action="geoip-clear">Remove</button>
 </div>
 </form>
 </div>

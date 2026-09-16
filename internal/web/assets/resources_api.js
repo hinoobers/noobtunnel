@@ -108,6 +108,19 @@ function resourceStatus(resource) {
   return { dot: 'dot-off', label: 'stopped' };
 }
 
+// errorLink turns an error into something to click: it opens Logs, the Errors tab,
+// and highlights the entry that belongs to this resource or target, so the reason
+// is one click away instead of a hunt through the log.
+function errorLink(message, match) {
+  return h('button', {
+    class: 'chip chip-warn chip-link',
+    type: 'button',
+    title: message + ' — open Logs, Errors',
+    'data-action': 'show-error',
+    'data-match': match || message,
+  }, 'error');
+}
+
 function renderResources(node, subNode, resources) {
   if (!node) return;
   resources = resources || [];
@@ -138,10 +151,10 @@ function renderResources(node, subNode, resources) {
         h('div', { class: 'row' },
           h('span', { class: 'mono tiny', text: target.address }),
           target.enabled ? null : h('span', { class: 'chip chip-off' }, 'off'),
-          target.lastError ? h('span', { class: 'chip chip-warn', title: target.lastError }, 'error') : null,
-          // The control node can check the whole path itself: its own WireGuard
-          // device, the route and handshake to the agent, and a real connection.
-          canAdmin() ? h('button', {
+          target.lastError ? errorLink(target.lastError, target.address) : null,
+          // The diagnosis is only offered when something is wrong: with the whole
+          // path working there is nothing to check.
+          canAdmin() && target.lastError ? h('button', {
             class: 'link-btn tiny', title: 'Check this target from the control node',
             'data-action': 'diagnose-target', 'data-resource': resource.id, 'data-target': target.id,
           }, 'diagnose') : null),
@@ -152,6 +165,7 @@ function renderResources(node, subNode, resources) {
       h('td', null, h('div', { class: 'row' },
         h('span', { class: 'dot ' + status.dot, title: resource.lastError || status.label }),
         h('span', null, resource.name),
+        resource.lastError ? errorLink(resource.lastError, resource.name) : null,
         resource.proxyProtocol
           ? h('span', { class: 'chip chip-quiet', title: 'PROXY protocol ' + resource.proxyProtocol }, 'PROXY ' + resource.proxyProtocol)
           : null)),
@@ -163,12 +177,11 @@ function renderResources(node, subNode, resources) {
           h('span', { class: 'mono tiny', text: resource.public }),
           copyButton(resource.public, 'Copy')),
         h('div', { class: 'muted tiny', text: 'on ' + (resource.exitNodeName || 'Control node') })),
-      h('td', { title: resource.lastError || '' },
-        resource.lastError
-          ? h('span', { class: 'chip chip-warn', title: resource.lastError }, 'error')
-          : h('span', { class: 'chip ' + (resource.listening ? 'chip-direct' : 'chip-off') }, status.label),
+      // The dot next to the name already says whether this resource is healthy, so
+      // there is no separate status column: the counters live with the traffic.
+      h('td', null,
+        h('div', null, fmtBytes(resource.rxBytes) + ' / ' + fmtBytes(resource.txBytes)),
         h('div', { class: 'muted tiny', text: resource.active + ' active · ' + resource.total + ' total' })),
-      h('td', null, fmtBytes(resource.rxBytes) + ' / ' + fmtBytes(resource.txBytes)),
       h('td', null, canAdmin() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
         h('button', { class: 'btn btn-sm', 'data-action': 'resource-edit', 'data-id': resource.id }, 'Edit'),
         h('button', {
@@ -187,7 +200,7 @@ function renderResources(node, subNode, resources) {
   node.append(h('table', null,
     h('thead', null, h('tr', null,
       h('th', null, 'Resource'), h('th', null, 'Type'), h('th', null, 'Targets'),
-      h('th', null, 'Public address'), h('th', null, 'Status'), h('th', null, 'Traffic in/out'), h('th', null, 'Actions'))),
+      h('th', null, 'Public address'), h('th', null, 'Traffic in/out'), h('th', null, 'Actions'))),
     h('tbody', null, rows)));
 }
 

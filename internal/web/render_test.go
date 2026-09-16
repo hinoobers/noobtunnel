@@ -263,6 +263,65 @@ resourceEditorPage(null);
 resourceEditorPage(resource);
 openResourceEditor(null);
 
+// Resources: the dot next to the name says whether it is healthy, so there is no
+// separate status column, and the diagnosis is only offered when something is
+// wrong. An error is a way into Logs, Errors rather than a dead label.
+const resourcesNode = document.createElement('div');
+renderResources(resourcesNode, document.createElement('div'), [resource]);
+const resourceHeaders = textsOf(resourcesNode.childNodes[0].childNodes[0]).join(',');
+if (resourceHeaders.includes('Status')) {
+  throw new Error('the resources table still has a status column: ' + resourceHeaders);
+}
+if (resourceHeaders !== 'Resource,Type,Targets,Public address,Traffic in/out,Actions') {
+  throw new Error('the resources table headers changed unexpectedly: ' + resourceHeaders);
+}
+function actionIn(node, action) {
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return null;
+    if (typeof n.getAttribute === 'function' && n.getAttribute('data-action') === action) return n;
+    for (const kid of n.childNodes || []) {
+      const found = walk(kid);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(node);
+}
+if (actionIn(resourcesNode, 'diagnose-target')) {
+  throw new Error('diagnose should not be offered for a target that works');
+}
+const broken = JSON.parse(JSON.stringify(resource));
+broken.targets[0].lastError = 'dial tcp 10.77.0.2:8080: i/o timeout';
+broken.lastError = 'web is not listening';
+const brokenNode = document.createElement('div');
+renderResources(brokenNode, document.createElement('div'), [broken]);
+if (!actionIn(brokenNode, 'diagnose-target')) {
+  throw new Error('diagnose should be offered for a target that failed');
+}
+const errorChip = actionIn(brokenNode, 'show-error');
+if (!errorChip) {
+  throw new Error('an error should be a way into Logs, Errors');
+}
+if (errorChip.getAttribute('data-match') !== 'web') {
+  throw new Error('the error chip should name its resource: ' + errorChip.getAttribute('data-match'));
+}
+
+// Errors: the entry a resource points at is highlighted, and only that one.
+state.errorMatch = 'web';
+const matchedNode = document.createElement('div');
+renderErrors(matchedNode, document.createElement('div'), [
+  { time: new Date().toISOString(), source: 'target', message: 'web: target 10.77.0.2:8080 is not reachable' },
+  { time: new Date().toISOString(), source: 'dns', message: 'could not update app.example.com' },
+]);
+const matchedRows = matchedNode.childNodes[0].childNodes[1].childNodes;
+if ((matchedRows[0].getAttribute('class') || '').indexOf('row-highlight') === -1) {
+  throw new Error('the matching error should be highlighted: ' + matchedRows[0].getAttribute('class'));
+}
+if ((matchedRows[1].getAttribute('class') || '').indexOf('row-highlight') !== -1) {
+  throw new Error('only the matching error should be highlighted');
+}
+state.errorMatch = '';
+
 // Logs -> Errors: the list, with the fix, and the empty state.
 renderErrors(node, node, [
   { time: new Date().toISOString(), source: 'dns', message: 'could not update app.example.com',

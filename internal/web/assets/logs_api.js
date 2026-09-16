@@ -84,6 +84,17 @@ function renderRequests(node, recent) {
       h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
 }
 
+// showError is what an "error" chip in another view does: open Logs, select the
+// Errors tab, and mark the entry the operator came for.
+async function showError(match) {
+  state.errorMatch = match || '';
+  setView('logs');
+  const tab = shell && shell.root ? $('[data-view-panel=logs] [data-tab=errors]', shell.root) : null;
+  if (tab) tab.click();
+  renderShell();
+  await refresh();
+}
+
 // renderErrors lists everything that went wrong: DNS automation, certificate
 // issuance and resources that could not listen. This is the "why is it not
 // working" view, so each row carries the detail and the fix when there is one.
@@ -112,13 +123,34 @@ function renderErrors(node, subNode, entries) {
   node.append(h('table', null,
     h('thead', null, h('tr', null,
       h('th', null, 'Time'), h('th', null, 'Source'), h('th', null, 'Error'), h('th', null, 'What to check'))),
-    h('tbody', null, entries.map((entry) => h('tr', null,
+    h('tbody', null, entries.map((entry) => h('tr', {
+      // Something on another tab sends the operator here with a match: the entry
+      // it belongs to is highlighted and scrolled to, so "error" in a table is one
+      // click from the reason instead of a hunt through the log.
+      class: errorMatches(entry, state.errorMatch) ? 'row-highlight' : null,
+    },
       h('td', { title: absTime(entry.time) }, relTime(entry.time)),
       h('td', null, h('span', { class: 'chip chip-quiet' }, entry.source || 'control')),
       h('td', null,
         h('div', null, entry.message || ''),
         entry.detail ? h('div', { class: 'muted tiny mono', style: 'white-space:pre-wrap' }, entry.detail) : null),
       h('td', { class: 'muted tiny' }, entry.hint || '\u2014'))))));
+  if (state.errorMatch) highlightFirstMatch(node);
+}
+
+// errorMatches reports whether an entry is the one a resource sent the operator to
+// see. The match is the resource name or the target address, both of which appear
+// in the message or the detail.
+function errorMatches(entry, match) {
+  if (!match) return false;
+  const text = [entry.message, entry.detail].join(' ');
+  return text.indexOf(match) !== -1;
+}
+
+// highlightFirstMatch scrolls the highlighted row into view once it is in the page.
+function highlightFirstMatch(node) {
+  const row = node.querySelector('tr.row-highlight');
+  if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'center' });
 }
 
 // clearErrors empties the error list; the control node keeps recording new ones.

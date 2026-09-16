@@ -102,10 +102,12 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 	return manager
 }
 
-// useGeoIP gives the proxy manager a country lookup, so country rules work.
-func (s *Server) useGeoIP(db *geoip.Database) {
-	if db == nil {
+// useGeoIP gives the proxy manager a country lookup, so country rules work. The
+// answer comes from the IP API (see geoip.go) with the client's own cache in
+// front of it, because this runs while a request is being handled.
+func (s *Server) wireCountryLookup(api *geoip.API) {
+	if api == nil {
 		return
 	}
-	s.proxies.CountryOf = func(addr netip.Addr) string { return db.Lookup(addr) }
+	s.proxies.CountryOf = func(addr netip.Addr) string { return api.Country(addr) }
 }

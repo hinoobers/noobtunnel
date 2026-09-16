@@ -9,66 +9,84 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/control"
 )
 
-// TestGeoIPCredentialsAreStored catches the reported bug: the key was entered in
-// the UI but the download still complained that no licence key was set.
-func TestGeoIPCredentialsAreStored(t *testing.T) {
-	// Point the download at a local server so nothing touches the internet.
-	fake := newFakeMaxMind(t)
+// TestIPAPISettingsAreStoredAndUsed covers the settings panel end to end: the host
+// and token are saved, the lookup uses them straight away, and the country a rule
+// matches on comes from the API.
+func TestIPAPISettingsAreStoredAndUsed(t *testing.T) {
+	fake := newFakeIPAPI(t, "EE")
 	h := newHarnessOpts(t, true, "", func(opts *control.Options) {
-		opts.GeoIPLicenceKey = ""
-		opts.GeoIPDir = t.TempDir()
-		fake.attach(opts)
+		opts.IPAPIHost = ""
+		opts.IPAPIToken = ""
 	})
 	admin := h.login(t)
 
-	// The stored credentials start empty.
+	// Nothing configured yet: country rules are inert.
 	status, body, _ := h.api("GET", "/api/geoip", nil, admin)
 	if status != http.StatusOK {
 		t.Fatalf("GET /api/geoip returned %d", status)
 	}
-	if strings.Contains(string(body), "licenseKey\":\"") {
-		t.Fatalf("the API leaked the licence key: %s", body)
+	if strings.Contains(string(body), "token\":\"") {
+		t.Fatalf("the API leaked the token: %s", body)
 	}
 
-	// Saving with fetch must use the key that was just entered.
+	// Saving with a check looks one address up with the settings just entered.
 	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
-		"licenseKey": "test-licence-key", "accountId": "12345", "fetch": true,
+		"host": fake.server.URL, "token": fake.token, "check": true,
 	}, admin)
 	if status != http.StatusOK {
-		t.Fatalf("saving credentials returned %d: %s", status, body)
-	}
-	if strings.Contains(string(body), "licence key is required") {
-		t.Fatalf("the saved key was not used: %s", body)
+		t.Fatalf("saving the settings returned %d: %s", status, body)
 	}
 	var result struct {
 		GeoIP struct {
-			Configured bool `json:"configured"`
-			HasKey     bool `json:"hasKey"`
-			Ready      bool `json:"ready"`
-			Networks   int  `json:"networks"`
+			Configured bool   `json:"configured"`
+			HasToken   bool   `json:"hasToken"`
+			Ready      bool   `json:"ready"`
+			Lookups    int    `json:"lookups"`
+			Host       string `json:"host"`
 		} `json:"geoip"`
+		Check struct {
+			Country     string `json:"country"`
+			CountryFrom string `json:"countryFrom"`
+		} `json:"check"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		t.Fatal(err)
 	}
-	if !result.GeoIP.Configured || !result.GeoIP.HasKey {
-		t.Fatalf("the credentials were not stored: %+v", result.GeoIP)
-	}
 	if result.Error != "" {
-		t.Fatalf("the local download should have succeeded, got: %s", result.Error)
+		t.Fatalf("the check should have succeeded, got: %s", result.Error)
 	}
-	if !result.GeoIP.Ready || result.GeoIP.Networks == 0 {
-		t.Fatalf("the database was not loaded: %+v", result.GeoIP)
+	if !result.GeoIP.Configured || !result.GeoIP.HasToken {
+		t.Fatalf("the settings were not stored: %+v", result.GeoIP)
+	}
+	if !result.GeoIP.Ready || result.GeoIP.Lookups == 0 {
+		t.Fatalf("the API was not used: %+v", result.GeoIP)
+	}
+	if result.Check.Country != "EE" {
+		t.Fatalf("the check answered %+v", result.Check)
 	}
 
 	// A country lookup works straight away, which is what rules rely on.
-	checked := h.server.GeoIPLookupForTest("203.0.113.9")
-	if checked != "EE" {
-		t.Fatalf("country lookup = %q, want EE", checked)
+	if got := h.server.GeoIPLookupForTest("203.0.113.9"); got != "EE" {
+		t.Fatalf("country lookup = %q, want EE", got)
 	}
 
-	// Clearing removes them again.
+	// A token that the API rejects is reported rather than swallowed.
+	fake.token = "something-else"
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
+		"host": fake.server.URL, "token": "wrong", "check": true,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("a failed check should still answer, got %d", status)
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Error, "401") {
+		t.Fatalf("the API's own error should be reported: %q", result.Error)
+	}
+
+	// Clearing removes the settings again.
 	status, body, _ = h.api("POST", "/api/geoip", map[string]any{"clear": true}, admin)
 	if status != http.StatusOK {
 		t.Fatalf("clearing returned %d: %s", status, body)
@@ -77,10 +95,30 @@ func TestGeoIPCredentialsAreStored(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.GeoIP.Configured {
-		t.Fatalf("credentials should be gone: %+v", result.GeoIP)
+		t.Fatalf("the settings should be gone: %+v", result.GeoIP)
 	}
-	// The cache stays on disk, so a cleared key does not lose the data.
-	if !result.GeoIP.Ready {
-		t.Fatalf("the cached database should still be loaded: %+v", result.GeoIP)
+	if got := h.server.GeoIPLookupForTest("203.0.113.9"); got != "" {
+		t.Fatalf("no API means no country, got %q", got)
+	}
+}
+
+// TestTheIPAPIFlagsWorkWithoutThePanel keeps a control node started with
+// --ipapi-host working before anyone opens the settings tab.
+func TestTheIPAPIFlagsWorkWithoutThePanel(t *testing.T) {
+	fake := newFakeIPAPI(t, "SE")
+	h := newHarnessOpts(t, true, "", func(opts *control.Options) {
+		opts.IPAPIHost = fake.server.URL
+		opts.IPAPIToken = fake.token
+	})
+	admin := h.login(t)
+	status, body, _ := h.api("GET", "/api/geoip", nil, admin)
+	if status != http.StatusOK {
+		t.Fatalf("GET /api/geoip returned %d", status)
+	}
+	if !strings.Contains(string(body), `"configured":true`) {
+		t.Fatalf("the flags should configure the API: %s", body)
+	}
+	if got := h.server.GeoIPLookupForTest("203.0.113.9"); got != "SE" {
+		t.Fatalf("country lookup = %q, want SE", got)
 	}
 }

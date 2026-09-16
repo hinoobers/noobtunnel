@@ -79,9 +79,8 @@ func runServer(args []string) error {
 		printOnly   = fs.Bool("print-info", false, "print the control node summary and exit")
 		acmeEmail   = fs.String("acme-email", env("NOOBTUNNEL_ACME_EMAIL", ""), "email for Let's Encrypt certificates; empty uses self-signed certificates for HTTPS resources")
 		domain      = fs.String("domain", env("NOOBTUNNEL_DOMAIN", ""), "hostname this control node is published on, for example noobtunnel.example.com; serves the UI on https://<domain> with a managed certificate")
-		geoipKey    = fs.String("geoip-license-key", env("NOOBTUNNEL_GEOIP_LICENSE_KEY", ""), "MaxMind licence key; enables country access rules")
-		geoipUser   = fs.String("geoip-account-id", env("NOOBTUNNEL_GEOIP_ACCOUNT_ID", ""), "MaxMind account id used with the licence key")
-		geoipDir    = fs.String("geoip-dir", env("NOOBTUNNEL_GEOIP_DIR", ""), "directory holding GeoLite2-Country data (default <state-dir>/geoip)")
+		ipapiHost   = fs.String("ipapi-host", env("NOOBTUNNEL_IPAPI_HOST", ""), "hostname of the IP API used for country rules, for example iplog.example.com")
+		ipapiToken  = fs.String("ipapi-token", env("NOOBTUNNEL_IPAPI_TOKEN", ""), "token for that IP API, sent as a bearer token")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -100,19 +99,18 @@ func runServer(args []string) error {
 		return err
 	}
 	server, err := control.New(control.Options{
-		StateDir:        *stateDir,
-		Listen:          *listen,
-		PublicEndpoint:  *publicEP,
-		AdminPassword:   *adminPass,
-		Backend:         backend,
-		Logger:          logger,
-		SetupSystem:     *setupSystem,
-		BinaryDir:       *binaryDir,
-		ACMEEmail:       *acmeEmail,
-		Domain:          *domain,
-		GeoIPLicenceKey: *geoipKey,
-		GeoIPAccountID:  *geoipUser,
-		GeoIPDir:        *geoipDir,
+		StateDir:       *stateDir,
+		Listen:         *listen,
+		PublicEndpoint: *publicEP,
+		AdminPassword:  *adminPass,
+		Backend:        backend,
+		Logger:         logger,
+		SetupSystem:    *setupSystem,
+		BinaryDir:      *binaryDir,
+		ACMEEmail:      *acmeEmail,
+		Domain:         *domain,
+		IPAPIHost:      *ipapiHost,
+		IPAPIToken:     *ipapiToken,
 	})
 	if err != nil {
 		return err

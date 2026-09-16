@@ -291,6 +291,12 @@ p { margin: 0; }
 .chip-warn { color: #fde68a; border-color: rgba(251, 191, 36, .4); background: rgba(251, 191, 36, .1); }
 .chip-fail { color: #fecdd3; border-color: rgba(251, 113, 133, .4); background: rgba(251, 113, 133, .1); }
 .chip-off { color: #94a3b8; border-color: rgba(148, 163, 184, .28); background: rgba(148, 163, 184, .07); }
+/* An error chip is a way in, not a label: it opens Logs, Errors on that entry. */
+.chip-link { cursor: pointer; font: inherit; }
+.chip-link:hover { border-color: rgba(251, 191, 36, .8); }
+/* The row an "error" chip pointed at, in the Errors table. */
+tr.row-highlight td { background: rgba(251, 191, 36, .09); }
+tr.row-highlight td:first-child { box-shadow: inset 3px 0 0 rgba(251, 191, 36, .8); }
 
 /* ---------- buttons ---------- */
 
