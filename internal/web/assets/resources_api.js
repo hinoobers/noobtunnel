@@ -138,7 +138,13 @@ function renderResources(node, subNode, resources) {
         h('div', { class: 'row' },
           h('span', { class: 'mono tiny', text: target.address }),
           target.enabled ? null : h('span', { class: 'chip chip-off' }, 'off'),
-          target.lastError ? h('span', { class: 'chip chip-warn', title: target.lastError }, 'error') : null),
+          target.lastError ? h('span', { class: 'chip chip-warn', title: target.lastError }, 'error') : null,
+          // The control node can check the whole path itself: its own WireGuard
+          // device, the route and handshake to the agent, and a real connection.
+          canAdmin() ? h('button', {
+            class: 'link-btn tiny', title: 'Check this target from the control node',
+            'data-action': 'diagnose-target', 'data-resource': resource.id, 'data-target': target.id,
+          }, 'diagnose') : null),
         h('div', { class: 'muted tiny', text: (target.agentName || 'unknown agent') +
           (target.total ? ' · ' + target.total + ' served' : '') })))
       : [h('span', { class: 'muted tiny' }, 'no targets')];

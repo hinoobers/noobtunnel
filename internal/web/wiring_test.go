@@ -1,6 +1,7 @@
 package web
 
 import (
+	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
@@ -116,14 +117,19 @@ func stripLiterals(src string) string {
 // TestUIFunctionsResolve catches typos in function names across the two script
 // files, which a browser would only surface at runtime.
 func TestUIFunctionsResolve(t *testing.T) {
-	files := []string{
-		"assets/app.js", "assets/views.js", "assets/users_api.js",
-		"assets/resources_api.js", "assets/exitnodes_api.js",
-		"assets/dns_api.js",
-		"assets/branding_api.js",
-		"assets/geoip_api.js",
-		"assets/logs_api.js",
+	// Every script the UI ships, discovered from the embedded assets: a new file
+	// must not have to be remembered here.
+	entries, err := fs.ReadDir(Assets(), "assets")
+	if err != nil {
+		t.Fatal(err)
 	}
+	files := []string{}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".js") {
+			files = append(files, "assets/"+entry.Name())
+		}
+	}
+	sort.Strings(files)
 	defined := map[string]bool{}
 	contents := map[string]string{}
 	for _, name := range files {

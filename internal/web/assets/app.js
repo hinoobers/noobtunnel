@@ -508,6 +508,7 @@ async function handleGlobalAction(event) {
       break;
     case 'add-agent': openAddAgent(); break;
     case 'clear-errors': await clearErrors(); break;
+    case 'diagnose-target': await diagnoseTarget(actionEl.dataset.resource, actionEl.dataset.target); break;
     case 'add-user': openAddUser(); break;
     case 'user-password': openUserPassword(actionEl.dataset.username, actionEl.dataset.id); break;
     case 'user-role': openRoleModal(actionEl.dataset.id); break;

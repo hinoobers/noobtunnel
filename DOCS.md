@@ -402,6 +402,13 @@ The Errors entry for a target quotes whichever of these the control node can see
 so the "what to check" column names the side that is broken rather than the
 service behind it.
 
+For one target there is also **diagnose** in the Resources tab: the control node
+walks the path itself and reports each step — which backend it runs, whether its
+hub interface is up, whether it has a WireGuard handshake with the agent hosting
+that target, what route it has for the address, and whether a connection attempt
+succeeds — ending in one sentence that names the broken step. That replaces
+SSH'ing into the control node to guess.
+
 ## Logs and errors
 
 **Logs** has three views:

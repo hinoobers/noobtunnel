@@ -118,7 +118,7 @@ ctx.globalThis = ctx;
 ctx.isSecureContext = false;
 vm.createContext(ctx);
 
-const files = ['app.js', 'views.js', 'users_api.js', 'resources_api.js', 'exitnodes_api.js', 'dns_api.js', 'branding_api.js', 'geoip_api.js', 'logs_api.js'];
+const files = ['app.js', 'views.js', 'users_api.js', 'resources_api.js', 'exitnodes_api.js', 'dns_api.js', 'branding_api.js', 'geoip_api.js', 'logs_api.js', 'diagnose_ui.js'];
 for (const file of files) {
   vm.runInContext(fs.readFileSync(path.join(dir, file), 'utf8'), ctx, { filename: file });
 }
