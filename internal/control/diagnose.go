@@ -324,7 +324,9 @@ func firewallVerdict(before, after []string, agent, iface string) (status, detai
 		return "warn",
 			"no firewall rule on " + agent + " counted a single packet: it was refused before iptables, " +
 				"which is the routing decision or the reverse-path filter on the interface the packet arrived on",
-			"check `sysctl net.ipv4.conf." + iface + ".rp_filter` and that the route to the target is the local network behind that machine"
+			"on " + agent + " check `cat /proc/sys/net/ipv4/conf/" + iface + "/rp_filter /proc/sys/net/ipv4/conf/" + iface + "/src_valid_mark` " +
+				"(both must be 0 or loose for traffic from the mesh), that the route to the target is the network behind that machine, " +
+				"and that nothing is filtering ingress on " + iface + " (`tc filter show dev " + iface + " ingress`)"
 	}
 	sort.Slice(grew, func(i, j int) bool { return grew[i].count > grew[j].count })
 	var lines []string
