@@ -190,7 +190,27 @@ port_in_use() {
 		ss -Hltn "sport = :$1" 2>/dev/null | grep -q .
 	elif command -v netstat >/dev/null 2>&1; then
 		netstat -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$1\$"
+	elif command -v python3 >/dev/null 2>&1; then
+		# A minimal server may have neither ss nor netstat. /proc/net/tcp is always
+		# there, so the check stays reliable instead of silently passing.
+		python3 - "$1" <<'PY' >/dev/null 2>&1
+import sys
+port = int(sys.argv[1])
+for path in ("/proc/net/tcp", "/proc/net/tcp6"):
+    try:
+        rows = open(path).read().splitlines()[1:]
+    except OSError:
+        continue
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 4 or fields[3] != "0A":  # 0A = LISTEN
+            continue
+        if int(fields[1].split(":")[1], 16) == port:
+            sys.exit(0)
+sys.exit(1)
+PY
 	else
+		warn "neither ss, netstat nor python3 is available, so port $1 could not be checked"
 		return 1
 	fi
 }

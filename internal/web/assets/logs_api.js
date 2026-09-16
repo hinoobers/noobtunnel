@@ -88,7 +88,8 @@ function renderErrors(node, subNode, entries) {
     subNode.textContent = entries.length === 0
       ? 'Nothing has failed since the control node started'
       : entries.length + ' error' + (entries.length === 1 ? '' : 's') +
-        ', newest first \u00b7 ' + relTime(entries[0].time);
+        ', newest first \u00b7 ' + relTime(entries[0].time) +
+        ' \u00b7 history: an entry stays until you clear it, the dashboard shows what is true now';
   }
   if (!entries.length) {
     node.append(h('div', { class: 'empty' },

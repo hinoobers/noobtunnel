@@ -409,6 +409,10 @@ service behind it.
   check. The tab carries the count, so a failure is visible without opening it,
   and *Clear* empties the list (new ones keep being recorded).
 
+The Errors view is a **history**: an entry stays until you clear it, even after
+the problem is gone. The dashboard (and the checklist in Settings) is what
+describes the machine *now*, and it is recomputed every 30 seconds.
+
 Errors are recorded for the things an operator can act on:
 
 - **dns** - the automation could not write a record, with the provider's own

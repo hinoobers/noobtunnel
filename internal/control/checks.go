@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/proxy"
 )
@@ -27,6 +28,44 @@ const (
 	statusFail = "fail"
 	statusInfo = "info"
 )
+
+// checkLoop keeps the dashboard's checklist current. The checks are read from the
+// host (is the hub interface there, is port 443 free, are the firewall rules in
+// place), so a result computed once at startup describes the machine as it was
+// then: an interface that appeared later, or a port that was busy during a
+// restart, would keep showing the old answer until someone hit refresh.
+func (s *Server) checkLoop(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			next := s.RunChecks(ctx)
+			s.mu.Lock()
+			changed := !sameChecks(s.checks, next)
+			s.checks = next
+			s.mu.Unlock()
+			if changed {
+				s.broadcastState()
+			}
+		}
+	}
+}
+
+// sameChecks reports whether two checklist results say the same thing.
+func sameChecks(a, b []Check) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // RunChecks inspects the host and reports what still needs doing before agents
 // can reach each other.
@@ -201,20 +240,37 @@ func (s *Server) domainCheck() Check {
 	stat, ok := s.proxies.Stats()[proxy.ControlResourceID]
 	switch {
 	case !ok || !stat.Listening:
-		detail := "not listening on port 443 yet"
+		detail := "the control node could not bind port 443"
 		if ok && stat.LastError != "" {
 			detail = stat.LastError
 		}
 		return Check{
 			ID: "domain", Title: "Public hostname", Status: statusFail,
 			Detail: domain + ": " + detail,
-			Fix:    "free port 443 (for example systemctl disable --now nginx) and restart the control node",
+			Fix:    domainFix(detail),
 		}
 	default:
 		return Check{
 			ID: "domain", Title: "Public hostname", Status: statusOK,
 			Detail: "https://" + domain + " serves the UI and API; the certificate is managed automatically",
 		}
+	}
+}
+
+// domainFix turns the port 443 bind failure into the thing to do about it. The
+// three cases look identical in the UI otherwise, and only one of them is about
+// another service holding the port.
+func domainFix(detail string) string {
+	lower := strings.ToLower(detail)
+	switch {
+	case strings.Contains(lower, "permission denied"):
+		return "binding port 443 needs root: run the control node as root, or grant it CAP_NET_BIND_SERVICE"
+	case strings.Contains(lower, "address already in use") || strings.Contains(lower, "in use"):
+		return "something else holds port 443: stop it (for example systemctl disable --now nginx) and restart the control node"
+	case strings.Contains(lower, "cannot assign requested address"):
+		return "the address port 443 is bound to does not exist on this host; check the exit node or listen address"
+	default:
+		return "check journalctl -u noobtunnel-server for the reason port 443 could not be bound, then restart the control node"
 	}
 }
 

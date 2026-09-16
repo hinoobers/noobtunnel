@@ -347,12 +347,13 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startGeoIP(ctx)
 
 	s.reconcileResources()
-	s.wg.Add(5)
+	s.wg.Add(6)
 	go func() { defer s.wg.Done(); s.discoveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.peerPushLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.latencyLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.resourceLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.dnsLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.checkLoop(ctx) }()
 	// When the control node issues certificates it must answer the HTTP-01
 	// challenge on port 80, even if no HTTP resource is published there yet.
 	if s.proxies.ACMEChallenge != nil {
@@ -1302,11 +1303,11 @@ func (s *Server) recordResourceErrors() {
 			"restart the control node without --backend fake (or the demo flags) to run a real mesh")
 	case hubErr != "":
 		note("hub", "wireguard", "the control node cannot program its WireGuard hub", hubErr,
-			"check that wireguard-tools and the kernel module are installed and that the service runs as root")
+			"check that wg(8) and ip(8) are installed and that the service runs as root; if the module cannot be loaded (some OpenVZ and LXC VPSs), this host cannot run a real mesh")
 	case !hubUp && !s.opts.DisableWGHub:
 		note("hub", "wireguard", "the WireGuard hub interface is not up",
 			s.store.Settings().Interface+" does not exist on this host",
-			"look at the control node checklist on the dashboard, and at journalctl -u noobtunnel-server")
+			"load the module (modprobe wireguard) and look at journalctl -u noobtunnel-server; the dashboard checklist names what is missing")
 	}
 
 	s.mu.Lock()
