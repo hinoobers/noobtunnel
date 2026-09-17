@@ -171,6 +171,7 @@
     <section class="view" data-view-panel="activity" hidden>
       <nav class="tabs" data-tabs>
         <button class="tab is-active" data-tab="requests">Requests</button>
+        <button class="tab" data-tab="statistics">Statistics</button>
         <button class="tab" data-tab="activity">Activity</button>
         <button class="tab" data-tab="errors">Errors</button>
       </nav>
@@ -181,8 +182,16 @@
             <p class="muted" data-requests-sub></p>
           </div>
         </div>
-        <div class="charts" data-request-charts></div>
         <div class="table-wrap" data-request-table></div>
+      </div>
+      <div class="panel" data-tab-panel="statistics" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Statistics</h2>
+            <p class="muted">Where the traffic came from and which services it used, since this control node started.</p>
+          </div>
+        </div>
+        <div class="charts" data-request-charts></div>
       </div>
       <div class="panel" data-tab-panel="activity" hidden>
         <div class="panel-head">

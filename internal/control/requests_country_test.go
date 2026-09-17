@@ -7,6 +7,53 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/proxy"
 )
 
+// TestALateAnswerFillsInTheEarlierRequests covers the list disagreeing with
+// itself: the IP API answers a moment too late for one request, so that entry has
+// no country, and the next request from the same address does. Every earlier entry
+// with that address is filled in once the answer arrives.
+func TestALateAnswerFillsInTheEarlierRequests(t *testing.T) {
+	log := newRequestLog()
+	at := time.Now()
+	// Two requests while the API was still thinking.
+	log.record(proxy.RequestEvent{Time: at, IPText: "203.0.113.9", Allowed: true, Host: "a.example.com"})
+	log.record(proxy.RequestEvent{Time: at.Add(time.Second), IPText: "203.0.113.9", Allowed: true, Host: "a.example.com"})
+	// And one that finally has an answer.
+	log.record(proxy.RequestEvent{Time: at.Add(2 * time.Second), IPText: "203.0.113.9", Country: "EE", Allowed: true, Host: "a.example.com"})
+
+	summary, entries := log.snapshot()
+	for _, entry := range entries {
+		if entry.Country != "EE" {
+			t.Fatalf("every request from that address should read EE: %+v", entry)
+		}
+	}
+	if summary.Unknown != 0 {
+		t.Fatalf("nothing is unknown once the answer arrived: %+v", summary)
+	}
+	found := false
+	for _, stat := range summary.Countries {
+		if stat.Country == "EE" && stat.Total == 3 {
+			found = true
+		}
+		if stat.Country == "unknown" {
+			t.Fatalf("the unknown group should be gone: %+v", summary.Countries)
+		}
+	}
+	if !found {
+		t.Fatalf("all three requests belong to EE: %+v", summary.Countries)
+	}
+
+	// A different address is untouched, and an address that never gets an answer
+	// stays unknown.
+	log.record(proxy.RequestEvent{Time: at, IPText: "198.51.100.4", Allowed: true})
+	summary, entries = log.snapshot()
+	if summary.Unknown != 1 {
+		t.Fatalf("the address with no answer is still unknown: %+v", summary)
+	}
+	if entries[0].Country != "" || entries[1].Country != "EE" {
+		t.Fatalf("only the unanswered address is untouched: %+v", entries)
+	}
+}
+
 // TestLocalRequestsAreNotCountedAsUnknown covers the table being full of
 // "unknown": a request from this machine or from a private address has no country
 // to look up, and calling that unknown hides the addresses the IP API really did

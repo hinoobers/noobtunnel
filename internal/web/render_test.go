@@ -282,6 +282,11 @@ if (pageRows.length !== 30) {
 if (textsOf(pagedNode).join(' | ').indexOf('Page 1 of 2') === -1) {
   throw new Error('the requests table needs a pager: ' + textsOf(pagedNode).join(' | '));
 }
+// The list is only the list: the charts moved to their own tab, and the note about
+// missing countries is gone.
+if (textsOf(pagedNode).join(' ').indexOf('have no country') !== -1) {
+  throw new Error('the country note should not be under the requests table');
+}
 requestPage = 2;
 const secondPage = document.createElement('div');
 renderRequests(secondPage, manyRequests);

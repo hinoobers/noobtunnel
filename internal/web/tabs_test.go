@@ -69,7 +69,7 @@ func TestLogsTabsSitAtPageLevel(t *testing.T) {
 	if nav.Parent == nil || nav.Parent.Tag != "section" || !nodeMatches(nav.Parent, ".view") {
 		t.Fatalf("the Logs tab row should hang off the view section like Settings, found parent <%s>", nav.Parent.Tag)
 	}
-	for _, panel := range []string{"requests", "activity", "errors"} {
+	for _, panel := range []string{"requests", "statistics", "activity", "errors"} {
 		if !queryMatches(root, `[data-tab="`+panel+`"]`) {
 			t.Errorf("no Logs tab for %q", panel)
 		}
@@ -77,6 +77,38 @@ func TestLogsTabsSitAtPageLevel(t *testing.T) {
 			t.Errorf("no panel for the %q Logs tab", panel)
 		}
 	}
+	// The request list and the charts are separate tabs now: the list is what the
+	// Requests tab is for, and the charts have their own.
+	section := viewSection(t, index, "activity")
+	requestsPanel := panelMarkup(t, section, "requests")
+	if !strings.Contains(requestsPanel, "data-request-table") {
+		t.Error("the Requests panel should hold the request list")
+	}
+	if strings.Contains(requestsPanel, "data-request-charts") {
+		t.Error("the Requests panel should not hold the charts")
+	}
+	statisticsPanel := panelMarkup(t, section, "statistics")
+	if !strings.Contains(statisticsPanel, "data-request-charts") {
+		t.Error("the Statistics panel should hold the charts")
+	}
+	if strings.Contains(statisticsPanel, "data-request-table") {
+		t.Error("the Statistics panel should not hold the request list")
+	}
+}
+
+// panelMarkup returns the markup of one panel inside a view section.
+func panelMarkup(t *testing.T, section, name string) string {
+	t.Helper()
+	marker := `data-tab-panel="` + name + `"`
+	start := strings.Index(section, marker)
+	if start < 0 {
+		t.Fatalf("no %q panel", name)
+	}
+	rest := section[start+len(marker):]
+	if next := strings.Index(rest, `data-tab-panel="`); next >= 0 {
+		return rest[:next]
+	}
+	return rest
 }
 
 // viewSection returns the markup of the <section> panel for a view.

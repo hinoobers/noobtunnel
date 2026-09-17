@@ -93,7 +93,6 @@ function renderRequests(node, recent) {
       h('td', { class: 'muted tiny', title: entry.target ? 'sent to ' + entry.target : '' }, entry.resource || '—'),
       h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
   if (pages > 1) node.append(requestPager(recent.length, pages, start, page.length));
-  node.append(requestCountryNote(recent));
 }
 
 // setRequestPage walks the request list without asking the control node for
@@ -150,23 +149,6 @@ function requestPager(total, pages, start, shown) {
       class: 'btn btn-sm', type: 'button', 'data-action': 'requests-page',
       'data-page': String(requestPage + 1), disabled: requestPage >= pages,
     }, 'Next'));
-}
-
-// requestCountryNote explains the countries that are missing, once, instead of
-// leaving a table full of "unknown".
-function requestCountryNote(recent) {
-  const missing = recent.filter((entry) => !entry.country).length;
-  if (!missing) return h('span', { hidden: true });
-  const geo = (state.data && state.data.server && state.data.server.geoip) || {};
-  let text = missing + ' of these requests have no country';
-  if (!geo.configured) {
-    text += ': no IP API is configured yet (Settings -> IP API).';
-  } else if (geo.lastError) {
-    text += ': the IP API is not answering (' + geo.lastError + ').';
-  } else {
-    text += ': the IP API had no answer for those addresses. Requests from this machine and from private addresses never have one.';
-  }
-  return h('p', { class: 'muted tiny' }, text);
 }
 
 // showError is what an "error" chip in another view does: open Logs, select the

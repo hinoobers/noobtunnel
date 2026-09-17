@@ -291,8 +291,9 @@ p { margin: 0; }
 .chip-warn { color: #fde68a; border-color: rgba(251, 191, 36, .4); background: rgba(251, 191, 36, .1); }
 .chip-fail { color: #fecdd3; border-color: rgba(251, 113, 133, .4); background: rgba(251, 113, 133, .1); }
 .chip-off { color: #94a3b8; border-color: rgba(148, 163, 184, .28); background: rgba(148, 163, 184, .07); }
-/* Walking a long list one page at a time. */
-.pager { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+/* Walking a long list one page at a time: the control sits at the bottom right,
+   where a reader arrives after the last row. */
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 12px; }
 .pager .btn[disabled] { opacity: .45; cursor: default; }
 /* An error chip is a way in, not a label: it opens Logs, Errors on that entry. */
 .chip-link { cursor: pointer; font: inherit; }

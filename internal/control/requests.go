@@ -106,6 +106,22 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 	if entry.Country == "" && isPrivateClient(entry.IP) {
 		entry.Country = "local"
 	}
+	// The API answers when it answers: a lookup that was too slow for one request
+	// still resolves the address, and every earlier request from it should show the
+	// country once it is known. Otherwise the same address reads as a country at
+	// the top of the list and as unknown further down.
+	if entry.Country != "" && entry.Country != "local" {
+		for index := range l.entries {
+			older := &l.entries[index]
+			if older.IP != entry.IP || older.Country != "" {
+				continue
+			}
+			older.Country = entry.Country
+			// The counters move with it, so the charts and the list keep telling
+			// the same story.
+			l.moveFromUnknownLocked(entry.Country, older.Allowed)
+		}
+	}
 	l.entries = append([]RequestEntry{entry}, l.entries...)
 	if len(l.entries) > requestLogSize {
 		l.entries = l.entries[:requestLogSize]
@@ -131,6 +147,24 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		host = "(no host)"
 	}
 	bump(l.byHost, host, entry.Allowed)
+}
+
+// moveFromUnknownLocked moves one request from the unknown count to a country,
+// which is what happens to an entry whose address the API has now answered for.
+func (l *requestLog) moveFromUnknownLocked(country string, allowed bool) {
+	if l.summary.Unknown > 0 {
+		l.summary.Unknown--
+	}
+	if stat, ok := l.byCountry["unknown"]; ok {
+		stat.Total--
+		if !allowed {
+			stat.Blocked--
+		}
+		if stat.Total <= 0 {
+			delete(l.byCountry, "unknown")
+		}
+	}
+	bump(l.byCountry, country, allowed)
 }
 
 // isPrivateClient reports whether an address belongs to a network that has no
