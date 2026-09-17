@@ -131,6 +131,10 @@ type Resource struct {
 	ProxyProtocol string `json:"proxyProtocol,omitempty"`
 	// Identity requires a control node account before a request is forwarded.
 	Identity bool `json:"identity,omitempty"`
+	// IdentityMode selects the browser experience: "basic" uses HTTP Basic and
+	// "login" shows a branded sign-in form backed by control-node accounts.
+	// Empty on an identity-controlled legacy resource means "basic".
+	IdentityMode string `json:"identityMode,omitempty"`
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool `json:"blockExploits,omitempty"`
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
@@ -156,6 +160,23 @@ func (r Resource) AllowsWebSockets() bool {
 		return true
 	}
 	return *r.WebSockets
+}
+
+const (
+	IdentityModeBasic = "basic"
+	IdentityModeLogin = "login"
+)
+
+// EffectiveIdentityMode keeps resources created before modes existed on HTTP
+// Basic while returning an empty mode when identity control is disabled.
+func (r Resource) EffectiveIdentityMode() string {
+	if !r.Identity {
+		return ""
+	}
+	if r.IdentityMode == IdentityModeLogin {
+		return IdentityModeLogin
+	}
+	return IdentityModeBasic
 }
 
 // EffectiveListenPort is the port the resource actually listens on.
@@ -248,6 +269,7 @@ type ResourceInput struct {
 	Enabled       *bool
 	ProxyProtocol string
 	Identity      bool
+	IdentityMode  string
 	BlockExploits bool
 	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
 	// is to allow upgrades.
@@ -446,6 +468,14 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",
 			ErrBadResource, in.Protocol)
 	}
+	identityMode := strings.ToLower(strings.TrimSpace(in.IdentityMode))
+	if !in.Identity {
+		identityMode = ""
+	} else if identityMode == "" {
+		identityMode = IdentityModeBasic
+	} else if identityMode != IdentityModeBasic && identityMode != IdentityModeLogin {
+		return Resource{}, fmt.Errorf("%w: identity mode must be basic or login", ErrBadResource)
+	}
 	if in.BlockExploits && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: common exploit blocking needs http or https", ErrBadResource)
 	}
@@ -475,6 +505,7 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		Domain:        domain,
 		Enabled:       true,
 		Identity:      in.Identity,
+		IdentityMode:  identityMode,
 		BlockExploits: in.BlockExploits,
 		WebSockets:    websockets,
 		Rules:         rules,

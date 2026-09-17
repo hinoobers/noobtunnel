@@ -47,7 +47,8 @@ type ResourceView struct {
 	// Rules are the access rules, in evaluation order.
 	Rules []access.Rule `json:"rules,omitempty"`
 	// Identity means a control node account is required to reach the resource.
-	Identity bool `json:"identity"`
+	Identity     bool   `json:"identity"`
+	IdentityMode string `json:"identityMode,omitempty"`
 	// BlockExploits enables the resource's built-in common exploit filter.
 	BlockExploits bool `json:"blockExploits"`
 	// WebSockets says whether protocol upgrades pass through.
@@ -146,6 +147,7 @@ func (s *Server) resourceViews() []ResourceView {
 			ProxyProtocol: r.ProxyProtocol,
 			Rules:         r.Rules,
 			Identity:      r.Identity,
+			IdentityMode:  r.EffectiveIdentityMode(),
 			BlockExploits: r.BlockExploits,
 			WebSockets:    r.AllowsWebSockets(),
 			CreatedAt:     r.CreatedAt.UTC().Format(timeLayout),
@@ -289,7 +291,7 @@ func (s *Server) domainViews() []DomainView {
 			view.Hint = "create an A record for " + d.Hostname
 		}
 		for _, r := range resources {
-			if r.Domain == d.Hostname {
+			if d.Covers(r.Domain) {
 				view.Resources = append(view.Resources, r.Name)
 			}
 		}
@@ -442,6 +444,7 @@ type resourcePayload struct {
 	ProxyProtocol string          `json:"proxyProtocol"`
 	Rules         []access.Rule   `json:"rules"`
 	Identity      bool            `json:"identity"`
+	IdentityMode  string          `json:"identityMode"`
 	BlockExploits bool            `json:"blockExploits"`
 	// WebSockets is a pointer: omitting it keeps the default, which allows
 	// protocol upgrades.
@@ -478,6 +481,7 @@ func (p resourcePayload) input() store.ResourceInput {
 		ProxyProtocol: p.ProxyProtocol,
 		Rules:         p.Rules,
 		Identity:      p.Identity,
+		IdentityMode:  p.IdentityMode,
 		BlockExploits: p.BlockExploits,
 		WebSockets:    p.WebSockets,
 	}

@@ -263,6 +263,53 @@ func (s *Server) validSession(value string) (string, bool) {
 	return fields[0], true
 }
 
+// resourceIdentitySession recognises the same signed account session on a
+// published resource hostname. Cookies are host-only, so signing in to a
+// resource never exposes its cookie to an unrelated resource or backend.
+func (s *Server) resourceIdentitySession(r *http.Request) (string, bool) {
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return "", false
+	}
+	userID, ok := s.validSession(cookie.Value)
+	if !ok {
+		return "", false
+	}
+	user, err := s.auth.UserByID(userID)
+	if err != nil || user.Disabled {
+		return "", false
+	}
+	return user.Username, true
+}
+
+// resourceIdentityLogin authenticates the branded resource login form and
+// issues the same signed session format as the control node on the resource's
+// own hostname.
+func (s *Server) resourceIdentityLogin(w http.ResponseWriter, r *http.Request, username, password string) (string, error) {
+	ip := clientIP(r)
+	if !limiter.allow(ip, s.now()) {
+		return "", errors.New("too many attempts, wait a few minutes")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "admin"
+	}
+	user, err := s.auth.Authenticate(username, password)
+	if err != nil {
+		limiter.fail(ip, s.now())
+		s.log.Warn("failed resource login", "remote", ip, "username", username, "host", r.Host)
+		return "", errors.New("incorrect username or password")
+	}
+	expiry := s.now().Add(12 * time.Hour)
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: s.signSession(user.ID, expiry), Path: "/", Expires: expiry,
+		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
+	})
+	s.auth.MarkLogin(user.ID)
+	s.recordEvent("login", user.Username+" signed in to "+r.Host+" from "+ip)
+	return user.Username, nil
+}
+
 // loginLimiter throttles password guessing.
 type loginLimiter struct {
 	mu       sync.Mutex

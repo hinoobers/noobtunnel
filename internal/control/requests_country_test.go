@@ -54,6 +54,36 @@ func TestALateAnswerFillsInTheEarlierRequests(t *testing.T) {
 	}
 }
 
+func TestKnownAddressNeverFallsBackToUnknown(t *testing.T) {
+	log := newRequestLog()
+	log.record(proxy.RequestEvent{Time: time.Now(), IPText: "203.0.113.9", Country: "EE", Allowed: true})
+	log.record(proxy.RequestEvent{Time: time.Now(), IPText: "203.0.113.9", Allowed: false})
+	_, entries := log.snapshot()
+	if len(entries) != 2 || entries[0].Country != "EE" || entries[1].Country != "EE" {
+		t.Fatalf("a known address must stay consistent: %+v", entries)
+	}
+}
+
+func TestRequestLogSurvivesRestart(t *testing.T) {
+	path := t.TempDir() + "/requests.json"
+	first := newRequestLog(path)
+	first.record(proxy.RequestEvent{
+		Time: time.Now(), IPText: "203.0.113.9", Country: "EE", Host: "app.example.com",
+		Resource: "app", Allowed: true, Status: 200, DurationMs: 12,
+	})
+	first.close()
+
+	second := newRequestLog(path)
+	t.Cleanup(second.close)
+	summary, entries := second.snapshot()
+	if len(entries) != 1 || entries[0].Resource != "app" || entries[0].Country != "EE" {
+		t.Fatalf("persisted requests were not restored: %+v", entries)
+	}
+	if summary.Total != 1 || summary.Allowed != 1 || summary.AvgMs != 12 {
+		t.Fatalf("persisted summary was not restored: %+v", summary)
+	}
+}
+
 // TestLocalRequestsAreNotCountedAsUnknown covers the table being full of
 // "unknown": a request from this machine or from a private address has no country
 // to look up, and calling that unknown hides the addresses the IP API really did

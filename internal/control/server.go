@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -243,10 +244,10 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	// The request log is written by the proxy manager and read by the API.
-	requestEvents := newRequestLog()
+	requestEvents := newRequestLog(filepath.Join(opts.StateDir, "requests.json"))
 	// Everything that goes wrong and explains itself goes here, for Logs → Errors.
 	errorEvents := newErrorLog()
-	return &Server{
+	server := &Server{
 		opts:          opts,
 		log:           opts.Logger,
 		store:         st,
@@ -265,7 +266,13 @@ func New(opts Options) (*Server, error) {
 		pendingCounts: map[uint64]chan proto.CounterResult{},
 		peerStats:     map[uint32]map[uint32]proto.PeerStat{},
 		startedAt:     time.Now(),
-	}, nil
+	}
+	server.proxies.IdentitySession = server.resourceIdentitySession
+	server.proxies.IdentityLogin = server.resourceIdentityLogin
+	if err := requestEvents.persistenceError(); err != nil {
+		opts.Logger.Warn("could not restore request log", "error", err)
+	}
+	return server, nil
 }
 
 // Store exposes the persistent state (used by the CLI and tests).
@@ -426,6 +433,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.cancel()
 	}
 	s.proxies.Close()
+	s.requests.close()
+	if err := s.requests.persistenceError(); err != nil {
+		s.log.Warn("could not save request log", "error", err)
+	}
 	s.mu.Lock()
 	sessions := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
@@ -1659,6 +1670,7 @@ func (s *Server) ResourceSpecs() []proxy.Spec {
 			Enabled:       r.Enabled && len(targets) > 0 && exitEnabled,
 			ProxyProtocol: r.ProxyProtocol,
 			Identity:      r.Identity,
+			IdentityMode:  r.EffectiveIdentityMode(),
 			BlockExploits: r.BlockExploits,
 			WebSockets:    r.AllowsWebSockets(),
 			Rules:         r.Rules,

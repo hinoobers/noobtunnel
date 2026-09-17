@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net"
 	"net/http"
@@ -192,18 +193,24 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if res.spec.Identity && !h.authorised(res, r) {
-		h.group.manager.observe(RequestEvent{
-			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-			Protocol: string(res.spec.Protocol), Allowed: false, Reason: "identity required",
-			Status: http.StatusUnauthorized, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(),
-		})
-		w.Header().Set("WWW-Authenticate", `Basic realm="`+h.group.manager.brand()+`", charset="UTF-8"`)
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(h.group.manager.brand() + ": this resource requires a control node account\n"))
-		return
+	if res.spec.Identity {
+		account, handled := h.requireIdentity(w, r, res)
+		if handled {
+			if account == "" {
+				h.group.manager.observe(RequestEvent{
+					ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+					Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol), Allowed: false,
+					Reason: "identity required", Status: http.StatusUnauthorized, Path: r.URL.Path,
+					DurationMs: time.Since(started).Milliseconds(),
+				})
+			}
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), accountKey{}, account))
+		// Control-node credentials and signed sessions are proxy credentials, not
+		// backend credentials. Never leak either one to the published service.
+		r.Header.Del("Authorization")
+		removeRequestCookie(r, "noobtunnel_session")
 	}
 	// Access rules run after authentication, so a rule can look at the account.
 	if len(res.spec.Rules) > 0 {
@@ -477,11 +484,119 @@ func (h *httpResource) countryForLog(raw string) string {
 
 // accountOf reports the signed in account, when identity control ran first.
 func accountOf(r *http.Request) string {
+	if account, ok := r.Context().Value(accountKey{}).(string); ok {
+		return account
+	}
 	user, _, ok := r.BasicAuth()
 	if !ok {
 		return ""
 	}
 	return user
+}
+
+type accountKey struct{}
+
+const identityLoginPath = "/.noobtunnel/identity"
+
+// requireIdentity returns handled=true when it has answered the request with a
+// login challenge/form. A false handled result carries the authenticated account
+// that access rules and request logs should see.
+func (h *httpResource) requireIdentity(w http.ResponseWriter, r *http.Request, res *resource) (string, bool) {
+	if res.spec.IdentityMode != "login" {
+		username, _, ok := r.BasicAuth()
+		if ok && h.authorised(res, r) {
+			return username, false
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="`+h.group.manager.brand()+`", charset="UTF-8"`)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(h.group.manager.brand() + ": this resource requires a control node account\n"))
+		return "", true
+	}
+
+	if r.URL.Path == identityLoginPath && r.Method == http.MethodPost {
+		return h.handleIdentityLogin(w, r)
+	}
+	if check := h.group.manager.IdentitySession; check != nil {
+		if account, ok := check(r); ok {
+			return account, false
+		}
+	}
+	next := r.URL.RequestURI()
+	if r.URL.Path == identityLoginPath || !safeIdentityNext(next) {
+		next = "/"
+	}
+	h.writeIdentityLogin(w, next, "")
+	return "", true
+}
+
+func (h *httpResource) handleIdentityLogin(w http.ResponseWriter, r *http.Request) (string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	if err := r.ParseForm(); err != nil {
+		h.writeIdentityLogin(w, "/", "Could not read that sign-in request.")
+		return "", true
+	}
+	next := r.Form.Get("next")
+	if !safeIdentityNext(next) {
+		next = "/"
+	}
+	login := h.group.manager.IdentityLogin
+	if login == nil {
+		h.writeIdentityLogin(w, next, "Identity login is unavailable.")
+		return "", true
+	}
+	account, err := login(w, r, r.Form.Get("username"), r.Form.Get("password"))
+	if err != nil {
+		h.writeIdentityLogin(w, next, err.Error())
+		return "", true
+	}
+	http.Redirect(w, r, next, http.StatusSeeOther)
+	return account, true
+}
+
+func safeIdentityNext(next string) bool {
+	return strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") && !strings.ContainsAny(next, "\r\n")
+}
+
+func (h *httpResource) writeIdentityLogin(w http.ResponseWriter, next, message string) {
+	brand := html.EscapeString(h.group.manager.brand())
+	errorLine := ""
+	if message != "" {
+		errorLine = `<p class="error">` + html.EscapeString(message) + `</p>`
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`+
+		`<title>Sign in · `+brand+`</title><style>`+
+		`:root{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif;background:#070b14;color:#eef2ff}`+
+		`*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at top,#17203b 0,#070b14 48%)}`+
+		`form{width:min(420px,calc(100% - 32px));padding:30px;border:1px solid #293451;border-radius:16px;background:#101725;box-shadow:0 24px 70px #0008}`+
+		`h1{font-size:1.45rem;margin:0 0 8px}.sub{color:#9ba8c7;margin:0 0 24px}.field{display:grid;gap:7px;margin:14px 0;font-size:.88rem;color:#c8d1e8}`+
+		`input{width:100%;padding:12px 13px;border-radius:10px;border:1px solid #34415f;background:#080e1a;color:#fff;font:inherit}`+
+		`button{width:100%;margin-top:10px;padding:12px;border:0;border-radius:10px;background:#6574f7;color:#fff;font-weight:700;cursor:pointer}`+
+		`.error{padding:10px 12px;border-radius:9px;background:#ef444422;color:#fca5a5;font-size:.88rem}</style></head><body>`+
+		`<form method="post" action="`+identityLoginPath+`"><h1>`+brand+`</h1><p class="sub">Sign in to continue to this resource.</p>`+errorLine+
+		`<input type="hidden" name="next" value="`+html.EscapeString(next)+`">`+
+		`<label class="field">Username<input name="username" autocomplete="username" autofocus required></label>`+
+		`<label class="field">Password<input type="password" name="password" autocomplete="current-password" required></label>`+
+		`<button type="submit">Sign in</button></form></body></html>`)
+}
+
+// removeRequestCookie strips a proxy-owned cookie before the request is sent to
+// the backend while leaving application cookies untouched.
+func removeRequestCookie(r *http.Request, name string) {
+	var kept []string
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != name {
+			kept = append(kept, cookie.String())
+		}
+	}
+	if len(kept) == 0 {
+		r.Header.Del("Cookie")
+		return
+	}
+	r.Header.Set("Cookie", strings.Join(kept, "; "))
 }
 
 // acmeChallengePath is where ACME HTTP-01 validation happens.

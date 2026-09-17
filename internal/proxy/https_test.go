@@ -7,6 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -111,5 +114,75 @@ func TestIdentityControlledResourceRequiresAnAccount(t *testing.T) {
 	// The cached success still requires the same credentials.
 	if status, _ := request("sam", "secret-password-2"); status != http.StatusUnauthorized {
 		t.Fatalf("a different password must not reuse the cache, got %d", status)
+	}
+}
+
+func TestIdentityLoginFormRedirectsAndHidesTheSessionFromBackend(t *testing.T) {
+	var backendCookie, backendAuth string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backendCookie = r.Header.Get("Cookie")
+		backendAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, "private-service")
+	}))
+	t.Cleanup(backend.Close)
+	host, port := hostPort(strings.TrimPrefix(backend.URL, "http://"))
+	listenPort := freePort(t)
+
+	m := New(quiet())
+	defer m.Close()
+	m.IdentitySession = func(r *http.Request) (string, bool) {
+		cookie, err := r.Cookie("noobtunnel_session")
+		return "sam", err == nil && cookie.Value == "signed"
+	}
+	m.IdentityLogin = func(w http.ResponseWriter, _ *http.Request, username, password string) (string, error) {
+		if username != "sam" || password != "secret-password" {
+			return "", fmt.Errorf("incorrect username or password")
+		}
+		http.SetCookie(w, &http.Cookie{Name: "noobtunnel_session", Value: "signed", Path: "/", HttpOnly: true})
+		return username, nil
+	}
+	spec := testSpec(1, ProtoHTTP, host, port, listenPort)
+	spec.Domain = "private.example.com"
+	spec.Identity = true
+	spec.IdentityMode = "login"
+	m.Reconcile([]Spec{spec})
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: 5 * time.Second, Jar: jar, CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+		req.Host = "private.example.com"
+		return nil
+	}}
+	base := fmt.Sprintf("http://127.0.0.1:%d", listenPort)
+	request := func(method, path string, body io.Reader) *http.Response {
+		req, err := http.NewRequest(method, base+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "private.example.com"
+		if method == http.MethodPost {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	response := request(http.MethodGet, "/dashboard", nil)
+	page, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(page), "Sign in to continue") {
+		t.Fatalf("anonymous request did not get the login form: %d %s", response.StatusCode, page)
+	}
+	form := url.Values{"username": {"sam"}, "password": {"secret-password"}, "next": {"/dashboard"}}
+	response = request(http.MethodPost, identityLoginPath, strings.NewReader(form.Encode()))
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "private-service" {
+		t.Fatalf("login did not continue to the resource: %d %s", response.StatusCode, body)
+	}
+	if backendCookie != "" || backendAuth != "" {
+		t.Fatalf("proxy credentials leaked to backend: cookie=%q authorization=%q", backendCookie, backendAuth)
 	}
 }

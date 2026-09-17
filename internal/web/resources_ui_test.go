@@ -159,6 +159,11 @@ func TestHTTPSHasNoPortChoice(t *testing.T) {
 	if !strings.Contains(page, "'identity'") {
 		t.Error("the identity control toggle is missing")
 	}
+	for _, want := range []string{"'identityMode'", "'HTTP Basic'", "'Noobtunnel login'"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the identity experience picker is missing %s", want)
+		}
+	}
 	if !strings.Contains(page, "'blockExploits'") || !strings.Contains(page, "'Block common exploits'") {
 		t.Error("the common exploit filter toggle is missing")
 	}

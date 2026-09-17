@@ -407,6 +407,37 @@ func TestResourceUpdateAndRemove(t *testing.T) {
 	}
 }
 
+func TestIdentityModesDefaultAndValidate(t *testing.T) {
+	st, agent := resourceFixture(t)
+	basic, err := st.AddResource(ResourceInput{
+		Name: "basic", Protocol: ProtocolHTTP, Identity: true,
+		Targets: oneTarget(agent.ID, agent.Address, 8080),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if basic.EffectiveIdentityMode() != IdentityModeBasic {
+		t.Fatalf("legacy identity default = %q", basic.EffectiveIdentityMode())
+	}
+	login, err := st.AddResource(ResourceInput{
+		Name: "login", Protocol: ProtocolHTTP, ListenPort: 8081, Identity: true, IdentityMode: IdentityModeLogin,
+		Targets: oneTarget(agent.ID, agent.Address, 8081),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login.EffectiveIdentityMode() != IdentityModeLogin {
+		t.Fatalf("login identity mode = %q", login.EffectiveIdentityMode())
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "bad-mode", Protocol: ProtocolHTTP, ListenPort: 8082, Identity: true, IdentityMode: "magic",
+		Targets: oneTarget(agent.ID, agent.Address, 8082),
+	})
+	if err == nil || !strings.Contains(err.Error(), "identity mode") {
+		t.Fatalf("invalid identity mode should be refused, got %v", err)
+	}
+}
+
 func TestDomains(t *testing.T) {
 	st, agent := resourceFixture(t)
 	if _, err := st.AddDomain("App.Example.com"); err != nil {

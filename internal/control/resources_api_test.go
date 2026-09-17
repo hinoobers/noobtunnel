@@ -71,6 +71,45 @@ func resourceBody(name, protocol string, agentID uint32, host string, port, list
 	return body
 }
 
+func TestWildcardDomainListsResourcesItCovers(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	agent := h.enrolledAgent(t, "homelab")
+	if status, body, _ := h.api("POST", "/api/domains", map[string]any{"hostname": "*.demo.example.com"}, admin); status != http.StatusOK {
+		t.Fatalf("add wildcard returned %d: %s", status, body)
+	}
+	for index, hostname := range []string{"shop.demo.example.com", "status.demo.example.com"} {
+		status, body, _ := h.api("POST", "/api/resources", resourceBody(
+			"resource-"+strconv.Itoa(index+1), "http", agent.id, h.agentAddress(t, agent.id), 8080+index, 80,
+			map[string]any{"domain": hostname}), admin)
+		if status != http.StatusOK {
+			t.Fatalf("publish %s returned %d: %s", hostname, status, body)
+		}
+	}
+	status, body, _ := h.api("GET", "/api/domains", nil, admin)
+	if status != http.StatusOK {
+		t.Fatalf("list domains returned %d: %s", status, body)
+	}
+	var result struct {
+		Domains []struct {
+			Pattern   string   `json:"pattern"`
+			Resources []string `json:"resources"`
+		} `json:"domains"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range result.Domains {
+		if domain.Pattern == "*.demo.example.com" {
+			if len(domain.Resources) != 2 {
+				t.Fatalf("wildcard domain should list both resources: %+v", domain.Resources)
+			}
+			return
+		}
+	}
+	t.Fatalf("wildcard domain missing from response: %s", body)
+}
+
 // localIPv4 is this machine's own address, which a test can use as a target that
 // is not loopback: publishing through an agent reaches it the way a service on
 // that machine's network is reached.

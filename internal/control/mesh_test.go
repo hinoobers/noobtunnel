@@ -180,6 +180,9 @@ func newHarnessOnDir(t *testing.T, direct bool, binaryDir, stateDir string, muta
 		h.address = address
 		return true
 	})
+	// Wait for shutdown before TempDir cleanup. The request log flushes during
+	// shutdown, and merely cancelling without joining could race directory removal.
+	t.Cleanup(h.stop)
 	return h
 }
 

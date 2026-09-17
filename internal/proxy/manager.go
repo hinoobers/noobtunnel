@@ -85,7 +85,8 @@ type Spec struct {
 	// ProxyProtocol is "", "v1" or "v2" and adds a header to forwarded streams.
 	ProxyProtocol string
 	// Identity requires a control node account before a request is forwarded.
-	Identity bool
+	Identity     bool
+	IdentityMode string
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
@@ -250,6 +251,11 @@ type Manager struct {
 	// IdentityCheck validates a control node account for identity controlled
 	// resources. Returning nil allows the request.
 	IdentityCheck func(username, password string) error
+	// IdentitySession validates a signed control-node browser session presented
+	// on a resource hostname. IdentityLogin authenticates a form submission and
+	// issues that hostname's signed session cookie.
+	IdentitySession func(*http.Request) (string, bool)
+	IdentityLogin   func(http.ResponseWriter, *http.Request, string, string) (string, error)
 	// CountryOf resolves a client address to an ISO country code, or "" when the
 	// information is unavailable.
 	CountryOf func(addr netip.Addr) string

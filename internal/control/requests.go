@@ -1,8 +1,11 @@
 package control
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/netip"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -70,18 +73,50 @@ type requestLog struct {
 	entries   []RequestEntry
 	byCountry map[string]*CountryStat
 	byHost    map[string]*CountryStat
+	// countries makes the country consistent for every row from an address,
+	// even if one proxy path did not have a lookup result on that request.
+	countries map[string]string
 	summary   RequestSummary
 	// durationSumMs and timed count the requests that carried a duration, so the
 	// average stays meaningful.
 	durationSumMs int64
 	timed         int64
+	path          string
+	dirty         chan struct{}
+	stop          chan struct{}
+	done          chan struct{}
+	closeOnce     sync.Once
+	lastSaveError error
+	generation    uint64
+	saved         uint64
 }
 
-func newRequestLog() *requestLog {
-	return &requestLog{
+type requestLogDisk struct {
+	Entries       []RequestEntry          `json:"entries"`
+	ByCountry     map[string]*CountryStat `json:"byCountry"`
+	ByHost        map[string]*CountryStat `json:"byHost"`
+	Countries     map[string]string       `json:"countries"`
+	Summary       RequestSummary          `json:"summary"`
+	DurationSumMs int64                   `json:"durationSumMs"`
+	Timed         int64                   `json:"timed"`
+}
+
+func newRequestLog(paths ...string) *requestLog {
+	l := &requestLog{
 		byCountry: map[string]*CountryStat{},
 		byHost:    map[string]*CountryStat{},
+		countries: map[string]string{},
 	}
+	if len(paths) == 0 || paths[0] == "" {
+		return l
+	}
+	l.path = paths[0]
+	l.load()
+	l.dirty = make(chan struct{}, 1)
+	l.stop = make(chan struct{})
+	l.done = make(chan struct{})
+	go l.persistLoop()
+	return l
 }
 
 // record adds one request.
@@ -109,7 +144,6 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		TransferMs: event.TransferMs,
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 
 	// A request from this machine or from a private address has no country to look
 	// up, and calling that "unknown" hides the addresses the IP API really did not
@@ -117,6 +151,11 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 	// country, so the UI can say why instead of guessing.
 	if entry.Country == "" && isPrivateClient(entry.IP) {
 		entry.Country = "local"
+	}
+	if entry.Country == "" {
+		entry.Country = l.countries[entry.IP]
+	} else if entry.Country != "local" && entry.IP != "" {
+		l.countries[entry.IP] = entry.Country
 	}
 	// The API answers when it answers: a lookup that was too slow for one request
 	// still resolves the address, and every earlier request from it should show the
@@ -159,6 +198,122 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		host = "(no host)"
 	}
 	bump(l.byHost, host, entry.Allowed)
+	l.generation++
+	l.mu.Unlock()
+	l.markDirty()
+}
+
+func (l *requestLog) markDirty() {
+	if l.dirty == nil {
+		return
+	}
+	select {
+	case l.dirty <- struct{}{}:
+	default:
+	}
+}
+
+// persistLoop coalesces bursts so request logging never waits on disk I/O.
+func (l *requestLog) persistLoop() {
+	defer close(l.done)
+	for {
+		select {
+		case <-l.dirty:
+			timer := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-timer.C:
+				l.save()
+			case <-l.stop:
+				if !timer.Stop() {
+					<-timer.C
+				}
+				l.save()
+				return
+			}
+		case <-l.stop:
+			l.save()
+			return
+		}
+	}
+}
+
+func (l *requestLog) load() {
+	raw, err := os.ReadFile(l.path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		l.lastSaveError = err
+		return
+	}
+	var disk requestLogDisk
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		l.lastSaveError = fmt.Errorf("parse request log: %w", err)
+		return
+	}
+	l.entries = disk.Entries
+	if len(l.entries) > requestLogSize {
+		l.entries = l.entries[:requestLogSize]
+	}
+	if disk.ByCountry != nil {
+		l.byCountry = disk.ByCountry
+	}
+	if disk.ByHost != nil {
+		l.byHost = disk.ByHost
+	}
+	if disk.Countries != nil {
+		l.countries = disk.Countries
+	}
+	l.summary = disk.Summary
+	l.durationSumMs = disk.DurationSumMs
+	l.timed = disk.Timed
+}
+
+func (l *requestLog) save() {
+	if l.path == "" {
+		return
+	}
+	l.mu.Lock()
+	if l.generation == l.saved {
+		l.mu.Unlock()
+		return
+	}
+	generation := l.generation
+	disk := requestLogDisk{
+		Entries: append([]RequestEntry(nil), l.entries...), ByCountry: l.byCountry, ByHost: l.byHost,
+		Countries: l.countries, Summary: l.summary, DurationSumMs: l.durationSumMs, Timed: l.timed,
+	}
+	raw, err := json.Marshal(disk)
+	l.mu.Unlock()
+	if err == nil {
+		tmp := l.path + ".tmp"
+		err = os.WriteFile(tmp, raw, 0o600)
+		if err == nil {
+			err = os.Rename(tmp, l.path)
+		}
+	}
+	l.mu.Lock()
+	l.lastSaveError = err
+	if err == nil && l.saved < generation {
+		l.saved = generation
+	}
+	l.mu.Unlock()
+}
+
+func (l *requestLog) close() {
+	if l.stop == nil {
+		return
+	}
+	l.closeOnce.Do(func() {
+		close(l.stop)
+		<-l.done
+	})
+}
+
+func (l *requestLog) persistenceError() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.lastSaveError
 }
 
 // moveFromUnknownLocked moves one request from the unknown count to a country,

@@ -266,7 +266,9 @@ function renderDomains(node, subNode, domains) {
             : h('span', { class: 'chip chip-off' }, 'manual')),
         h('div', { class: 'muted tiny', text: domain.exitNodeName || 'control node' })),
       h('td', null, domain.resources && domain.resources.length
-        ? domain.resources.map((name) => h('span', { class: 'chip chip-quiet' }, name))
+        ? (domain.resources.length === 1
+            ? h('span', { class: 'chip chip-quiet' }, domain.resources[0])
+            : h('span', { class: 'chip chip-quiet' }, domain.resources.length + ' resources'))
         : h('span', { class: 'muted tiny' }, 'nothing yet')),
       h('td', null, canAdmin() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
         h('button', { class: 'btn btn-sm', 'data-action': 'domain-edit', 'data-hostname': domain.hostname }, 'Edit'),
@@ -649,10 +651,20 @@ function resourceEditorPage(existing) {
         h('p', { class: 'muted tiny', text: 'Applied in order, first match wins. An ALLOW rule makes the rest of the list an allow list.' })),
       h('button', { class: 'btn btn-sm', type: 'button', onclick: () => addRule(null) }, 'Add rule')),
     ruleList);
+  const identityToggle = h('input', { type: 'checkbox', name: 'identity', checked: isEdit && existing.identity ? true : null });
+  const identityMode = { value: isEdit && existing.identityMode === 'login' ? 'login' : 'basic' };
+  const identityModeCards = cardPicker('identityMode', [
+    { value: 'basic', label: 'HTTP Basic', hint: 'Use the browser\'s built-in username and password prompt.' },
+    { value: 'login', label: 'Noobtunnel login', hint: 'Show a branded login page, then continue automatically to the resource.' },
+  ], identityMode);
+  const identityModeField = h('div', { class: 'field' }, h('span', null, 'Identity experience'), identityModeCards);
   const identityField = h('label', { class: 'switch' },
-    h('input', { type: 'checkbox', name: 'identity', checked: isEdit && existing.identity ? true : null }),
+    identityToggle,
     h('span', null, h('strong', null, 'Identity controlled'),
-      h('em', null, 'Require a control node account (HTTP Basic) before a request is forwarded.')));
+      h('em', null, 'Require a control node account before a request is forwarded.')));
+  const syncIdentity = () => { identityModeField.hidden = !identityToggle.checked; };
+  identityToggle.addEventListener('change', syncIdentity);
+  syncIdentity();
   const exploitField = h('label', { class: 'switch' },
     h('input', { type: 'checkbox', name: 'blockExploits', checked: isEdit && existing.blockExploits ? true : null }),
     h('span', null, h('strong', null, 'Block common exploits'),
@@ -681,6 +693,7 @@ function resourceEditorPage(existing) {
   function syncProxy() {
     const web = type.value === 'http' || type.value === 'https';
     identityField.hidden = !web;
+    identityModeField.hidden = !web || !identityToggle.checked;
     exploitField.hidden = !web;
     websocketField.hidden = !web;
     rulesBox.hidden = !web;
@@ -756,6 +769,7 @@ function resourceEditorPage(existing) {
       enabledField),
     h('div', { class: 'fields' },
       identityField,
+      identityModeField,
       exploitField,
       websocketField,
       rulesBox,
@@ -856,6 +870,7 @@ function resourceEditorPage(existing) {
       proxyProtocol: type.value === 'udp' ? '' : proxyProtocol.value,
       rules: type.value === 'http' || type.value === 'https' ? readRules(ruleList) : [],
       identity: data.get('identity') !== null,
+      identityMode: data.get('identity') !== null ? identityMode.value : '',
       blockExploits: data.get('blockExploits') !== null,
       websockets: data.get('websockets') !== null,
       enabled: data.get('enabled') !== null,
@@ -908,6 +923,7 @@ function resourceBody(resource, overrides) {
     // Carried through every edit, so toggling a resource cannot silently change
     // what it forwards.
     identity: !!resource.identity,
+    identityMode: resource.identityMode || 'basic',
     blockExploits: !!resource.blockExploits,
     websockets: resource.websockets !== false,
     rules: resource.rules || [],
