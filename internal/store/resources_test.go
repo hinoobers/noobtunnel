@@ -72,6 +72,27 @@ func TestAddResourceDefaults(t *testing.T) {
 	}
 }
 
+func TestCommonExploitFilterOnlyAppliesToWebResources(t *testing.T) {
+	st, agent := resourceFixture(t)
+	resource, err := st.AddResource(ResourceInput{
+		Name: "web", Protocol: ProtocolHTTP, Domain: "web.example.com",
+		Targets: oneTarget(agent.ID, agent.Address, 8080), BlockExploits: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resource.BlockExploits {
+		t.Fatal("filter setting was not stored")
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "ssh", Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 22),
+		ListenPort: 2222, BlockExploits: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "http or https") {
+		t.Fatalf("TCP exploit filter should be rejected, got %v", err)
+	}
+}
+
 func TestResourceWithSeveralTargets(t *testing.T) {
 	st, agent := resourceFixture(t)
 	resource, err := st.AddResource(ResourceInput{

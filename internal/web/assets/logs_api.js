@@ -80,7 +80,7 @@ function renderRequests(node, recent) {
   const page = recent.slice(start, start + requestsPerPage);
   node.append(h('table', null,
     h('thead', null, h('tr', null,
-      h('th', null, 'Timestamp'), h('th', null, 'Took'), h('th', null, 'Host'), h('th', null, 'Client'),
+      h('th', null, 'Timestamp'), h('th', { title: 'Server-side proxy total; hover the phase below each value for details.' }, 'Took'), h('th', null, 'Host'), h('th', null, 'Client'),
       h('th', null, 'Country'), h('th', null, 'Resource'), h('th', null, 'Decision'))),
     h('tbody', null, page.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
       // The exact time, with the relative one on hover: a log is read by
@@ -105,20 +105,25 @@ function setRequestPage(page) {
 
 // timingBreakdown says where a slow request spent its time, under the total.
 //
-// "Took" alone cannot tell a slow tunnel from a slow service: connecting through
-// the mesh and waiting for the answer are both inside it. Connecting is measured
-// separately, so the difference between the two is the service's own time.
+// Split the proxy total into connection setup, time until backend headers, and
+// response transfer. This is still server-side elapsed time, not raw tunnel RTT.
 function timingBreakdown(entry) {
   const total = entry.durationMs || 0;
   const dial = entry.dialMs || 0;
   if (!total) return null;
-  // Only worth a line when the path is a real part of the total: a reused
-  // connection has no dial time at all.
-  if (!dial || dial < 5 || total < 100) return null;
-  const service = Math.max(0, total - dial);
+  const headers = entry.headerMs || total;
+  const backend = Math.max(0, headers - dial);
+  const transfer = Math.max(0, entry.transferMs || total - headers);
+  const phases = [
+    ['connect', dial],
+    ['backend', backend],
+    ['send', transfer],
+  ];
+  const dominant = phases.reduce((best, phase) => phase[1] > best[1] ? phase : best, phases[0]);
   const note = h('div', { class: 'muted tiny' },
-    dial > service ? 'connect ' + fmtMs(dial) : 'service ' + fmtMs(service));
-  note.title = 'connect ' + fmtMs(dial) + ', service ' + fmtMs(service) + ' (total ' + fmtMs(total) + ')';
+    dominant[0] + ' ' + fmtMs(dominant[1]));
+  note.title = 'connect ' + fmtMs(dial) + ', backend ' + fmtMs(backend) +
+    ', response transfer ' + fmtMs(transfer) + ' (proxy total ' + fmtMs(total) + ')';
   return note;
 }
 

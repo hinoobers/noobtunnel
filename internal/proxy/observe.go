@@ -33,6 +33,10 @@ type RequestEvent struct {
 	// connection to a service that then answers in milliseconds is the tunnel, and
 	// a connection made in a millisecond followed by a slow answer is the service.
 	DialMs int64 `json:"dialMs,omitempty"`
+	// HeaderMs is elapsed time until the backend response headers arrived.
+	HeaderMs int64 `json:"headerMs,omitempty"`
+	// TransferMs is time spent copying the response body after its headers.
+	TransferMs int64 `json:"transferMs,omitempty"`
 }
 
 // observe reports an event when the control node is listening for them.

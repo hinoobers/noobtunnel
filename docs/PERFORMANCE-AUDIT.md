@@ -81,9 +81,9 @@ local address; it previously depended on the ignored HTTP dialing override.
 
 ## Deployment and remaining measurements
 
-Changes are local source changes. The live hosts still run their existing builds.
-Linux kernel behavior has command-level coverage here; real WireGuard throughput
-requires Linux server and agent measurements after deploying both binaries.
+The operator subsequently reported deploying the changes to the live control node
+and agents. Linux kernel behavior has command-level coverage here; host telemetry
+is still required to measure real WireGuard throughput and diagnose packet stalls.
 
 To establish Pangolin/Cloudflare Tunnel parity, use identical hardware, origin,
 client location, payloads, TLS settings, and caching behavior for each product.
@@ -93,5 +93,43 @@ p50/p95/p99, CPU, retransmits, packet loss, and MTU/path behavior. Repeat during
 steady state and while peers/configuration reconcile. A large static test file
 and an explicitly designated upload endpoint are needed; the public app's root
 page is insufficient. SSH access details for the server and agent were not
-provided during this audit. No kernel tuning, service restart, deployment, or
-live load test was performed.
+provided during the initial audit. No kernel tuning or service restart was
+performed by the auditor.
+
+## Post-deployment check — 2026-09-17
+
+The operator deployed the changes to the control node and agents, then authorized
+another public benchmark from the same client location.
+
+| Workload | Result |
+| --- | --- |
+| Dashboard cold GET | 134 ms TTFB, 167 ms total, 15,343 bytes |
+| Published service cold GET | 195 ms TTFB and total, 514 bytes |
+| 12 sequential small GETs, one reused connection | 66.84 ms median TTFB; 66.32 ms minimum; 160.9 ms maximum |
+| 12 small GETs, concurrency 2 | all completed in 635 ms; 64.5 ms median; 255.1 ms maximum |
+| Three batches of 20 small GETs, concurrency 5 | all 60 completed; 70.0–71.0 ms batch medians; 299–334 ms p95; 529–581 ms wall time per batch |
+| Dashboard control, 20 GETs, concurrency 5 | all completed in 477 ms; 37.8 ms median; 305.7 ms p95 |
+
+The normal reused-connection result is marginally better than the pre-deployment
+68–69 ms sample, but the difference is too small for a causal claim across the
+public Internet.
+
+The published application exposes a 213,970-byte JavaScript asset. A combined
+test ran one sequential stream alongside a concurrency-5 stream. The ten requests
+on the sequential stream had a 63.2 ms median and 3.36 MB/s median curl rate, but
+one stalled after 91,004 bytes and hit the 15-second timeout. The concurrency-5
+stream completed 16 of 20; four hit 15-second timeouts, including one that stalled
+after 11,668 bytes. The immediately following three concurrency-5 small-response
+batches completed 60 of 60, and a range sweep of 1 KiB, 8 KiB, 32 KiB, 64 KiB,
+128 KiB and the full 213,970 bytes completed 3 of 3 at every size. This rules out
+a repeatable payload-size threshold and does not resemble a deterministic MTU
+black hole. It does show an intermittent body-transfer or network-path stall that
+warrants server/agent correlation before claiming production parity.
+
+The public `/api/health` endpoint reported `status: ok`, version `0.1.0`, during
+the check. That endpoint does not expose peer packet loss, retransmits, route
+changes, CPU saturation, or the backend connection involved in a stalled request.
+The next useful evidence is timestamp-correlated control-node and agent logs plus
+`wg show`, interface counters, TCP retransmit statistics, and CPU/load from both
+hosts while repeating the 214 KB concurrency test. A multi-megabyte static object
+or `iperf3` endpoint is still needed to measure sustained bandwidth.

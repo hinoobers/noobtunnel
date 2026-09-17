@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"testing"
@@ -21,6 +22,9 @@ func TestTheRequestLogSeparatesConnectingFromWaiting(t *testing.T) {
 	defer backend.Close()
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(30 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(20 * time.Millisecond)
 		_, _ = w.Write([]byte("service"))
 	})}
 	go func() { _ = server.Serve(backend) }()
@@ -45,6 +49,7 @@ func TestTheRequestLogSeparatesConnectingFromWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 
 	select {
@@ -60,6 +65,12 @@ func TestTheRequestLogSeparatesConnectingFromWaiting(t *testing.T) {
 		}
 		if event.DialMs < 0 || event.DialMs > event.DurationMs {
 			t.Fatalf("connecting cannot take longer than the whole request: %+v", event)
+		}
+		if event.HeaderMs < 30 || event.HeaderMs > event.DurationMs {
+			t.Fatalf("backend header timing is wrong: %+v", event)
+		}
+		if event.TransferMs < 20 || event.HeaderMs+event.TransferMs > event.DurationMs+1 {
+			t.Fatalf("response transfer timing is wrong: %+v", event)
 		}
 		// The wait is the service's: the connection itself was to loopback.
 		if event.DurationMs-event.DialMs < 30 {

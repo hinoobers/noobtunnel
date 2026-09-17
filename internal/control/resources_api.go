@@ -48,6 +48,8 @@ type ResourceView struct {
 	Rules []access.Rule `json:"rules,omitempty"`
 	// Identity means a control node account is required to reach the resource.
 	Identity bool `json:"identity"`
+	// BlockExploits enables the resource's built-in common exploit filter.
+	BlockExploits bool `json:"blockExploits"`
 	// WebSockets says whether protocol upgrades pass through.
 	WebSockets bool   `json:"websockets"`
 	Active     int64  `json:"active"`
@@ -144,6 +146,7 @@ func (s *Server) resourceViews() []ResourceView {
 			ProxyProtocol: r.ProxyProtocol,
 			Rules:         r.Rules,
 			Identity:      r.Identity,
+			BlockExploits: r.BlockExploits,
 			WebSockets:    r.AllowsWebSockets(),
 			CreatedAt:     r.CreatedAt.UTC().Format(timeLayout),
 		}
@@ -439,6 +442,7 @@ type resourcePayload struct {
 	ProxyProtocol string          `json:"proxyProtocol"`
 	Rules         []access.Rule   `json:"rules"`
 	Identity      bool            `json:"identity"`
+	BlockExploits bool            `json:"blockExploits"`
 	// WebSockets is a pointer: omitting it keeps the default, which allows
 	// protocol upgrades.
 	WebSockets *bool `json:"websockets"`
@@ -474,6 +478,7 @@ func (p resourcePayload) input() store.ResourceInput {
 		ProxyProtocol: p.ProxyProtocol,
 		Rules:         p.Rules,
 		Identity:      p.Identity,
+		BlockExploits: p.BlockExploits,
 		WebSockets:    p.WebSockets,
 	}
 }

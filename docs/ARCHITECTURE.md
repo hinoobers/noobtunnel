@@ -161,6 +161,12 @@ forwarding. Successful logins are cached for a minute, keyed by a digest of the
 credentials, so the password hash is not paid on every request. It is refused for
 TCP and UDP, which have no way to ask for a login.
 
+The optional **common exploit filter** rejects high-confidence path traversal,
+sensitive-file, SQL/script injection, Shellshock and Log4Shell probes before they
+reach an HTTP backend. It inspects the request target and bounded headers without
+reading the body, so uploads remain streaming. It is intentionally conservative
+and is not a replacement for a body-aware OWASP CRS WAF.
+
 ### Targets and load balancing
 
 A resource holds one or more targets, each with its own agent, address and port.

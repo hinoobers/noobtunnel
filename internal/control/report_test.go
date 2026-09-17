@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/noobtunnel/noobtunnel/internal/access"
 	"github.com/noobtunnel/noobtunnel/internal/control"
 	"github.com/noobtunnel/noobtunnel/internal/store"
 	"github.com/noobtunnel/noobtunnel/internal/wg"
@@ -60,5 +61,40 @@ func TestAReportDoesNotBlameTheListenersItNeverStarted(t *testing.T) {
 				t.Fatalf("%s should say why it cannot tell: %+v", check.ID, check)
 			}
 		}
+	}
+}
+
+func TestResourceSpecsCarrySecurityControls(t *testing.T) {
+	dir := t.TempDir()
+	server, err := control.New(control.Options{
+		StateDir: dir, Listen: "127.0.0.1:0",
+		Backend:       &wg.FakeBackend{Network: wg.NewFakeNetwork(), Label: "hub"},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AdminPassword: "correct-horse-battery-staple", SetupSystem: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := server.Store().AddAgent(store.AddAgentParams{Name: "web"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Store().UpdateAgent(agent.ID, func(a *store.Agent) error {
+		a.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rule := access.Rule{Field: access.FieldPath, Operator: access.OpStartsWith, Values: []string{"/private"}, Action: access.ActionBlock}
+	if _, err := server.Store().AddResource(store.ResourceInput{
+		Name: "secured", Protocol: store.ProtocolHTTP, Domain: "secured.example.com",
+		Targets:       []store.ResourceTargetInput{{AgentID: agent.ID, Host: agent.Address, Port: 8080}},
+		BlockExploits: true, Rules: []access.Rule{rule},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	specs := server.ResourceSpecs()
+	if len(specs) != 1 || !specs[0].BlockExploits || len(specs[0].Rules) != 1 || specs[0].Rules[0].Field != access.FieldPath {
+		t.Fatalf("security controls missing from proxy spec: %+v", specs)
 	}
 }

@@ -86,6 +86,8 @@ type Spec struct {
 	ProxyProtocol string
 	// Identity requires a control node account before a request is forwarded.
 	Identity bool
+	// BlockExploits rejects high-confidence commodity web attack signatures.
+	BlockExploits bool
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
 	// resource.
 	WebSockets bool

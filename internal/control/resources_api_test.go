@@ -142,21 +142,22 @@ func TestResourceLifecycleThroughTheAPI(t *testing.T) {
 
 	status, body, _ := h.api("POST", "/api/resources", resourceBody(
 		"home assistant", "https", agent.id, "192.168.1.10", 8123, 0,
-		map[string]any{"domain": "Home.Example.com"}), admin)
+		map[string]any{"domain": "Home.Example.com", "blockExploits": true}), admin)
 	if status != http.StatusOK {
 		t.Fatalf("creating a resource returned %d: %s", status, body)
 	}
 	var created struct {
 		Resource struct {
-			ID           uint32 `json:"id"`
-			Name         string `json:"name"`
-			Protocol     string `json:"protocol"`
-			ListenPort   int    `json:"listenPort"`
-			Public       string `json:"public"`
-			Domain       string `json:"domain"`
-			Strategy     string `json:"strategy"`
-			ExitNodeName string `json:"exitNodeName"`
-			Targets      []struct {
+			ID            uint32 `json:"id"`
+			Name          string `json:"name"`
+			Protocol      string `json:"protocol"`
+			ListenPort    int    `json:"listenPort"`
+			Public        string `json:"public"`
+			Domain        string `json:"domain"`
+			Strategy      string `json:"strategy"`
+			ExitNodeName  string `json:"exitNodeName"`
+			BlockExploits bool   `json:"blockExploits"`
+			Targets       []struct {
 				AgentName string `json:"agentName"`
 				Address   string `json:"address"`
 			} `json:"targets"`
@@ -179,6 +180,9 @@ func TestResourceLifecycleThroughTheAPI(t *testing.T) {
 	}
 	if created.Resource.ExitNodeName == "" {
 		t.Fatal("the resource should name its exit node")
+	}
+	if !created.Resource.BlockExploits {
+		t.Fatal("the common exploit filter setting should round-trip through the API")
 	}
 
 	// The domain is registered automatically and reports what uses it.

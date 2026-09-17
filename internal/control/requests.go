@@ -34,7 +34,9 @@ type RequestEntry struct {
 	// DialMs is how long connecting to that backend took. It is what tells a slow
 	// tunnel apart from a slow service: seconds to connect is the path, milliseconds
 	// to connect followed by a slow answer is the service.
-	DialMs int64 `json:"dialMs,omitempty"`
+	DialMs     int64 `json:"dialMs,omitempty"`
+	HeaderMs   int64 `json:"headerMs,omitempty"`
+	TransferMs int64 `json:"transferMs,omitempty"`
 }
 
 // CountryStat aggregates requests by country or hostname.
@@ -95,6 +97,8 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		Target:     event.Target,
 		DurationMs: event.DurationMs,
 		DialMs:     event.DialMs,
+		HeaderMs:   event.HeaderMs,
+		TransferMs: event.TransferMs,
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

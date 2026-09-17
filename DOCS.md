@@ -390,8 +390,14 @@ before a request is forwarded: the browser gets a standard HTTP Basic prompt and
 any enabled account works. Turn it off per resource to publish publicly. TCP and
 UDP cannot ask for a login, so the toggle is not offered for them.
 
-The publish form is split into three steps — **Service**, **Targets**,
-**Publishing** — so it is readable instead of one long page.
+The **Block common exploits** switch rejects high-confidence path traversal,
+sensitive-file, SQL/script injection, Shellshock and Log4Shell probes before they
+reach an HTTP or HTTPS service. It does not inspect request bodies and does not
+replace a full OWASP CRS WAF; that conservative scope keeps uploads streaming and
+avoids broad rules that commonly block valid application input.
+
+The publish form is split into four steps — **Service**, **Targets**,
+**Publishing**, **Security** — so it is readable instead of one long page.
 
 The target must be reachable *through the chosen agent* — its own mesh address, or
 any address that machine can reach: the agent connects from its own network, so

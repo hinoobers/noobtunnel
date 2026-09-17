@@ -131,6 +131,8 @@ type Resource struct {
 	ProxyProtocol string `json:"proxyProtocol,omitempty"`
 	// Identity requires a control node account before a request is forwarded.
 	Identity bool `json:"identity,omitempty"`
+	// BlockExploits rejects high-confidence commodity web attack signatures.
+	BlockExploits bool `json:"blockExploits,omitempty"`
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
 	// resource. Unset means yes: it is what a reverse proxy is expected to do.
 	WebSockets *bool `json:"websockets,omitempty"`
@@ -246,6 +248,7 @@ type ResourceInput struct {
 	Enabled       *bool
 	ProxyProtocol string
 	Identity      bool
+	BlockExploits bool
 	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
 	// is to allow upgrades.
 	WebSockets *bool
@@ -443,6 +446,9 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",
 			ErrBadResource, in.Protocol)
 	}
+	if in.BlockExploits && !in.Protocol.ByName() {
+		return Resource{}, fmt.Errorf("%w: common exploit blocking needs http or https", ErrBadResource)
+	}
 	if len(in.Rules) > 0 && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: access rules need http or https, because %s cannot read a country or hostname",
 			ErrBadResource, in.Protocol)
@@ -460,18 +466,19 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		}
 	}
 	resource := Resource{
-		Name:       strings.TrimSpace(in.Name),
-		Protocol:   in.Protocol,
-		Targets:    targets,
-		Strategy:   strategy,
-		ExitNodeID: exitNodeID,
-		ListenPort: in.ListenPort,
-		Domain:     domain,
-		Enabled:    true,
-		Identity:   in.Identity,
-		WebSockets: websockets,
-		Rules:      rules,
-		Notes:      strings.TrimSpace(in.Notes),
+		Name:          strings.TrimSpace(in.Name),
+		Protocol:      in.Protocol,
+		Targets:       targets,
+		Strategy:      strategy,
+		ExitNodeID:    exitNodeID,
+		ListenPort:    in.ListenPort,
+		Domain:        domain,
+		Enabled:       true,
+		Identity:      in.Identity,
+		BlockExploits: in.BlockExploits,
+		WebSockets:    websockets,
+		Rules:         rules,
+		Notes:         strings.TrimSpace(in.Notes),
 	}
 	proxyProtocol, err := NormaliseProxyProtocol(in.ProxyProtocol)
 	if err != nil {

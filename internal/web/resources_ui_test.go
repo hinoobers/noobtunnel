@@ -134,7 +134,7 @@ func TestPublishPageIsSplitIntoSteps(t *testing.T) {
 	if !strings.Contains(page, "stepTitles") || !strings.Contains(page, "function showStep") {
 		t.Fatal("the publish form should be split into steps")
 	}
-	for _, want := range []string{"'Service'", "'Targets'", "'Publishing'", "'Next'", "'Back'"} {
+	for _, want := range []string{"'Service'", "'Targets'", "'Publishing'", "'Security'", "'Next'", "'Back'"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the step navigation is missing %s", want)
 		}
@@ -158,5 +158,8 @@ func TestHTTPSHasNoPortChoice(t *testing.T) {
 	// The published toggle exists, and identity control is offered for http(s).
 	if !strings.Contains(page, "'identity'") {
 		t.Error("the identity control toggle is missing")
+	}
+	if !strings.Contains(page, "'blockExploits'") || !strings.Contains(page, "'Block common exploits'") {
+		t.Error("the common exploit filter toggle is missing")
 	}
 }

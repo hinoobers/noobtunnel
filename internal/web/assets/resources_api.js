@@ -623,7 +623,7 @@ function resourceEditorPage(existing) {
   });
 
   const proxyHint = h('div', { class: 'muted tiny' });
-  // Access rules live on the final step, next to the identity switch.
+  // Security controls live on the final step.
   const ruleList = h('div', { class: 'rules' });
   const addRule = (rule) => ruleList.append(ruleRow(rule, (row) => row.remove()));
   if (isEdit && existing.rules && existing.rules.length) existing.rules.forEach((rule) => addRule(rule));
@@ -638,6 +638,10 @@ function resourceEditorPage(existing) {
     h('input', { type: 'checkbox', name: 'identity', checked: isEdit && existing.identity ? true : null }),
     h('span', null, h('strong', null, 'Identity controlled'),
       h('em', null, 'Require a control node account (HTTP Basic) before a request is forwarded.')));
+  const exploitField = h('label', { class: 'switch' },
+    h('input', { type: 'checkbox', name: 'blockExploits', checked: isEdit && existing.blockExploits ? true : null }),
+    h('span', null, h('strong', null, 'Block common exploits'),
+      h('em', null, 'Reject high-confidence traversal, secret-file, SQL injection, script injection, Shellshock and Log4Shell probes. Does not inspect request bodies or replace a full WAF.')));
   // WebSockets: on for every existing resource, and the switch is only shown for
   // the protocols that can carry an upgrade.
   const websocketField = h('label', { class: 'switch' },
@@ -660,18 +664,19 @@ function resourceEditorPage(existing) {
   }
 
   function syncProxy() {
+    const web = type.value === 'http' || type.value === 'https';
+    identityField.hidden = !web;
+    exploitField.hidden = !web;
+    websocketField.hidden = !web;
+    rulesBox.hidden = !web;
     if (type.value === 'udp') {
       proxyProtocol.value = '';
       setCardValue(proxyCards, '');
       setCardEnabled(proxyCards, false);
       proxyHint.textContent = 'The PROXY protocol is a TCP extension, so UDP resources do not use it.';
-      identityField.hidden = true;
-      websocketField.hidden = true;
       return;
     }
     setCardEnabled(proxyCards, true);
-    identityField.hidden = false;
-    websocketField.hidden = false;
     proxyHint.textContent = type.value === 'http'
       ? 'Adds the header for services that expect it. With it off, HTTP backends still see the client in X-Forwarded-For.'
       : 'Tells the service the real client address, for software that trusts a reverse proxy.';
@@ -736,11 +741,12 @@ function resourceEditorPage(existing) {
       enabledField),
     h('div', { class: 'fields' },
       identityField,
+      exploitField,
       websocketField,
       rulesBox,
       error),
   ];
-  const stepTitles = ['Service', 'Targets', 'Publishing', 'Access'];
+  const stepTitles = ['Service', 'Targets', 'Publishing', 'Security'];
   let step = 0;
 
   const stepPills = stepTitles.map((title, index) => h('button', {
@@ -835,6 +841,7 @@ function resourceEditorPage(existing) {
       proxyProtocol: type.value === 'udp' ? '' : proxyProtocol.value,
       rules: type.value === 'http' || type.value === 'https' ? readRules(ruleList) : [],
       identity: data.get('identity') !== null,
+      blockExploits: data.get('blockExploits') !== null,
       websockets: data.get('websockets') !== null,
       enabled: data.get('enabled') !== null,
     };
@@ -883,6 +890,7 @@ function resourceBody(resource, overrides) {
     // Carried through every edit, so toggling a resource cannot silently change
     // what it forwards.
     identity: !!resource.identity,
+    blockExploits: !!resource.blockExploits,
     websockets: resource.websockets !== false,
     rules: resource.rules || [],
     enabled: resource.enabled,

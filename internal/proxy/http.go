@@ -162,6 +162,22 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)
 		return
 	}
+	if res.spec.BlockExploits {
+		if reason := commonExploit(r); reason != "" {
+			h.group.manager.observe(RequestEvent{
+				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+				Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol),
+				Allowed: false, Reason: "common exploit filter: " + reason,
+				Status: http.StatusForbidden, Path: r.URL.Path,
+				DurationMs: time.Since(started).Milliseconds(),
+			})
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(h.group.manager.brand() + ": request blocked by the common exploit filter\n"))
+			return
+		}
+	}
 	if res.spec.Identity && !h.authorised(res, r) {
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
@@ -260,6 +276,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
 		return
 	}
+	headerMs := time.Since(started).Milliseconds()
 	defer response.Body.Close()
 	res.stat.setError(nil)
 
@@ -274,12 +291,14 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		dst = flushWriter{w}
 	}
 	copyResponse(dst, response.Body)
+	totalMs := time.Since(started).Milliseconds()
 	res.stat.targetFor(chosen.ID).set.total.Add(1)
 	h.group.manager.observe(RequestEvent{
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 		Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
-		DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs, Target: chosen.Published(),
+		DurationMs: totalMs, DialMs: dialMs, HeaderMs: headerMs,
+		TransferMs: max(0, totalMs-headerMs), Target: chosen.Published(),
 	})
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
