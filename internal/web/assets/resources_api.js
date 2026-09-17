@@ -82,6 +82,14 @@ function ruleRow(rule, onRemove) {
         h('option', { value: 'block', selected: rule && rule.action === 'allow' ? null : true }, 'BLOCK'),
         h('option', { value: 'allow', selected: rule && rule.action === 'allow' ? true : null }, 'ALLOW'))),
     h('button', { class: 'btn btn-sm btn-danger', type: 'button', onclick: () => onRemove(row) }, 'Remove'));
+  row.syncFields = (allowed) => {
+    const selected = allowed.includes(fieldSelect.value) ? fieldSelect.value : allowed[0];
+    clear(fieldSelect);
+    allowed.forEach((key) => fieldSelect.append(h('option', { value: key, selected: key === selected ? true : null }, RULE_FIELDS[key].label)));
+    fieldSelect.value = selected;
+    valueInput.placeholder = RULE_FIELDS[selected].placeholder;
+    fillOperators(selected, operatorSelect.value);
+  };
   return row;
 }
 
@@ -642,13 +650,20 @@ function resourceEditorPage(existing) {
   const proxyHint = h('div', { class: 'muted tiny' });
   // Security controls live on the final step.
   const ruleList = h('div', { class: 'rules' });
-  const addRule = (rule) => ruleList.append(ruleRow(rule, (row) => row.remove()));
+  const ruleFieldsForProtocol = () => type.value === 'http' || type.value === 'https'
+    ? Object.keys(RULE_FIELDS) : ['country', 'ip'];
+  const syncRuleFields = () => Array.from(ruleList.children).forEach((row) => row.syncFields(ruleFieldsForProtocol()));
+  const addRule = (rule) => {
+    const row = ruleRow(rule, (item) => item.remove());
+    ruleList.append(row);
+    row.syncFields(ruleFieldsForProtocol());
+  };
   if (isEdit && existing.rules && existing.rules.length) existing.rules.forEach((rule) => addRule(rule));
   const rulesBox = h('div', { class: 'subpanel' },
     h('div', { class: 'panel-head' },
       h('div', null,
         h('h3', null, 'Access rules'),
-        h('p', { class: 'muted tiny', text: 'Applied in order, first match wins. An ALLOW rule makes the rest of the list an allow list.' })),
+        h('p', { class: 'muted tiny', text: 'Applied in order, first match wins. TCP and UDP support country and client IP rules.' })),
       h('button', { class: 'btn btn-sm', type: 'button', onclick: () => addRule(null) }, 'Add rule')),
     ruleList);
   const identityToggle = h('input', { type: 'checkbox', name: 'identity', checked: isEdit && existing.identity ? true : null });
@@ -669,6 +684,10 @@ function resourceEditorPage(existing) {
     h('input', { type: 'checkbox', name: 'blockExploits', checked: isEdit && existing.blockExploits ? true : null }),
     h('span', null, h('strong', null, 'Block common exploits'),
       h('em', null, 'Reject high-confidence traversal, secret-file, SQL injection, script injection, Shellshock and Log4Shell probes. Does not inspect request bodies or replace a full WAF.')));
+  const highRiskField = h('label', { class: 'switch' },
+    h('input', { type: 'checkbox', name: 'blockHighRiskIps', checked: isEdit && existing.blockHighRiskIps ? true : null }),
+    h('span', null, h('strong', null, 'Block high-risk IPs'),
+      h('em', null, 'Use the configured IP API to reject clients with an abuse confidence score of 80 or higher.')));
   // WebSockets: on for every existing resource, and the switch is only shown for
   // the protocols that can carry an upgrade.
   const websocketField = h('label', { class: 'switch' },
@@ -696,7 +715,8 @@ function resourceEditorPage(existing) {
     identityModeField.hidden = !web || !identityToggle.checked;
     exploitField.hidden = !web;
     websocketField.hidden = !web;
-    rulesBox.hidden = !web;
+    rulesBox.hidden = false;
+    syncRuleFields();
     if (type.value === 'udp') {
       proxyProtocol.value = '';
       setCardValue(proxyCards, '');
@@ -771,6 +791,7 @@ function resourceEditorPage(existing) {
       identityField,
       identityModeField,
       exploitField,
+      highRiskField,
       websocketField,
       rulesBox,
       error),
@@ -872,6 +893,7 @@ function resourceEditorPage(existing) {
       identity: data.get('identity') !== null,
       identityMode: data.get('identity') !== null ? identityMode.value : '',
       blockExploits: data.get('blockExploits') !== null,
+      blockHighRiskIps: data.get('blockHighRiskIps') !== null,
       websockets: data.get('websockets') !== null,
       enabled: data.get('enabled') !== null,
     };
@@ -925,6 +947,7 @@ function resourceBody(resource, overrides) {
     identity: !!resource.identity,
     identityMode: resource.identityMode || 'basic',
     blockExploits: !!resource.blockExploits,
+    blockHighRiskIps: !!resource.blockHighRiskIps,
     websockets: resource.websockets !== false,
     rules: resource.rules || [],
     enabled: resource.enabled,

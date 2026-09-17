@@ -137,6 +137,8 @@ type Resource struct {
 	IdentityMode string `json:"identityMode,omitempty"`
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool `json:"blockExploits,omitempty"`
+	// BlockHighRiskIPs rejects clients whose IP API abuse confidence is at least 80.
+	BlockHighRiskIPs bool `json:"blockHighRiskIps,omitempty"`
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
 	// resource. Unset means yes: it is what a reverse proxy is expected to do.
 	WebSockets *bool `json:"websockets,omitempty"`
@@ -259,18 +261,19 @@ type ResourceTargetInput struct {
 }
 
 type ResourceInput struct {
-	Name          string
-	Protocol      Protocol
-	Targets       []ResourceTargetInput
-	Strategy      string
-	ExitNodeID    string
-	ListenPort    int
-	Domain        string
-	Enabled       *bool
-	ProxyProtocol string
-	Identity      bool
-	IdentityMode  string
-	BlockExploits bool
+	Name             string
+	Protocol         Protocol
+	Targets          []ResourceTargetInput
+	Strategy         string
+	ExitNodeID       string
+	ListenPort       int
+	Domain           string
+	Enabled          *bool
+	ProxyProtocol    string
+	Identity         bool
+	IdentityMode     string
+	BlockExploits    bool
+	BlockHighRiskIPs bool
 	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
 	// is to allow upgrades.
 	WebSockets *bool
@@ -479,10 +482,6 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 	if in.BlockExploits && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: common exploit blocking needs http or https", ErrBadResource)
 	}
-	if len(in.Rules) > 0 && !in.Protocol.ByName() {
-		return Resource{}, fmt.Errorf("%w: access rules need http or https, because %s cannot read a country or hostname",
-			ErrBadResource, in.Protocol)
-	}
 	// Only HTTP and HTTPS can carry an upgrade, so the setting means nothing for
 	// the other protocols and is not stored for them.
 	websockets := in.WebSockets
@@ -494,22 +493,27 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		if err := rules[i].Validate(); err != nil {
 			return Resource{}, fmt.Errorf("%w: rule %d: %v", ErrBadResource, i+1, err)
 		}
+		if in.Protocol != ProtocolHTTP && in.Protocol != ProtocolHTTPS &&
+			rules[i].Field != access.FieldCountry && rules[i].Field != access.FieldIP {
+			return Resource{}, fmt.Errorf("%w: %s resources can only apply country and client IP rules", ErrBadResource, in.Protocol)
+		}
 	}
 	resource := Resource{
-		Name:          strings.TrimSpace(in.Name),
-		Protocol:      in.Protocol,
-		Targets:       targets,
-		Strategy:      strategy,
-		ExitNodeID:    exitNodeID,
-		ListenPort:    in.ListenPort,
-		Domain:        domain,
-		Enabled:       true,
-		Identity:      in.Identity,
-		IdentityMode:  identityMode,
-		BlockExploits: in.BlockExploits,
-		WebSockets:    websockets,
-		Rules:         rules,
-		Notes:         strings.TrimSpace(in.Notes),
+		Name:             strings.TrimSpace(in.Name),
+		Protocol:         in.Protocol,
+		Targets:          targets,
+		Strategy:         strategy,
+		ExitNodeID:       exitNodeID,
+		ListenPort:       in.ListenPort,
+		Domain:           domain,
+		Enabled:          true,
+		Identity:         in.Identity,
+		IdentityMode:     identityMode,
+		BlockExploits:    in.BlockExploits,
+		BlockHighRiskIPs: in.BlockHighRiskIPs,
+		WebSockets:       websockets,
+		Rules:            rules,
+		Notes:            strings.TrimSpace(in.Notes),
 	}
 	proxyProtocol, err := NormaliseProxyProtocol(in.ProxyProtocol)
 	if err != nil {

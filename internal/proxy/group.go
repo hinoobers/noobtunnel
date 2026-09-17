@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/noobtunnel/noobtunnel/internal/access"
 )
 
 // group is one listening socket, shared by every resource routed through it.
@@ -265,11 +267,18 @@ func (g *group) serveTCP(ln net.Listener, dialTimeout time.Duration) {
 			continue
 		}
 		go func(conn net.Conn, r *resource) {
+			decision := g.connectionDecision(r, conn.RemoteAddr(), "")
+			if !decision.Allow {
+				g.observeConnection(r, conn.RemoteAddr(), "", false, decision.Reason)
+				_ = conn.Close()
+				return
+			}
 			upstream, chosen, err := dialCandidates(r, dialTimeout)
 			if err != nil {
 				_ = conn.Close()
 				return
 			}
+			g.observeConnection(r, conn.RemoteAddr(), "", true, "")
 			if r.spec.ProxyProtocol != ProxyProtocolNone {
 				if err := writeProxyHeader(upstream, r.spec.ProxyProtocol, conn.RemoteAddr(), upstream.RemoteAddr()); err != nil {
 					r.stat.setError(err)
@@ -313,11 +322,18 @@ func (g *group) serveTLSPassthrough(ln net.Listener, dialTimeout time.Duration) 
 				_ = conn.Close()
 				return
 			}
+			decision := g.connectionDecision(target, conn.RemoteAddr(), hello.ServerName)
+			if !decision.Allow {
+				g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, false, decision.Reason)
+				_ = conn.Close()
+				return
+			}
 			upstream, chosen, err := dialCandidates(target, dialTimeout)
 			if err != nil {
 				_ = conn.Close()
 				return
 			}
+			g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, true, "")
 			if target.spec.ProxyProtocol != ProxyProtocolNone {
 				if err := writeProxyHeader(upstream, target.spec.ProxyProtocol, conn.RemoteAddr(), upstream.RemoteAddr()); err != nil {
 					target.stat.setError(err)
@@ -336,6 +352,41 @@ func (g *group) serveTLSPassthrough(ln net.Listener, dialTimeout time.Duration) 
 			pipe(conn, upstream, &target.stat.set, &target.stat.targetFor(chosen.ID).set)
 		}(conn)
 	}
+}
+
+// connectionDecision applies the security controls available before any
+// application bytes are forwarded. Raw streams can reliably expose only the
+// client address and its IP API country; TLS passthrough also supplies SNI.
+func (g *group) connectionDecision(r *resource, remote net.Addr, host string) access.Decision {
+	ip := clientIP(remote.String())
+	if r.spec.BlockHighRiskIPs && g.manager.AbuseScoreOf != nil {
+		if score := g.manager.AbuseScoreOf(ip); score >= 80 {
+			return access.Decision{Allow: false, Reason: fmt.Sprintf("IP API abuse confidence is %d", score)}
+		}
+	}
+	country := ""
+	for _, rule := range r.spec.Rules {
+		if rule.Field == access.FieldCountry && g.manager.CountryOf != nil {
+			country = g.manager.CountryOf(ip)
+			break
+		}
+	}
+	return access.Evaluate(r.spec.Rules, access.Request{IP: ip, Country: country, Host: host})
+}
+
+func (g *group) observeConnection(r *resource, remote net.Addr, host string, allowed bool, reason string) {
+	if host == "" {
+		host = r.spec.Domain
+	}
+	ip := clientIP(remote.String())
+	country := ""
+	if g.manager.CountryOfFast != nil {
+		country = g.manager.CountryOfFast(ip)
+	}
+	g.manager.observe(RequestEvent{
+		ResourceID: r.spec.ID, Resource: r.spec.Name, Host: host, IP: ip, Country: country,
+		Protocol: string(r.spec.Protocol), Allowed: allowed, Reason: reason,
+	})
 }
 
 // pipe copies traffic between a client and a backend, counting bytes into every

@@ -177,6 +177,21 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		handler.ServeHTTP(w, r)
 		return
 	}
+	if res.spec.BlockHighRiskIPs && h.group.manager.AbuseScoreOf != nil {
+		if score := h.group.manager.AbuseScoreOf(clientIP(r.RemoteAddr)); score >= 80 {
+			h.group.manager.observe(RequestEvent{
+				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+				Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol),
+				Allowed: false, Reason: fmt.Sprintf("IP API abuse confidence is %d", score),
+				Status: http.StatusForbidden, Path: r.URL.Path,
+				DurationMs: time.Since(started).Milliseconds(),
+			})
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(h.group.manager.brand() + ": request blocked because the client IP is high risk\n"))
+			return
+		}
+	}
 	if res.spec.BlockExploits {
 		if reason := commonExploit(r); reason != "" {
 			h.group.manager.observe(RequestEvent{

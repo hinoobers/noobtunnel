@@ -208,6 +208,26 @@ func (a *API) CountryForDecision(ctx context.Context, addr netip.Addr) string {
 	return info.Country
 }
 
+// AbuseScoreForDecision returns the IP API's abuse confidence score. Security
+// gates wait briefly for a cold lookup; cached addresses return immediately.
+func (a *API) AbuseScoreForDecision(ctx context.Context, addr netip.Addr) int {
+	if !addr.IsValid() {
+		return 0
+	}
+	addr = addr.Unmap()
+	if hit, _, ok := a.cached(addr); ok {
+		return hit.AbuseScore
+	}
+	if !a.Configured() {
+		return 0
+	}
+	info, err := a.Lookup(ctx, addr)
+	if err != nil {
+		return 0
+	}
+	return info.AbuseScore
+}
+
 // warm looks an address up in the background, at most once at a time, and retries
 // with backoff while the API has no answer.
 func (a *API) warm(addr netip.Addr) {

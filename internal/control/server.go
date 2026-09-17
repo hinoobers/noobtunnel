@@ -1659,21 +1659,22 @@ func (s *Server) ResourceSpecs() []proxy.Spec {
 			})
 		}
 		specs = append(specs, proxy.Spec{
-			ID:            r.ID,
-			Name:          r.Name,
-			Protocol:      string(r.Protocol),
-			Targets:       targets,
-			Strategy:      string(r.Strategy),
-			BindAddr:      bind,
-			ListenPort:    r.EffectiveListenPort(),
-			Domain:        r.Domain,
-			Enabled:       r.Enabled && len(targets) > 0 && exitEnabled,
-			ProxyProtocol: r.ProxyProtocol,
-			Identity:      r.Identity,
-			IdentityMode:  r.EffectiveIdentityMode(),
-			BlockExploits: r.BlockExploits,
-			WebSockets:    r.AllowsWebSockets(),
-			Rules:         r.Rules,
+			ID:               r.ID,
+			Name:             r.Name,
+			Protocol:         string(r.Protocol),
+			Targets:          targets,
+			Strategy:         string(r.Strategy),
+			BindAddr:         bind,
+			ListenPort:       r.EffectiveListenPort(),
+			Domain:           r.Domain,
+			Enabled:          r.Enabled && len(targets) > 0 && exitEnabled,
+			ProxyProtocol:    r.ProxyProtocol,
+			Identity:         r.Identity,
+			IdentityMode:     r.EffectiveIdentityMode(),
+			BlockExploits:    r.BlockExploits,
+			BlockHighRiskIPs: r.BlockHighRiskIPs,
+			WebSockets:       r.AllowsWebSockets(),
+			Rules:            r.Rules,
 		})
 	}
 	return specs

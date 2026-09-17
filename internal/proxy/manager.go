@@ -89,6 +89,8 @@ type Spec struct {
 	IdentityMode string
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool
+	// BlockHighRiskIPs uses the configured IP API's abuse confidence score.
+	BlockHighRiskIPs bool
 	// WebSockets allows protocol upgrades (WebSockets) through an HTTP or HTTPS
 	// resource.
 	WebSockets bool
@@ -263,6 +265,9 @@ type Manager struct {
 	// already known and starts a lookup in the background. It is what the request
 	// log uses, so a slow lookup never holds up a request.
 	CountryOfFast func(addr netip.Addr) string
+	// AbuseScoreOf returns the configured IP API's abuse confidence score for a
+	// connection-level decision. Zero means either clean or unavailable.
+	AbuseScoreOf func(addr netip.Addr) int
 	// ACMEChallenge serves /.well-known/acme-challenge/ when ACME is enabled.
 	ACMEChallenge http.Handler
 	// ControlDomain publishes the control node's own UI on the shared HTTPS

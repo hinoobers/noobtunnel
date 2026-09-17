@@ -138,4 +138,9 @@ func (s *Server) wireCountryLookup(api *geoip.API) {
 		return api.CountryForDecision(ctx, addr)
 	}
 	s.proxies.CountryOfFast = func(addr netip.Addr) string { return api.Country(addr) }
+	s.proxies.AbuseScoreOf = func(addr netip.Addr) int {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return api.AbuseScoreForDecision(ctx, addr)
+	}
 }

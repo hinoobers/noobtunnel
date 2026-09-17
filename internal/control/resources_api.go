@@ -50,7 +50,8 @@ type ResourceView struct {
 	Identity     bool   `json:"identity"`
 	IdentityMode string `json:"identityMode,omitempty"`
 	// BlockExploits enables the resource's built-in common exploit filter.
-	BlockExploits bool `json:"blockExploits"`
+	BlockExploits    bool `json:"blockExploits"`
+	BlockHighRiskIPs bool `json:"blockHighRiskIps"`
 	// WebSockets says whether protocol upgrades pass through.
 	WebSockets bool   `json:"websockets"`
 	Active     int64  `json:"active"`
@@ -134,23 +135,24 @@ func (s *Server) resourceViews() []ResourceView {
 	out := make([]ResourceView, 0, len(resources))
 	for _, r := range resources {
 		view := ResourceView{
-			ID:            r.ID,
-			Name:          r.Name,
-			Protocol:      string(r.Protocol),
-			Targets:       []TargetView{},
-			Strategy:      string(r.Strategy),
-			ExitNodeID:    r.ExitNodeID,
-			ExitNodeName:  controlName,
-			ListenPort:    r.EffectiveListenPort(),
-			Domain:        r.Domain,
-			Enabled:       r.Enabled,
-			ProxyProtocol: r.ProxyProtocol,
-			Rules:         r.Rules,
-			Identity:      r.Identity,
-			IdentityMode:  r.EffectiveIdentityMode(),
-			BlockExploits: r.BlockExploits,
-			WebSockets:    r.AllowsWebSockets(),
-			CreatedAt:     r.CreatedAt.UTC().Format(timeLayout),
+			ID:               r.ID,
+			Name:             r.Name,
+			Protocol:         string(r.Protocol),
+			Targets:          []TargetView{},
+			Strategy:         string(r.Strategy),
+			ExitNodeID:       r.ExitNodeID,
+			ExitNodeName:     controlName,
+			ListenPort:       r.EffectiveListenPort(),
+			Domain:           r.Domain,
+			Enabled:          r.Enabled,
+			ProxyProtocol:    r.ProxyProtocol,
+			Rules:            r.Rules,
+			Identity:         r.Identity,
+			IdentityMode:     r.EffectiveIdentityMode(),
+			BlockExploits:    r.BlockExploits,
+			BlockHighRiskIPs: r.BlockHighRiskIPs,
+			WebSockets:       r.AllowsWebSockets(),
+			CreatedAt:        r.CreatedAt.UTC().Format(timeLayout),
 		}
 		if node, ok := nodes[r.ExitNodeID]; ok && node.Kind != store.ExitNodeControl {
 			view.ExitNodeName = node.Name
@@ -433,19 +435,20 @@ func (s *Server) resourceView(id uint32) ResourceView {
 
 // resourcePayload is the wire form of a resource.
 type resourcePayload struct {
-	Name          string          `json:"name"`
-	Protocol      string          `json:"protocol"`
-	Targets       []targetPayload `json:"targets"`
-	Strategy      string          `json:"strategy"`
-	ExitNodeID    string          `json:"exitNodeId"`
-	ListenPort    int             `json:"listenPort"`
-	Domain        string          `json:"domain"`
-	Enabled       *bool           `json:"enabled"`
-	ProxyProtocol string          `json:"proxyProtocol"`
-	Rules         []access.Rule   `json:"rules"`
-	Identity      bool            `json:"identity"`
-	IdentityMode  string          `json:"identityMode"`
-	BlockExploits bool            `json:"blockExploits"`
+	Name             string          `json:"name"`
+	Protocol         string          `json:"protocol"`
+	Targets          []targetPayload `json:"targets"`
+	Strategy         string          `json:"strategy"`
+	ExitNodeID       string          `json:"exitNodeId"`
+	ListenPort       int             `json:"listenPort"`
+	Domain           string          `json:"domain"`
+	Enabled          *bool           `json:"enabled"`
+	ProxyProtocol    string          `json:"proxyProtocol"`
+	Rules            []access.Rule   `json:"rules"`
+	Identity         bool            `json:"identity"`
+	IdentityMode     string          `json:"identityMode"`
+	BlockExploits    bool            `json:"blockExploits"`
+	BlockHighRiskIPs bool            `json:"blockHighRiskIps"`
 	// WebSockets is a pointer: omitting it keeps the default, which allows
 	// protocol upgrades.
 	WebSockets *bool `json:"websockets"`
@@ -470,20 +473,21 @@ func (p resourcePayload) input() store.ResourceInput {
 		})
 	}
 	return store.ResourceInput{
-		Name:          p.Name,
-		Protocol:      store.Protocol(strings.ToLower(strings.TrimSpace(p.Protocol))),
-		Targets:       targets,
-		Strategy:      p.Strategy,
-		ExitNodeID:    strings.TrimSpace(p.ExitNodeID),
-		ListenPort:    p.ListenPort,
-		Domain:        p.Domain,
-		Enabled:       p.Enabled,
-		ProxyProtocol: p.ProxyProtocol,
-		Rules:         p.Rules,
-		Identity:      p.Identity,
-		IdentityMode:  p.IdentityMode,
-		BlockExploits: p.BlockExploits,
-		WebSockets:    p.WebSockets,
+		Name:             p.Name,
+		Protocol:         store.Protocol(strings.ToLower(strings.TrimSpace(p.Protocol))),
+		Targets:          targets,
+		Strategy:         p.Strategy,
+		ExitNodeID:       strings.TrimSpace(p.ExitNodeID),
+		ListenPort:       p.ListenPort,
+		Domain:           p.Domain,
+		Enabled:          p.Enabled,
+		ProxyProtocol:    p.ProxyProtocol,
+		Rules:            p.Rules,
+		Identity:         p.Identity,
+		IdentityMode:     p.IdentityMode,
+		BlockExploits:    p.BlockExploits,
+		BlockHighRiskIPs: p.BlockHighRiskIPs,
+		WebSockets:       p.WebSockets,
 	}
 }
 

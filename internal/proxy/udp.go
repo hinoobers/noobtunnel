@@ -13,6 +13,7 @@ const udpIdleTimeout = 60 * time.Second
 // find their way back to the right place.
 func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 	sessions := map[string]*udpSession{}
+	denied := map[string]time.Time{}
 	var mu sync.Mutex
 	done := make(chan struct{})
 	defer func() {
@@ -41,6 +42,11 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 					delete(sessions, key)
 				}
 			}
+			for key, at := range denied {
+				if now.Sub(at) > udpIdleTimeout {
+					delete(denied, key)
+				}
+			}
 			mu.Unlock()
 		}
 	}()
@@ -61,7 +67,29 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 		}
 		key := clientAddr.String()
 		mu.Lock()
+		knownSession, exists := sessions[key]
+		if exists && knownSession.isClosed() {
+			delete(sessions, key)
+			exists = false
+		}
+		deniedAt, wasDenied := denied[key]
+		mu.Unlock()
+		if wasDenied && time.Since(deniedAt) <= udpIdleTimeout {
+			continue
+		}
+		if !exists {
+			decision := g.connectionDecision(target, clientAddr, "")
+			if !decision.Allow {
+				mu.Lock()
+				denied[key] = time.Now()
+				mu.Unlock()
+				g.observeConnection(target, clientAddr, "", false, decision.Reason)
+				continue
+			}
+		}
+		mu.Lock()
 		session, exists := sessions[key]
+		created := false
 		if exists && session.isClosed() {
 			delete(sessions, key)
 			exists = false
@@ -90,6 +118,7 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 				target:   target.stat.targetFor(chosen.ID),
 			}
 			sessions[key] = session
+			created = true
 			target.stat.set.active.Add(1)
 			target.stat.set.total.Add(1)
 			session.target.set.active.Add(1)
@@ -97,6 +126,9 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 			go session.readLoop()
 		}
 		mu.Unlock()
+		if created {
+			g.observeConnection(target, clientAddr, "", true, "")
+		}
 
 		session.touch()
 		// Write consumes the datagram synchronously; reuse the receive buffer.
