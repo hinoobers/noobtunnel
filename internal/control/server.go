@@ -783,13 +783,17 @@ func (s *Server) peersFor(selfID uint32) ([]proto.Peer, error) {
 		if err != nil {
 			return nil, err
 		}
+		endpoint := ""
+		if settings.DirectPaths {
+			endpoint = endpoints[agent.ID]
+		}
 		peer := proto.Peer{
 			ID:           agent.ID,
 			Name:         agent.Name,
 			Address:      agent.Address,
 			PublicKey:    agent.PublicKey,
 			Advertise:    agent.Advertise,
-			Endpoint:     endpoints[agent.ID],
+			Endpoint:     endpoint,
 			Online:       online,
 			PresharedKey: psk,
 			Direct:       settings.DirectPaths && endpoints[agent.ID] != "",
@@ -1024,10 +1028,18 @@ func (s *Server) discover(ctx context.Context) {
 	s.mu.Unlock()
 
 	if changed {
-		if err := s.syncHub(ctx); err != nil {
-			s.log.Debug("hub resync after endpoint discovery failed", "error", err)
+		// WireGuard has already authenticated the packet and roamed this peer to
+		// the endpoint Status returned. Re-applying the entire hub configuration
+		// here is redundant and, behind a NAT that rotates UDP source ports, can
+		// happen every few seconds while active TCP streams are using the device.
+		// Keep the learned endpoint for a future real Sync, and only push it to
+		// agents when direct paths are enabled.
+		// Refresh topology diagnostics too; unlike programming the device this is
+		// an in-memory calculation, and keeps conflicting advertisements visible.
+		_, _ = s.hubConfig()
+		if settings.DirectPaths {
+			s.markDirty()
 		}
-		s.markDirty()
 		s.broadcastState()
 		s.log.Info("agent endpoints updated")
 	}

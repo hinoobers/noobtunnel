@@ -3,6 +3,7 @@ package control
 import (
 	"net/http"
 
+	"github.com/noobtunnel/noobtunnel/internal/proto"
 	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
@@ -49,6 +50,17 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.Sync(r.Context()); err != nil {
 			s.log.Warn("failed to apply settings to the hub", "error", err)
+		}
+		// These values are part of the enrollment welcome rather than an ordinary
+		// peer update. Reconnect live agents so an MTU fix takes effect everywhere
+		// immediately instead of waiting for their next process restart.
+		if body.MTU != existing.MTU || body.KeepaliveSec != existing.KeepaliveSec ||
+			body.DirectPaths != existing.DirectPaths {
+			for _, id := range s.ConnectedAgentIDs() {
+				if err := s.Command(id, proto.ActionReconnect); err != nil {
+					s.log.Debug("could not reconnect agent after mesh settings changed", "agent", id, "error", err)
+				}
+			}
 		}
 		s.recordEvent("settings", "mesh settings updated")
 		s.broadcastState()

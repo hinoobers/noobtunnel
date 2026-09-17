@@ -25,7 +25,11 @@ func DefaultSettings() Settings {
 		MeshName:  "noobtunnel",
 		BrandName: "noobtunnel",
 		MeshCIDR:  "10.77.0.0/16",
-		MTU:       1420,
+		// 1280 is the IPv6 minimum and leaves enough room for WireGuard even on
+		// cloud/NAT paths whose real MTU is below Ethernet's usual 1500. A larger
+		// default silently black-holes full TCP segments on those paths, which
+		// appears as random multi-second backend latency while TCP retransmits.
+		MTU: 1280,
 		// Fifteen seconds rather than the usual twenty-five: the agent's UDP
 		// mapping is what the control node's packets travel back through, and a
 		// mapping that expires between keepalives leaves the next packet waiting
