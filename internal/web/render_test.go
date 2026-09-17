@@ -262,13 +262,17 @@ renderRequests(node, [{ time: new Date().toISOString(), host: 'a.example.com', i
 // decision, and the decision said in the row colour rather than in a pill.
 const requestsNode = document.createElement('div');
 renderRequests(requestsNode, [
-  { time: new Date().toISOString(), host: 'a.example.com', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' },
+  { time: new Date().toISOString(), host: 'a.example.com', path: '/checkip', protocol: 'https', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' },
   { time: new Date().toISOString(), host: 'b.example.com', ip: '203.0.113.2', country: 'RU', allowed: false, reason: 'country rule', resource: 'web' },
 ]);
 const requestsTable = requestsNode.childNodes[0];
 const headers = textsOf(requestsTable.childNodes[0]).join(',');
-if (headers !== 'Timestamp,Took,Host,Client,Country,Resource,Decision') {
+if (headers !== 'Timestamp,Took,Request,Client,Country,Resource,Decision') {
   throw new Error('the Requests table headers are wrong: ' + headers);
+}
+const requestedAddress = textsOf(requestsTable.childNodes[1].childNodes[0].childNodes[2]).join('');
+if (requestedAddress !== 'a.example.com/checkip') {
+  throw new Error('the Requests table should show the hostname and HTTP path: ' + requestedAddress);
 }
 const rowClasses = requestsTable.childNodes[1].childNodes.map((row) => row.getAttribute('class'));
 if (rowClasses[0] !== 'is-allowed' || rowClasses[1] !== 'is-blocked') {

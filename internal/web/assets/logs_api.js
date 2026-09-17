@@ -10,7 +10,7 @@ const requestFilters = {
 const requestColumns = [
   { key: 'time', label: 'Timestamp', sort: true },
   { key: 'durationMs', label: 'Took', sort: true, title: 'Server-side proxy total; hover the phase below each value for details.' },
-  { key: 'host', label: 'Host', sort: true, filter: true },
+  { key: 'host', label: 'Request', sort: true, filter: true },
   { key: 'client', label: 'Client', sort: true, filter: true },
   { key: 'country', label: 'Country', sort: true, filter: true },
   { key: 'resource', label: 'Resource', sort: true, filter: true },
@@ -102,7 +102,7 @@ function renderRequests(node, recent) {
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
       h('td', { class: 'mono tiny' }, fmtMs(entry.durationMs), timingBreakdown(entry)),
-      h('td', { class: 'mono tiny', title: (entry.path || '/') + (entry.status ? ' · HTTP ' + entry.status : '') }, entry.host || '—'),
+      h('td', { class: 'mono tiny', title: entry.status ? 'HTTP ' + entry.status : '' }, requestAddress(entry)),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
       h('td', null, countryCell(entry)),
       h('td', { class: 'muted tiny', title: entry.target ? 'sent to ' + entry.target : '' }, entry.resource || '—'),
@@ -128,8 +128,21 @@ function requestValue(entry, key) {
   case 'client': return entry.ip || '—';
   case 'country': return entry.country ? String(entry.country).toUpperCase() : 'unknown';
   case 'decision': return entry.allowed ? 'allowed' : 'blocked';
+  case 'host': return requestAddress(entry);
   default: return entry[key] || '—';
   }
+}
+
+// requestAddress is the thing the client actually requested. HTTP resources
+// include their path; stream protocols have no URL path and retain the host or
+// address the logger knows about.
+function requestAddress(entry) {
+  const host = entry.host || '—';
+  const protocol = String(entry.protocol || '').toLowerCase();
+  if ((protocol === 'http' || protocol === 'https') && entry.path && entry.path !== '/') {
+    return host + (String(entry.path).startsWith('/') ? entry.path : '/' + entry.path);
+  }
+  return host;
 }
 
 function sortAndFilterRequests(recent) {
