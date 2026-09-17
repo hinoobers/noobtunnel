@@ -1039,9 +1039,14 @@ func (s *Server) discover(ctx context.Context) {
 		_, _ = s.hubConfig()
 		if settings.DirectPaths {
 			s.markDirty()
+			s.broadcastState()
+			s.log.Info("agent endpoints updated")
+		} else {
+			// With relay-only routing, a roaming UDP source port is kernel state,
+			// not UI state. Avoid waking every SSE client and writing an info log
+			// every few seconds for NAT churn nobody can act on.
+			s.log.Debug("agent endpoint learned", "directPaths", false)
 		}
-		s.broadcastState()
-		s.log.Info("agent endpoints updated")
 	}
 }
 
