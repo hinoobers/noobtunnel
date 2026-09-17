@@ -1,20 +1,26 @@
 package control
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/proxy"
+	bolt "go.etcd.io/bbolt"
 )
 
 // requestLogSize bounds how many individual requests are kept.
-const requestLogSize = 400
+const requestLogSize = 10_000
+
+var requestBucket = []byte("requests")
 
 // RequestEntry is one logged request for the Logs tab.
 type RequestEntry struct {
@@ -81,14 +87,14 @@ type requestLog struct {
 	// average stays meaningful.
 	durationSumMs int64
 	timed         int64
-	path          string
+	db            *bolt.DB
+	dbCount       int
+	pending       []RequestEntry
 	dirty         chan struct{}
 	stop          chan struct{}
 	done          chan struct{}
 	closeOnce     sync.Once
 	lastSaveError error
-	generation    uint64
-	saved         uint64
 }
 
 type requestLogDisk struct {
@@ -110,13 +116,158 @@ func newRequestLog(paths ...string) *requestLog {
 	if len(paths) == 0 || paths[0] == "" {
 		return l
 	}
-	l.path = paths[0]
-	l.load()
+	if err := l.open(paths[0]); err != nil {
+		l.lastSaveError = err
+		return l
+	}
 	l.dirty = make(chan struct{}, 1)
 	l.stop = make(chan struct{})
 	l.done = make(chan struct{})
 	go l.persistLoop()
 	return l
+}
+
+func (l *requestLog) open(path string) error {
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		return fmt.Errorf("open request database: %w", err)
+	}
+	l.db = db
+	if err := db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(requestBucket)
+		return err
+	}); err != nil {
+		_ = db.Close()
+		l.db = nil
+		return fmt.Errorf("prepare request database: %w", err)
+	}
+	legacy := strings.TrimSuffix(path, filepath.Ext(path)) + ".json"
+	if err := l.migrateJSON(legacy); err != nil {
+		_ = db.Close()
+		l.db = nil
+		return err
+	}
+	if err := l.loadDatabase(); err != nil {
+		_ = db.Close()
+		l.db = nil
+		return err
+	}
+	return nil
+}
+
+// migrateJSON imports the one-file store used by the first persistent request
+// log release. A successful migration keeps a recoverable .migrated copy.
+func (l *requestLog) migrateJSON(path string) error {
+	empty := false
+	if err := l.db.View(func(tx *bolt.Tx) error {
+		empty = tx.Bucket(requestBucket).Stats().KeyN == 0
+		return nil
+	}); err != nil || !empty {
+		return err
+	}
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read legacy request log: %w", err)
+	}
+	var disk requestLogDisk
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		return fmt.Errorf("parse legacy request log: %w", err)
+	}
+	entries := disk.Entries
+	if len(entries) > requestLogSize {
+		entries = entries[:requestLogSize]
+	}
+	if err := l.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(requestBucket)
+		// The old file is newest-first; insert oldest-first so Bolt's sequence
+		// order remains chronological.
+		for index := len(entries) - 1; index >= 0; index-- {
+			value, err := json.Marshal(entries[index])
+			if err != nil {
+				return err
+			}
+			sequence, err := bucket.NextSequence()
+			if err != nil {
+				return err
+			}
+			var key [8]byte
+			binary.BigEndian.PutUint64(key[:], sequence)
+			if err := bucket.Put(key[:], value); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("migrate request log: %w", err)
+	}
+	_ = os.Rename(path, path+".migrated")
+	return nil
+}
+
+func (l *requestLog) loadDatabase() error {
+	var entries []RequestEntry
+	err := l.db.View(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(requestBucket)
+		l.dbCount = bucket.Stats().KeyN
+		cursor := bucket.Cursor()
+		for _, value := cursor.Last(); value != nil && len(entries) < requestLogSize; _, value = cursor.Prev() {
+			var entry RequestEntry
+			if err := json.Unmarshal(value, &entry); err != nil {
+				return fmt.Errorf("decode request: %w", err)
+			}
+			entries = append(entries, entry)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("load request database: %w", err)
+	}
+	// Learn every available answer first, then fill blank rows from the same IP.
+	for _, entry := range entries {
+		if entry.Country != "" && entry.Country != "local" && entry.IP != "" {
+			l.countries[entry.IP] = entry.Country
+		}
+	}
+	for index := range entries {
+		entry := &entries[index]
+		if entry.Country == "" {
+			if isPrivateClient(entry.IP) {
+				entry.Country = "local"
+			} else {
+				entry.Country = l.countries[entry.IP]
+			}
+		}
+		l.restoreSummary(*entry)
+	}
+	l.entries = entries
+	return nil
+}
+
+func (l *requestLog) restoreSummary(entry RequestEntry) {
+	l.summary.Total++
+	if entry.Allowed {
+		l.summary.Allowed++
+	} else {
+		l.summary.Blocked++
+	}
+	if entry.DurationMs > 0 || entry.Status > 0 {
+		l.durationSumMs += entry.DurationMs
+		l.timed++
+	}
+	country := entry.Country
+	if country == "" {
+		country = "unknown"
+		l.summary.Unknown++
+	}
+	bump(l.byCountry, country, entry.Allowed)
+	host := entry.Host
+	if host == "" {
+		host = "(no host)"
+	}
+	bump(l.byHost, host, entry.Allowed)
 }
 
 // record adds one request.
@@ -198,7 +349,9 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		host = "(no host)"
 	}
 	bump(l.byHost, host, entry.Allowed)
-	l.generation++
+	if l.db != nil {
+		l.pending = append(l.pending, entry)
+	}
 	l.mu.Unlock()
 	l.markDirty()
 }
@@ -237,65 +390,54 @@ func (l *requestLog) persistLoop() {
 	}
 }
 
-func (l *requestLog) load() {
-	raw, err := os.ReadFile(l.path)
-	if os.IsNotExist(err) {
-		return
-	}
-	if err != nil {
-		l.lastSaveError = err
-		return
-	}
-	var disk requestLogDisk
-	if err := json.Unmarshal(raw, &disk); err != nil {
-		l.lastSaveError = fmt.Errorf("parse request log: %w", err)
-		return
-	}
-	l.entries = disk.Entries
-	if len(l.entries) > requestLogSize {
-		l.entries = l.entries[:requestLogSize]
-	}
-	if disk.ByCountry != nil {
-		l.byCountry = disk.ByCountry
-	}
-	if disk.ByHost != nil {
-		l.byHost = disk.ByHost
-	}
-	if disk.Countries != nil {
-		l.countries = disk.Countries
-	}
-	l.summary = disk.Summary
-	l.durationSumMs = disk.DurationSumMs
-	l.timed = disk.Timed
-}
-
 func (l *requestLog) save() {
-	if l.path == "" {
+	if l.db == nil {
 		return
 	}
 	l.mu.Lock()
-	if l.generation == l.saved {
+	if len(l.pending) == 0 {
 		l.mu.Unlock()
 		return
 	}
-	generation := l.generation
-	disk := requestLogDisk{
-		Entries: append([]RequestEntry(nil), l.entries...), ByCountry: l.byCountry, ByHost: l.byHost,
-		Countries: l.countries, Summary: l.summary, DurationSumMs: l.durationSumMs, Timed: l.timed,
-	}
-	raw, err := json.Marshal(disk)
+	pending := append([]RequestEntry(nil), l.pending...)
+	count := l.dbCount
 	l.mu.Unlock()
-	if err == nil {
-		tmp := l.path + ".tmp"
-		err = os.WriteFile(tmp, raw, 0o600)
-		if err == nil {
-			err = os.Rename(tmp, l.path)
+	err := l.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(requestBucket)
+		for _, entry := range pending {
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				return err
+			}
+			sequence, err := bucket.NextSequence()
+			if err != nil {
+				return err
+			}
+			var key [8]byte
+			binary.BigEndian.PutUint64(key[:], sequence)
+			if err := bucket.Put(key[:], raw); err != nil {
+				return err
+			}
+			count++
 		}
-	}
+		cursor := bucket.Cursor()
+		for count > requestLogSize {
+			key, _ := cursor.First()
+			if key == nil {
+				break
+			}
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+			count--
+		}
+		return nil
+	})
 	l.mu.Lock()
 	l.lastSaveError = err
-	if err == nil && l.saved < generation {
-		l.saved = generation
+	if err == nil {
+		l.pending = l.pending[len(pending):]
+		l.dbCount = count
 	}
 	l.mu.Unlock()
 }
@@ -307,6 +449,11 @@ func (l *requestLog) close() {
 	l.closeOnce.Do(func() {
 		close(l.stop)
 		<-l.done
+		if err := l.db.Close(); err != nil {
+			l.mu.Lock()
+			l.lastSaveError = err
+			l.mu.Unlock()
+		}
 	})
 }
 

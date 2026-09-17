@@ -267,18 +267,18 @@ renderRequests(requestsNode, [
 ]);
 const requestsTable = requestsNode.childNodes[0];
 const headers = textsOf(requestsTable.childNodes[0]).join(',');
-if (headers !== 'Timestamp,Took,Request,Client,Country,Resource,Decision') {
+if (headers !== 'Timestamp,Took,Host,Path,Client,Country,Resource,Decision') {
   throw new Error('the Requests table headers are wrong: ' + headers);
 }
-const requestedAddress = textsOf(requestsTable.childNodes[1].childNodes[0].childNodes[2]).join('');
-if (requestedAddress !== 'a.example.com/checkip') {
-  throw new Error('the Requests table should show the hostname and HTTP path: ' + requestedAddress);
+const requestedPath = textsOf(requestsTable.childNodes[1].childNodes[0].childNodes[3]).join('');
+if (requestedPath !== '/checkip') {
+  throw new Error('the Requests table should show the HTTP path separately: ' + requestedPath);
 }
 const rowClasses = requestsTable.childNodes[1].childNodes.map((row) => row.getAttribute('class'));
 if (rowClasses[0] !== 'is-allowed' || rowClasses[1] !== 'is-blocked') {
   throw new Error('each request row should carry its decision: ' + rowClasses.join(', '));
 }
-const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[6]);
+const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[7]);
 const decisionText = decisionCells.map((cell) => textsOf(cell).join(''));
 if (decisionText[0] !== 'allowed' || decisionText[1] !== 'blocked') {
   throw new Error('the decision should be plain text: ' + decisionText.join(', '));
@@ -287,7 +287,7 @@ if (decisionCells.some((cell) => cell.childNodes.some((kid) =>
   typeof kid.getAttribute === 'function' && (kid.getAttribute('class') || '').includes('chip')))) {
   throw new Error('the decision cell should not hold a pill any more');
 }
-const countryChip = requestsTable.childNodes[1].childNodes[0].childNodes[4].childNodes[0];
+const countryChip = requestsTable.childNodes[1].childNodes[0].childNodes[5].childNodes[0];
 if (!countryChip.getAttribute('title') || countryChip.getAttribute('title') === 'EE') {
   throw new Error('a country code should reveal its country name on hover');
 }

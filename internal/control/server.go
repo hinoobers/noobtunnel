@@ -244,7 +244,7 @@ func New(opts Options) (*Server, error) {
 		return nil, err
 	}
 	// The request log is written by the proxy manager and read by the API.
-	requestEvents := newRequestLog(filepath.Join(opts.StateDir, "requests.json"))
+	requestEvents := newRequestLog(filepath.Join(opts.StateDir, "requests.db"))
 	// Everything that goes wrong and explains itself goes here, for Logs → Errors.
 	errorEvents := newErrorLog()
 	server := &Server{

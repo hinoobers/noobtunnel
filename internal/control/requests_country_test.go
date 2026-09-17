@@ -65,7 +65,7 @@ func TestKnownAddressNeverFallsBackToUnknown(t *testing.T) {
 }
 
 func TestRequestLogSurvivesRestart(t *testing.T) {
-	path := t.TempDir() + "/requests.json"
+	path := t.TempDir() + "/requests.db"
 	first := newRequestLog(path)
 	first.record(proxy.RequestEvent{
 		Time: time.Now(), IPText: "203.0.113.9", Country: "EE", Host: "app.example.com",
