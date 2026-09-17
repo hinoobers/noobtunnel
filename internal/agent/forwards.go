@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,15 @@ import (
 // forwardTimeout bounds reaching the loopback service behind a forward.
 const forwardTimeout = 5 * time.Second
 
+// udpForwardIdleTimeout forgets a UDP client's return path once it has been
+// quiet. A fresh datagram recreates it immediately.
+const udpForwardIdleTimeout = 60 * time.Second
+
+type forwardKey struct {
+	network string
+	port    int
+}
+
 // forwarder carries one loopback service for the control node: it listens on this
 // agent's own mesh address and passes connections to a service that only listens
 // on this machine's loopback.
@@ -23,9 +33,10 @@ const forwardTimeout = 5 * time.Second
 // node can never reach `127.0.0.1:3306` on an agent: it would reach its own. The
 // agent is the machine that can, which is what these forwards are for.
 type forwarder struct {
-	agent  *Agent
-	target string
-	port   int
+	agent   *Agent
+	target  string
+	port    int
+	network string
 
 	mu   sync.Mutex
 	ln   net.Listener
@@ -51,16 +62,21 @@ func (a *Agent) syncForwards(ctx context.Context) {
 		return
 	}
 	current := a.forwards
-	next := map[int]*forwarder{}
+	next := map[forwardKey]*forwarder{}
 	for _, want := range forwards {
 		if want.Port <= 0 || want.Port > 65535 || want.Target == "" {
 			continue
 		}
-		if existing, ok := current[want.Port]; ok && existing.target == want.Target {
-			next[want.Port] = existing
+		network := strings.ToLower(strings.TrimSpace(want.Protocol))
+		if network != "udp" {
+			network = "tcp"
+		}
+		key := forwardKey{network: network, port: want.Port}
+		if existing, ok := current[key]; ok && existing.target == want.Target {
+			next[key] = existing
 			continue
 		}
-		next[want.Port] = &forwarder{agent: a, target: want.Target, port: want.Port, done: make(chan struct{})}
+		next[key] = &forwarder{agent: a, target: want.Target, port: want.Port, network: network, done: make(chan struct{})}
 	}
 	a.forwards = next
 	a.mu.Unlock()
@@ -70,33 +86,33 @@ func (a *Agent) syncForwards(ctx context.Context) {
 			f.stop()
 		}
 	}
-	for port, f := range next {
-		if current[port] == f {
+	for key, f := range next {
+		if current[key] == f {
 			continue
 		}
 		if err := f.start(ctx, mesh); err != nil {
 			// Not carried, so a later pass tries again - the address may only need
 			// to come up first.
 			a.mu.Lock()
-			if a.forwards[port] == f {
-				delete(a.forwards, port)
+			if a.forwards[key] == f {
+				delete(a.forwards, key)
 			}
 			if a.forwardErrors == nil {
-				a.forwardErrors = map[int]string{}
+				a.forwardErrors = map[forwardKey]string{}
 			}
-			changed := a.forwardErrors[port] != err.Error()
-			a.forwardErrors[port] = err.Error()
+			changed := a.forwardErrors[key] != err.Error()
+			a.forwardErrors[key] = err.Error()
 			a.mu.Unlock()
 			if changed {
-				a.log.Warn("could not carry a loopback service", "port", port, "target", f.target, "error", err)
+				a.log.Warn("could not carry a loopback service", "protocol", f.network, "port", f.port, "target", f.target, "error", err)
 			}
 			continue
 		}
 		a.mu.Lock()
-		delete(a.forwardErrors, port)
+		delete(a.forwardErrors, key)
 		a.mu.Unlock()
 		a.log.Info("carrying a loopback service for the control node",
-			"listen", net.JoinHostPort(mesh.String(), strconv.Itoa(port)), "target", f.target)
+			"protocol", f.network, "listen", net.JoinHostPort(mesh.String(), strconv.Itoa(f.port)), "target", f.target)
 	}
 }
 
@@ -104,6 +120,17 @@ func (a *Agent) syncForwards(ctx context.Context) {
 // the control node can reach it.
 func (f *forwarder) start(ctx context.Context, mesh netip.Addr) error {
 	address := net.JoinHostPort(mesh.String(), strconv.Itoa(f.port))
+	if f.network == "udp" {
+		pc, err := net.ListenPacket("udp", address)
+		if err != nil {
+			return err
+		}
+		f.mu.Lock()
+		f.pc = pc
+		f.mu.Unlock()
+		go f.servePackets(ctx, pc)
+		return nil
+	}
 	ln, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
@@ -113,6 +140,115 @@ func (f *forwarder) start(ctx context.Context, mesh netip.Addr) error {
 	f.mu.Unlock()
 	go f.serve(ctx, ln)
 	return nil
+}
+
+// servePackets keeps one connected loopback socket per mesh-side client. The
+// control node already uses one source socket per public UDP client, so this
+// second mapping preserves replies and concurrent game sessions end to end.
+func (f *forwarder) servePackets(ctx context.Context, pc net.PacketConn) {
+	type session struct {
+		client net.Addr
+		conn   net.Conn
+		mu     sync.Mutex
+		last   time.Time
+	}
+	touch := func(s *session) {
+		s.mu.Lock()
+		s.last = time.Now()
+		s.mu.Unlock()
+	}
+	lastSeen := func(s *session) time.Time {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.last
+	}
+
+	sessions := map[string]*session{}
+	var sessionsMu sync.Mutex
+	done := make(chan struct{})
+	defer func() {
+		close(done)
+		sessionsMu.Lock()
+		defer sessionsMu.Unlock()
+		for _, s := range sessions {
+			_ = s.conn.Close()
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				_ = pc.Close()
+				return
+			case <-f.done:
+				return
+			case <-done:
+				return
+			case now := <-ticker.C:
+				sessionsMu.Lock()
+				for key, s := range sessions {
+					if now.Sub(lastSeen(s)) > udpForwardIdleTimeout {
+						_ = s.conn.Close()
+						delete(sessions, key)
+					}
+				}
+				sessionsMu.Unlock()
+			}
+		}
+	}()
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, client, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		key := client.String()
+		sessionsMu.Lock()
+		s := sessions[key]
+		if s == nil {
+			conn, err := net.DialTimeout("udp", f.target, forwardTimeout)
+			if err != nil {
+				sessionsMu.Unlock()
+				f.agent.log.Debug("forwarded UDP service is not reachable", "target", f.target, "error", err)
+				continue
+			}
+			s = &session{client: client, conn: conn, last: time.Now()}
+			sessions[key] = s
+			go func(key string, s *session) {
+				reply := make([]byte, 64*1024)
+				for {
+					n, err := s.conn.Read(reply)
+					if err != nil {
+						break
+					}
+					if _, err := pc.WriteTo(reply[:n], s.client); err != nil {
+						break
+					}
+					touch(s)
+				}
+				sessionsMu.Lock()
+				if sessions[key] == s {
+					delete(sessions, key)
+				}
+				sessionsMu.Unlock()
+				_ = s.conn.Close()
+			}(key, s)
+		}
+		sessionsMu.Unlock()
+		touch(s)
+		if _, err := s.conn.Write(buf[:n]); err != nil {
+			sessionsMu.Lock()
+			if sessions[key] == s {
+				delete(sessions, key)
+			}
+			sessionsMu.Unlock()
+			_ = s.conn.Close()
+		}
+	}
 }
 
 func (f *forwarder) serve(ctx context.Context, ln net.Listener) {

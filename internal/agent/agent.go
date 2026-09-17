@@ -99,10 +99,10 @@ type Agent struct {
 
 	mu       sync.Mutex
 	session  *sessionState
-	forwards map[int]*forwarder
+	forwards map[forwardKey]*forwarder
 	// forwardErrors remembers why a forward is not running, so a retry that fails
 	// the same way does not repeat the warning.
-	forwardErrors map[int]string
+	forwardErrors map[forwardKey]string
 	direct        map[uint32]bool
 	candidate     map[uint32]time.Time
 	lastApplied   string

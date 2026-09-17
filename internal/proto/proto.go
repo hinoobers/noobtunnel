@@ -146,6 +146,9 @@ type Peers struct {
 type Forward struct {
 	Port   int    `json:"port"`
 	Target string `json:"target"`
+	// Protocol is tcp or udp. Empty means tcp for compatibility with agents
+	// and control nodes released before UDP loopback carrying existed.
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // Ping asks the agent to answer with a Pong.

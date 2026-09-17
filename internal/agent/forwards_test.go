@@ -78,7 +78,7 @@ func TestAForwardIsRetriedOnceTheAddressExists(t *testing.T) {
 	a.setForwards([]proto.Forward{{Port: port, Target: service.Addr().String()}})
 	a.syncForwards(context.Background())
 	a.mu.Lock()
-	_, carried := a.forwards[port]
+	_, carried := a.forwards[forwardKey{network: "tcp", port: port}]
 	a.mu.Unlock()
 	if carried {
 		t.Fatal("binding an address this machine does not have should fail")
@@ -90,7 +90,7 @@ func TestAForwardIsRetriedOnceTheAddressExists(t *testing.T) {
 	a.mu.Unlock()
 	a.syncForwards(context.Background())
 	a.mu.Lock()
-	f, carried := a.forwards[port]
+	f, carried := a.forwards[forwardKey{network: "tcp", port: port}]
 	a.mu.Unlock()
 	if !carried {
 		t.Fatal("the forward should be retried once the address exists")
@@ -171,10 +171,11 @@ func TestLoopbackServiceIsCarriedOnTheMeshAddress(t *testing.T) {
 	}
 
 	// The same forward is kept, not restarted, when the control node repeats it.
-	previous := a.forwards[port]
+	key := forwardKey{network: "tcp", port: port}
+	previous := a.forwards[key]
 	a.setForwards([]proto.Forward{{Port: port, Target: service.Addr().String()}})
 	a.syncForwards(context.Background())
-	if a.forwards[port] != previous {
+	if a.forwards[key] != previous {
 		t.Fatal("an unchanged forward should keep its listener")
 	}
 

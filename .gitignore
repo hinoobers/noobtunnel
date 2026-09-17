@@ -9,6 +9,7 @@
 .DS_Store
 Thumbs.db
 *.swp
+noobtunnel.exe
 
 # Operator SSH credentials are local-only and must never enter the repository.
 sshkeys/

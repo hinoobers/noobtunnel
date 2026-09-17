@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/netip"
 	"sort"
+	"strings"
 
 	"github.com/noobtunnel/noobtunnel/internal/proto"
 	"github.com/noobtunnel/noobtunnel/internal/store"
@@ -59,7 +60,11 @@ func (s *Server) Forwards(agentID uint32) []proto.Forward {
 // forwardsFor is what a given agent has to carry for the control node: the
 // loopback services published through it, one entry per port.
 func (s *Server) forwardsFor(agentID uint32) []proto.Forward {
-	byPort := map[int]string{}
+	type key struct {
+		protocol string
+		port     int
+	}
+	byPort := map[key]string{}
 	for _, resource := range s.store.Resources() {
 		if !resource.Enabled {
 			continue
@@ -68,16 +73,26 @@ func (s *Server) forwardsFor(agentID uint32) []proto.Forward {
 			if !target.Enabled || target.AgentID != agentID || !isLoopbackTarget(target.Host) {
 				continue
 			}
-			if _, taken := byPort[target.Port]; taken {
+			protocol := "tcp"
+			if resource.Protocol == store.ProtocolUDP {
+				protocol = "udp"
+			}
+			k := key{protocol: protocol, port: target.Port}
+			if _, taken := byPort[k]; taken {
 				continue
 			}
-			byPort[target.Port] = target.Target()
+			byPort[k] = target.Target()
 		}
 	}
 	out := make([]proto.Forward, 0, len(byPort))
-	for port, target := range byPort {
-		out = append(out, proto.Forward{Port: port, Target: target})
+	for key, target := range byPort {
+		out = append(out, proto.Forward{Port: key.port, Target: target, Protocol: key.protocol})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Port != out[j].Port {
+			return out[i].Port < out[j].Port
+		}
+		return strings.Compare(out[i].Protocol, out[j].Protocol) < 0
+	})
 	return out
 }
