@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -11,6 +12,44 @@ import (
 
 	"github.com/noobtunnel/noobtunnel/internal/proto"
 )
+
+func TestForwardPreservesReplyAfterClientHalfClose(t *testing.T) {
+	service, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	payload := bytes.Repeat([]byte("reply"), 100000)
+	go func() {
+		conn, err := service.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		io.Copy(io.Discard, conn)
+		conn.Write(payload)
+	}()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	f := &forwarder{target: service.Addr().String(), done: make(chan struct{}), agent: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	go f.serve(context.Background(), ln)
+	defer f.stop()
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	conn.Write([]byte("request"))
+	conn.(*net.TCPConn).CloseWrite()
+	got, err := io.ReadAll(conn)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("reply truncated: %d bytes, %v", len(got), err)
+	}
+}
 
 // TestAForwardIsRetriedOnceTheAddressExists covers the failure the operator sees
 // as "could not carry a loopback service ... bind: cannot assign requested

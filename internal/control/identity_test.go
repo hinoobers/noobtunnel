@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
 // TestHTTPSResourcesAreTerminatedOn443 proves the operator cannot pick a port for
@@ -61,6 +63,15 @@ func TestIdentityControlledResourceNeedsAnAccount(t *testing.T) {
 	admin := h.login(t)
 	agent := h.enrolledAgent(t, "homelab")
 	h.advertise(t, agent.id, targetHost+"/32")
+	// This harness has no kernel mesh or running agent forwarder. Place the
+	// simulated agent at the local service address so DialAddr is reachable;
+	// previously the test passed only because HTTP ignored that override.
+	if err := h.server.Store().UpdateAgent(agent.id, func(a *store.Agent) error {
+		a.Address = targetHost
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	status, body, _ := h.api("POST", "/api/resources", resourceBody(
 		"private", "http", agent.id, targetHost, targetPort, listenPort,

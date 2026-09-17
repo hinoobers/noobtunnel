@@ -170,9 +170,10 @@ next to a healthy one. The strategy decides the order they are tried:
 - **round-robin** rotates the starting point per connection, so traffic is shared;
 - **failover** always starts with the first target.
 
-Both strategies fall through to the next candidate when a dial fails, and for
-HTTP the request body is buffered (up to 1 MiB) so a retry sends the whole body
-rather than a truncated one. UDP has no handshake to fail over on, so each client
+Both strategies fall through to the next candidate when a dial fails. For HTTP,
+known-length request bodies up to 1 MiB are buffered when multiple targets need
+replay. Single-target, larger, and unknown-length bodies stream immediately;
+streamed bodies are not retried. UDP has no handshake to fail over on, so each client
 session picks one target and keeps it.
 
 ### Exit nodes

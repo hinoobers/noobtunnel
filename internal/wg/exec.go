@@ -141,7 +141,8 @@ func (b *ExecBackend) setConf(ctx context.Context, iface string, cfg Config) err
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if _, err := b.runner().Run(ctx, "wg", "setconf", iface, path); err != nil {
+	// Apply only differences so reconciliation preserves established sessions.
+	if _, err := b.runner().Run(ctx, "wg", "syncconf", iface, path); err != nil {
 		return fmt.Errorf("%w (is wireguard-tools installed?)", err)
 	}
 	return nil
@@ -179,6 +180,14 @@ func (b *ExecBackend) syncRoutes(ctx context.Context, iface string, desired []st
 
 	var problems []string
 	for r := range want {
+		if prev[r] {
+			// Reassert atomically, including if an external tool removed it.
+			// Deleting a known route first creates an avoidable traffic gap.
+			if _, err := run.Run(ctx, "ip", "route", "replace", r, "dev", iface, "metric", tunnelRouteMetric); err != nil {
+				problems = append(problems, "ip route replace "+r+": "+err.Error())
+			}
+			continue
+		}
 		// Clear anything older for this prefix *before* installing: a route from an
 		// older build has no metric, and deleting after adding is how a route gets
 		// removed in the same breath as it is added - the install reports success,

@@ -137,9 +137,34 @@ func (f *forwarder) handle(ctx context.Context, client net.Conn) {
 		return
 	}
 	defer upstream.Close()
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-f.done:
+		case <-finished:
+			return
+		}
+		_ = client.Close()
+		_ = upstream.Close()
+	}()
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(upstream, client); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(client, upstream); done <- struct{}{} }()
+	copyStream := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if tcp, ok := dst.(*net.TCPConn); ok && err == nil {
+			_ = tcp.CloseWrite()
+		} else {
+			_ = client.Close()
+			_ = upstream.Close()
+		}
+		done <- struct{}{}
+	}
+	go copyStream(upstream, client)
+	go copyStream(client, upstream)
+	// EOF in one direction can mean a request has finished, while the reply
+	// is still being generated. Preserve that TCP half-close.
+	<-done
 	<-done
 }
 

@@ -98,7 +98,7 @@ func (h *httpResource) transportFor(candidate TargetSpec, proxyProtocol string) 
 	// in the request's context.
 	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		started := time.Now()
-		conn, err := dialer.DialContext(ctx, network, address)
+		conn, err := dialer.DialContext(ctx, network, candidate.Address())
 		if timing, ok := ctx.Value(dialTimingKey{}).(*dialTiming); ok {
 			timing.ms.Store(time.Since(started).Milliseconds())
 		}
@@ -106,7 +106,11 @@ func (h *httpResource) transportFor(candidate TargetSpec, proxyProtocol string) 
 	}
 	transport := &http.Transport{
 		DialContext:           dial,
-		MaxIdleConnsPerHost:   8,
+		MaxIdleConns:          128,
+		MaxIdleConnsPerHost:   128,
+		IdleConnTimeout:       90 * time.Second,
+		DisableCompression:    true,
+		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
 	if proxyProtocol != ProxyProtocolNone {
@@ -173,11 +177,18 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Access rules run after authentication, so a rule can look at the account.
 	if len(res.spec.Rules) > 0 {
+		country := ""
+		for _, rule := range res.spec.Rules {
+			if rule.Field == access.FieldCountry {
+				country = h.countryOf(r.RemoteAddr)
+				break
+			}
+		}
 		decision := access.Evaluate(res.spec.Rules, access.Request{
-			IP:      clientIP(r.RemoteAddr),
+			IP: clientIP(r.RemoteAddr),
 			// A rule that tests a country cannot be evaluated without one, so this
 			// path does wait - briefly - for an answer.
-			Country: h.countryOf(r.RemoteAddr),
+			Country: country,
 			Host:    r.Host,
 			Path:    r.URL.Path,
 			Account: accountOf(r),
@@ -219,10 +230,9 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res.stat.set.total.Add(1)
 	defer res.stat.set.active.Add(-1)
 
-	client := remoteAddr(r.RemoteAddr)
 	if res.spec.ProxyProtocol != ProxyProtocolNone {
 		r = r.WithContext(context.WithValue(r.Context(), clientInfoKey{}, clientInfo{
-			addr:    client,
+			addr:    remoteAddr(r.RemoteAddr),
 			version: res.spec.ProxyProtocol,
 		}))
 	}
@@ -254,9 +264,16 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res.stat.setError(nil)
 
 	response.Body = &countingBody{ReadCloser: response.Body, target: &res.stat.set, also: &res.stat.targetFor(chosen.ID).set, read: true}
+	removeHopHeaders(response.Header)
 	copyHeader(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, response.Body)
+	var dst io.Writer = w
+	if response.ContentLength < 0 || strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
+		// Flush headers and each chunk for event streams and streaming responses.
+		_ = http.NewResponseController(w).Flush()
+		dst = flushWriter{w}
+	}
+	copyResponse(dst, response.Body)
 	res.stat.targetFor(chosen.ID).set.total.Add(1)
 	h.group.manager.observe(RequestEvent{
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
@@ -482,17 +499,22 @@ type authEntry struct{ expiry time.Time }
 // roundTrip tries each candidate target in order.
 func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response, TargetSpec, int64, error) {
 	candidates := res.candidates()
-	// Buffer a request body so that a retry sends the whole thing again.
+	// Only buffer bounded, known-size bodies when there is a fallback target.
+	// Large and chunked uploads must start flowing immediately and stay bounded
+	// in memory. Never consume a prefix and then forward a closed/truncated body.
 	var buffered []byte
-	replayable := true
-	if r.Body != nil && r.ContentLength != 0 {
+	replayable := r.Body == nil || r.Body == http.NoBody
+	if !replayable && len(candidates) > 1 && r.ContentLength >= 0 && r.ContentLength <= maxRetryBody {
 		raw, err := io.ReadAll(io.LimitReader(r.Body, maxRetryBody+1))
 		_ = r.Body.Close()
-		if err != nil || len(raw) > maxRetryBody {
-			replayable = false
-		} else {
-			buffered = raw
+		if err != nil {
+			return nil, TargetSpec{}, 0, err
 		}
+		if int64(len(raw)) != r.ContentLength {
+			return nil, TargetSpec{}, 0, fmt.Errorf("request body length does not match Content-Length")
+		}
+		buffered = raw
+		replayable = true
 	}
 	var lastErr error
 	for index, candidate := range candidates {
@@ -501,6 +523,12 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 			break
 		}
 		outbound := r.Clone(r.Context())
+		upgrade := isUpgrade(r)
+		removeHopHeaders(outbound.Header)
+		if upgrade {
+			outbound.Header.Set("Connection", "Upgrade")
+			outbound.Header.Set("Upgrade", r.Header.Get("Upgrade"))
+		}
 		if buffered != nil {
 			outbound.Body = io.NopCloser(bytes.NewReader(buffered))
 			outbound.ContentLength = int64(len(buffered))
@@ -541,6 +569,38 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 		lastErr = fmt.Errorf("no targets are configured")
 	}
 	return nil, TargetSpec{}, 0, lastErr
+}
+
+// Connection header tokens are hop-specific even when their names are custom.
+func removeHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(token))
+		}
+	}
+	for _, name := range []string{"Connection", "Proxy-Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		header.Del(name)
+	}
+}
+
+var responseBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
+
+func copyResponse(dst io.Writer, src io.Reader) {
+	buf := responseBuffers.Get().(*[32 * 1024]byte)
+	defer responseBuffers.Put(buf)
+	// Hide ReaderFrom so the destination uses this buffer rather than allocating
+	// another one. The counting source already requires a userspace copy.
+	_, _ = io.CopyBuffer(struct{ io.Writer }{dst}, src, buf[:])
+}
+
+type flushWriter struct{ http.ResponseWriter }
+
+func (w flushWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	if err == nil {
+		err = http.NewResponseController(w.ResponseWriter).Flush()
+	}
+	return n, err
 }
 
 // callerGaveUp reports whether a failed connection says anything about the target.

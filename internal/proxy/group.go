@@ -74,8 +74,11 @@ func (g *group) route(host string) (*resource, bool) {
 	if r, ok := g.routes[name]; ok {
 		return r, true
 	}
-	for alias, r := range g.routes {
-		if strings.HasSuffix(name, "."+alias) {
+	// Walk from the most specific suffix. Map iteration made overlapping
+	// domains nondeterministic and scanned every resource on each miss.
+	for dot := strings.IndexByte(name, '.'); dot >= 0; dot = strings.IndexByte(name, '.') {
+		name = name[dot+1:]
+		if r, ok := g.routes[name]; ok {
 			return r, true
 		}
 	}
@@ -351,14 +354,22 @@ func pipe(client, upstream net.Conn, sets ...*counters) {
 
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, io.TeeReader(client, countWriter{sets}))
+		_, err := io.Copy(upstream, io.TeeReader(client, countWriter{sets}))
+		if err != nil {
+			_ = client.Close()
+			_ = upstream.Close()
+		}
 		if tcp, ok := upstream.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(client, io.TeeReader(upstream, reverseWriter{sets}))
+		_, err := io.Copy(client, io.TeeReader(upstream, reverseWriter{sets}))
+		if err != nil {
+			_ = client.Close()
+			_ = upstream.Close()
+		}
 		if tcp, ok := client.(*net.TCPConn); ok {
 			_ = tcp.CloseWrite()
 		}

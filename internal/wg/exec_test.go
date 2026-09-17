@@ -21,7 +21,7 @@ type recordingRunner struct {
 
 func (r *recordingRunner) Run(_ context.Context, name string, args ...string) (string, error) {
 	r.calls = append(r.calls, append([]string{name}, args...))
-	if name == "wg" && len(args) >= 3 && args[0] == "setconf" {
+	if name == "wg" && len(args) >= 3 && args[0] == "syncconf" {
 		if raw, err := os.ReadFile(args[2]); err == nil {
 			r.staged = string(raw)
 		}
@@ -216,6 +216,40 @@ func countRouteReplaces(calls [][]string) int {
 		}
 	}
 	return n
+}
+
+func TestReconcilePreservesExistingRoutesAndSessions(t *testing.T) {
+	runner := &recordingRunner{}
+	backend := &ExecBackend{Runner: runner, WGDir: t.TempDir()}
+	cfg := Config{Routes: []string{"10.77.0.0/16"}}
+	if err := backend.Sync(context.Background(), "noobtun", cfg); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	if err := backend.Sync(context.Background(), "noobtun", cfg); err != nil {
+		t.Fatal(err)
+	}
+	synced := false
+	for _, call := range runner.calls {
+		command := strings.Join(call, " ")
+		if strings.Contains(command, "route del") || strings.Contains(command, "wg setconf") {
+			t.Fatalf("disruptive reconciliation: %s", command)
+		}
+		if strings.HasPrefix(command, "wg syncconf ") {
+			synced = true
+		}
+	}
+	if !synced {
+		t.Fatal("configuration was not synchronized")
+	}
+	// External removal must still be repaired on the next pass.
+	delete(runner.routes, "10.77.0.0/16")
+	if err := backend.Sync(context.Background(), "noobtun", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.routes["10.77.0.0/16"] {
+		t.Fatal("missing route was not repaired")
+	}
 }
 
 // TestRenderSetConfKeepsPeersAndKeys checks the two renderings differ only in the

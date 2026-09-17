@@ -14,13 +14,24 @@ const udpIdleTimeout = 60 * time.Second
 func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 	sessions := map[string]*udpSession{}
 	var mu sync.Mutex
+	done := make(chan struct{})
+	defer func() {
+		close(done)
+		mu.Lock()
+		defer mu.Unlock()
+		for _, session := range sessions {
+			session.close()
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			if g.isClosed() {
+		for {
+			select {
+			case <-done:
 				return
+			case <-ticker.C:
 			}
 			now := time.Now()
 			mu.Lock()
@@ -51,6 +62,10 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 		key := clientAddr.String()
 		mu.Lock()
 		session, exists := sessions[key]
+		if exists && session.isClosed() {
+			delete(sessions, key)
+			exists = false
+		}
 		if !exists {
 			// Datagrams have no handshake to fail over on, so each session picks
 			// one backend: round-robin spreads sessions over the targets.
@@ -83,10 +98,9 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 		}
 		mu.Unlock()
 
-		payload := make([]byte, n)
-		copy(payload, buf[:n])
 		session.touch()
-		if _, err := session.upstream.Write(payload); err != nil {
+		// Write consumes the datagram synchronously; reuse the receive buffer.
+		if _, err := session.upstream.Write(buf[:n]); err != nil {
 			target.stat.setError(err)
 			session.target.setError(err)
 			mu.Lock()
@@ -111,6 +125,7 @@ type udpSession struct {
 
 	mu        sync.Mutex
 	last      time.Time
+	closed    bool
 	closeOnce sync.Once
 }
 
@@ -128,6 +143,9 @@ func (s *udpSession) lastSeen() time.Time {
 
 func (s *udpSession) close() {
 	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
 		_ = s.upstream.Close()
 		s.stat.set.active.Add(-1)
 		if s.target != nil {
@@ -136,8 +154,15 @@ func (s *udpSession) close() {
 	})
 }
 
+func (s *udpSession) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
 // readLoop sends replies from the service back to the client that asked.
 func (s *udpSession) readLoop() {
+	defer s.close()
 	buf := make([]byte, 64*1024)
 	for {
 		n, err := s.upstream.Read(buf)
