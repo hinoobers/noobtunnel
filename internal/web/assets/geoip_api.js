@@ -7,9 +7,10 @@ function renderGeoIP() {
   const geo = (state.data.server && state.data.server.geoip) || {};
   const chip = shell.geoipStatus;
   if (!chip) return;
+  const lookups = geo.lookups || 0;
   if (geo.ready) {
     chip.className = 'chip chip-direct';
-    chip.textContent = geo.lookups + ' lookup' + (geo.lookups === 1 ? '' : 's') + ' answered';
+    chip.textContent = lookups + ' lookup' + (lookups === 1 ? '' : 's') + ' answered';
   } else if (geo.configured) {
     chip.className = 'chip chip-warn';
     chip.textContent = 'set, no answer yet';

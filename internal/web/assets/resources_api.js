@@ -108,6 +108,23 @@ function resourceStatus(resource) {
   return { dot: 'dot-off', label: 'stopped' };
 }
 
+// publicAddress shows how a resource is reached. A web resource is a link to open
+// in a new tab; a tcp or udp service is an address and a port, which nothing can
+// open, so it stays plain text (and carries no scheme).
+function publicAddress(resource) {
+  const text = String(resource.public || '');
+  if (/^https?:\/\//.test(text)) {
+    return h('a', {
+      class: 'mono tiny',
+      href: text,
+      target: '_blank',
+      rel: 'noreferrer noopener',
+      title: 'Open ' + text + ' in a new tab',
+    }, text);
+  }
+  return h('span', { class: 'mono tiny', text });
+}
+
 // errorLink turns an error into something to click: it opens Logs, the Errors tab,
 // and highlights the entry that belongs to this resource or target, so the reason
 // is one click away instead of a hunt through the log.
@@ -174,7 +191,7 @@ function renderResources(node, subNode, resources) {
       h('td', null, targetCell),
       h('td', null,
         h('div', { class: 'row' },
-          h('span', { class: 'mono tiny', text: resource.public }),
+          publicAddress(resource),
           copyButton(resource.public, 'Copy')),
         h('div', { class: 'muted tiny', text: 'on ' + (resource.exitNodeName || 'Control node') })),
       // The dot next to the name already says whether this resource is healthy, so

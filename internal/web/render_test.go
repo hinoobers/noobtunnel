@@ -287,8 +287,39 @@ function actionIn(node, action) {
   };
   return walk(node);
 }
+function tagIn(node, tag) {
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return null;
+    if (n.tagName === tag) return n;
+    for (const kid of n.childNodes || []) {
+      const found = walk(kid);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(node);
+}
 if (actionIn(resourcesNode, 'diagnose-target')) {
   throw new Error('diagnose should not be offered for a target that works');
+}
+// A web resource is a link to open; a tcp service is an address and a port, with
+// no scheme, because nothing can open "tcp://…".
+const webLink = tagIn(resourcesNode, 'A');
+const webHref = webLink ? String(webLink.getAttribute('href') || '') : '';
+if (!webLink || webHref.indexOf('http') !== 0) {
+  throw new Error('a web resource should be a link');
+}
+if (webLink.getAttribute('target') !== '_blank') {
+  throw new Error('the link should open in a new tab');
+}
+const tcpResource = Object.assign({}, resource, { protocol: 'tcp', public: 'db.example.com:3306', domain: 'db.example.com' });
+const tcpNode = document.createElement('div');
+renderResources(tcpNode, document.createElement('div'), [tcpResource]);
+if (tagIn(tcpNode, 'A')) {
+  throw new Error('a tcp resource must not be a link');
+}
+if (!textsOf(tcpNode).some((text) => text === 'db.example.com:3306')) {
+  throw new Error('the tcp address should be shown as it is: ' + textsOf(tcpNode).join(' | '));
 }
 const broken = JSON.parse(JSON.stringify(resource));
 broken.targets[0].lastError = 'dial tcp 10.77.0.2:8080: i/o timeout';

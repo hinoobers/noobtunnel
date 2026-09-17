@@ -201,28 +201,37 @@ func (s *Server) resourceViews() []ResourceView {
 
 // publicEndpoint renders the URL or address a resource is reachable on.
 func publicEndpoint(r store.Resource, exitAddress, controlAddress string) string {
-	if r.Domain != "" {
-		scheme := "http"
-		if r.Protocol == store.ProtocolHTTPS {
-			scheme = "https"
-		}
-		return scheme + "://" + r.Domain
-	}
-	host := controlAddress
-	if exitAddress != "" {
-		host = exitAddress
-	}
+	host := r.Domain
 	if host == "" {
-		host = "<control-node>"
+		host = controlAddress
+		if exitAddress != "" {
+			host = exitAddress
+		}
+		if host == "" {
+			host = "<control-node>"
+		}
 	}
-	address := net.JoinHostPort(host, strconv.Itoa(r.EffectiveListenPort()))
+	port := r.EffectiveListenPort()
 	switch r.Protocol {
 	case store.ProtocolHTTPS:
-		return "https://" + address
+		// HTTPS is always 443, so the port is never part of the address.
+		return "https://" + host
+	case store.ProtocolHTTPSPassthrough:
+		// The client speaks TLS to the service's own certificate.
+		if port == 443 {
+			return "https://" + host
+		}
+		return "https://" + net.JoinHostPort(host, strconv.Itoa(port))
 	case store.ProtocolHTTP:
-		return "http://" + address
+		if port == 80 {
+			return "http://" + host
+		}
+		return "http://" + net.JoinHostPort(host, strconv.Itoa(port))
 	default:
-		return string(r.Protocol) + "://" + address
+		// TCP and UDP have no scheme: the client connects to the port, and "tcp://"
+		// is not something anyone can open. A name for one of those resources is
+		// still worth showing, so it replaces the address rather than the port.
+		return net.JoinHostPort(host, strconv.Itoa(port))
 	}
 }
 

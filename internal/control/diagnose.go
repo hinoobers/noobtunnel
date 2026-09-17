@@ -217,7 +217,11 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	// Set when the agent's own answer explains the failure: it knows more about
 	// that side than any step the control node can run on itself.
 	verdictFromProbe := routingBroken
-	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	dialTimeout := 5 * time.Second
+	if s.opts.ProxyDialTimeout > 0 {
+		dialTimeout = s.opts.ProxyDialTimeout
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
 	switch {

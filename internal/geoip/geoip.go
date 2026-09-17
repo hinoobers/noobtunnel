@@ -27,6 +27,10 @@ var ErrNotConfigured = errors.New("geoip: no IP API is configured")
 const (
 	// lookupTimeout bounds one lookup while a request is waiting for an answer.
 	lookupTimeout = 3 * time.Second
+	// clientTimeout is the cap for one HTTP call. It is longer than lookupTimeout
+	// so the settings panel can afford to wait for a slow API while the request
+	// path stays bounded by its own context.
+	clientTimeout = 20 * time.Second
 	// cacheTTL is how long an answer is trusted: allocations and networks do not
 	// move often, and the API is spared a call per request.
 	cacheTTL = 12 * time.Hour
@@ -73,7 +77,7 @@ type entry struct {
 // a scheme is used as it is, which is what makes a plain http endpoint usable
 // during setup and in tests.
 func New(host, token string) *API {
-	api := &API{cache: map[netip.Addr]entry{}, client: &http.Client{Timeout: lookupTimeout}}
+	api := &API{cache: map[netip.Addr]entry{}, client: &http.Client{Timeout: clientTimeout}}
 	api.Configure(host, token)
 	return api
 }

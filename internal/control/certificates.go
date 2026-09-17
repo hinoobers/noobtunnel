@@ -95,6 +95,11 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 		_, err := auth.Authenticate(username, password)
 		return err
 	}
+	// How long a connection to a published target may take. Tests shorten it so a
+	// target that cannot be reached fails quickly.
+	if opts.ProxyDialTimeout > 0 {
+		manager.DialTimeout = opts.ProxyDialTimeout
+	}
 	// Every request the proxy handles is recorded for the Logs tab.
 	if requestEvents != nil {
 		manager.OnRequest = requestEvents.record

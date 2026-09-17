@@ -80,6 +80,10 @@ type Options struct {
 	IPAPIToken string
 	// DialTimeout bounds agent ping responses.
 	PingTimeout time.Duration
+	// ProxyDialTimeout bounds connecting to a published target. Zero uses the
+	// proxy manager's own default; tests point it at something short so a target
+	// that cannot be reached fails quickly.
+	ProxyDialTimeout time.Duration
 
 	// Now overrides the clock in tests.
 	Now func() time.Time

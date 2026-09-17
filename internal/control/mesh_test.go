@@ -131,7 +131,11 @@ func newHarnessOnDir(t *testing.T, direct bool, binaryDir, stateDir string, muta
 		AdminPassword: "correct-horse-battery-staple",
 		SetupSystem:   false,
 		PingTimeout:   3 * time.Second,
-		BinaryDir:     binaryDir,
+		// A target that cannot be reached has to fail quickly here: the tests wait
+		// for the error it produces, and a production-length dial timeout would
+		// race their deadline.
+		ProxyDialTimeout: 1 * time.Second,
+		BinaryDir:        binaryDir,
 	}
 	if mutate != nil {
 		mutate(&opts)

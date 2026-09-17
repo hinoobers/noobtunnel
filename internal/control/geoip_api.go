@@ -109,7 +109,9 @@ func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
 			s.recordEvent("geoip", "IP API updated")
 		}
 		if body.Check && !body.Clear {
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			// The check may take longer than a request would: an API behind a
+			// published service goes through the tunnel too.
+			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			info, err := api.Lookup(ctx, netip.MustParseAddr("1.1.1.1"))
 			cancel()
 			s.broadcastState()
