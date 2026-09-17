@@ -36,8 +36,6 @@ set_env() {
 }
 
 cd "$PANEL"
-php artisan down --retry=30 || true
-trap 'php artisan up >/dev/null 2>&1 || true' EXIT
 
 if [ "$MODE" = uninstall ]; then
     php "$PANEL/addons/noobtunnel/patch.php" uninstall "$PANEL"
@@ -54,13 +52,17 @@ else
         set_env ADDONS_HOOKS_ENABLED true
     fi
     php "$PANEL/addons/noobtunnel/patch.php" install "$PANEL"
-    php artisan migrate --force
 fi
 
-php artisan view:clear
-php artisan config:clear
+# Build while the old compiled assets continue serving users. The short
+# maintenance window below is only for the database/cache handoff.
 if [ ! -x node_modules/.bin/webpack ]; then yarn install --frozen-lockfile; fi
 yarn build:production
+php artisan down --retry=30 || true
+trap 'php artisan up >/dev/null 2>&1 || true' EXIT
+if [ "$MODE" != uninstall ]; then php artisan migrate --force; fi
+php artisan view:clear
+php artisan config:clear
 chown -R www-data:www-data "$PANEL"
 php artisan queue:restart
 php artisan up
