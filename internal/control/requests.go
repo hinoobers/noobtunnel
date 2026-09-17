@@ -26,9 +26,15 @@ type RequestEntry struct {
 	Reason   string `json:"reason,omitempty"`
 	Status   int    `json:"status,omitempty"`
 	Path     string `json:"path,omitempty"`
+	// Target is the backend this request reached.
+	Target string `json:"target,omitempty"`
 	// DurationMs is how long the control node spent on the request, tunnel and
 	// service included.
 	DurationMs int64 `json:"durationMs,omitempty"`
+	// DialMs is how long connecting to that backend took. It is what tells a slow
+	// tunnel apart from a slow service: seconds to connect is the path, milliseconds
+	// to connect followed by a slow answer is the service.
+	DialMs int64 `json:"dialMs,omitempty"`
 }
 
 // CountryStat aggregates requests by country or hostname.
@@ -86,7 +92,9 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		Reason:     event.Reason,
 		Status:     event.Status,
 		Path:       event.Path,
+		Target:     event.Target,
 		DurationMs: event.DurationMs,
+		DialMs:     event.DialMs,
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

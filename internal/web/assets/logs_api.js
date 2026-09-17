@@ -86,11 +86,11 @@ function renderRequests(node, recent) {
       // The exact time, with the relative one on hover: a log is read by
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
-      h('td', { class: 'mono tiny', title: entry.durationMs ? entry.durationMs + ' ms inside the control node' : '' }, fmtMs(entry.durationMs)),
+      h('td', { class: 'mono tiny' }, fmtMs(entry.durationMs), timingBreakdown(entry)),
       h('td', { class: 'mono tiny' }, entry.host || '—'),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
       h('td', null, countryCell(entry)),
-      h('td', { class: 'muted tiny' }, entry.resource || '—'),
+      h('td', { class: 'muted tiny', title: entry.target ? 'sent to ' + entry.target : '' }, entry.resource || '—'),
       h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
   if (pages > 1) node.append(requestPager(recent.length, pages, start, page.length));
   node.append(requestCountryNote(recent));
@@ -102,6 +102,25 @@ function setRequestPage(page) {
   if (!Number.isFinite(page) || page < 1) return;
   requestPage = page;
   renderShell();
+}
+
+// timingBreakdown says where a slow request spent its time, under the total.
+//
+// "Took" alone cannot tell a slow tunnel from a slow service: connecting through
+// the mesh and waiting for the answer are both inside it. Connecting is measured
+// separately, so the difference between the two is the service's own time.
+function timingBreakdown(entry) {
+  const total = entry.durationMs || 0;
+  const dial = entry.dialMs || 0;
+  if (!total) return null;
+  // Only worth a line when the path is a real part of the total: a reused
+  // connection has no dial time at all.
+  if (!dial || dial < 5 || total < 100) return null;
+  const service = Math.max(0, total - dial);
+  const note = h('div', { class: 'muted tiny' },
+    dial > service ? 'connect ' + fmtMs(dial) : 'service ' + fmtMs(service));
+  note.title = 'connect ' + fmtMs(dial) + ', service ' + fmtMs(service) + ' (total ' + fmtMs(total) + ')';
+  return note;
 }
 
 // countryCell says what is known about where a request came from, and why when

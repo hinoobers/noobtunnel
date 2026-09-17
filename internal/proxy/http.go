@@ -13,10 +13,18 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/access"
 )
+
+// dialTiming carries how long a connection to the backend took, from the dialer
+// (which runs on the transport's own goroutine) back to the request that caused
+// it.
+type dialTimingKey struct{}
+
+type dialTiming struct{ ms atomic.Int64 }
 
 // maxRetryBody is how much of a request body is buffered so a failed target can
 // be retried without sending a truncated body.
@@ -84,15 +92,27 @@ func (h *httpResource) transportFor(candidate TargetSpec, proxyProtocol string) 
 		return transport
 	}
 	dialer := &net.Dialer{Timeout: h.timeout}
+	// Connecting and being answered are timed separately: the request log can then
+	// say whether a slow request spent its time getting to the service or waiting
+	// for it. The transport dials on its own goroutine, so the measurement travels
+	// in the request's context.
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+		started := time.Now()
+		conn, err := dialer.DialContext(ctx, network, address)
+		if timing, ok := ctx.Value(dialTimingKey{}).(*dialTiming); ok {
+			timing.ms.Store(time.Since(started).Milliseconds())
+		}
+		return conn, err
+	}
 	transport := &http.Transport{
-		DialContext:           dialer.DialContext,
+		DialContext:           dial,
 		MaxIdleConnsPerHost:   8,
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
 	if proxyProtocol != ProxyProtocolNone {
 		transport.DisableKeepAlives = true
 		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			conn, err := dialer.DialContext(ctx, network, address)
+			conn, err := dial(ctx, network, address)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +228,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = &countingBody{ReadCloser: r.Body, target: &res.stat.set}
 	}
 
-	response, chosen, err := h.roundTrip(res, r)
+	response, chosen, dialMs, err := h.roundTrip(res, r)
 	if err != nil {
 		if callerGaveUp(r.Context(), err) {
 			// The caller went away before anything was served: nothing to record
@@ -222,7 +242,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(),
+			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
@@ -240,7 +260,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 		Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
-		DurationMs: time.Since(started).Milliseconds(),
+		DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs, Target: chosen.Published(),
 	})
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
@@ -267,7 +287,7 @@ func isUpgrade(r *http.Request) bool {
 // ways until either side closes. Everything before the upgrade - the identity
 // check and the access rules - has already run, so a rule can still refuse it.
 func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res *resource, started time.Time) {
-	response, chosen, err := h.roundTrip(res, r)
+	response, chosen, dialMs, err := h.roundTrip(res, r)
 	if err != nil {
 		if callerGaveUp(r.Context(), err) {
 			// The caller went away; the target and the resource are not at fault.
@@ -279,7 +299,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(),
+			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
@@ -443,7 +463,7 @@ func (h *httpResource) cachedAuth(res *resource, username, password string, veri
 type authEntry struct{ expiry time.Time }
 
 // roundTrip tries each candidate target in order.
-func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response, TargetSpec, error) {
+func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response, TargetSpec, int64, error) {
 	candidates := res.candidates()
 	// Buffer a request body so that a retry sends the whole thing again.
 	var buffered []byte
@@ -481,11 +501,13 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 		outbound.RequestURI = ""
 		outbound.Host = r.Host
 		outbound.Close = false
+		timing := &dialTiming{}
+		outbound = outbound.WithContext(context.WithValue(outbound.Context(), dialTimingKey{}, timing))
 		transport := h.transportFor(candidate, res.spec.ProxyProtocol)
 		response, err := transport.RoundTrip(outbound)
 		if err == nil {
 			res.stat.targetFor(candidate.ID).setError(nil)
-			return response, candidate, nil
+			return response, candidate, timing.ms.Load(), nil
 		}
 		lastErr = err
 		// A caller that went away says nothing about the target. Recording it made
@@ -501,7 +523,7 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no targets are configured")
 	}
-	return nil, TargetSpec{}, lastErr
+	return nil, TargetSpec{}, 0, lastErr
 }
 
 // callerGaveUp reports whether a failed connection says anything about the target.

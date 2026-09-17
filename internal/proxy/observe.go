@@ -22,10 +22,17 @@ type RequestEvent struct {
 	Reason  string `json:"reason,omitempty"`
 	Status  int    `json:"status,omitempty"`
 	Path    string `json:"path,omitempty"`
+	// Target is the backend this request was sent to.
+	Target string `json:"target,omitempty"`
 	// DurationMs is how long the request took inside the control node: the
 	// dial through the tunnel, the service's answer and the copy back. It is the
 	// number to look at when a published service feels slow.
 	DurationMs int64 `json:"durationMs,omitempty"`
+	// DialMs is how long connecting to the backend took. Comparing it with
+	// DurationMs is what separates a slow tunnel from a slow service: a fresh
+	// connection to a service that then answers in milliseconds is the tunnel, and
+	// a connection made in a millisecond followed by a slow answer is the service.
+	DialMs int64 `json:"dialMs,omitempty"`
 }
 
 // observe reports an event when the control node is listening for them.
