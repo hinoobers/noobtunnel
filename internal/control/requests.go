@@ -2,6 +2,7 @@ package control
 
 import (
 	"net/http"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -90,6 +91,13 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// A request from this machine or from a private address has no country to look
+	// up, and calling that "unknown" hides the addresses the IP API really did not
+	// answer for. A public address the API did not answer for keeps an empty
+	// country, so the UI can say why instead of guessing.
+	if entry.Country == "" && isPrivateClient(entry.IP) {
+		entry.Country = "local"
+	}
 	l.entries = append([]RequestEntry{entry}, l.entries...)
 	if len(l.entries) > requestLogSize {
 		l.entries = l.entries[:requestLogSize]
@@ -115,6 +123,20 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		host = "(no host)"
 	}
 	bump(l.byHost, host, entry.Allowed)
+}
+
+// isPrivateClient reports whether an address belongs to a network that has no
+// country: loopback, link-local, or one of the private ranges.
+func isPrivateClient(raw string) bool {
+	host := raw
+	if parsed, err := netip.ParseAddr(raw); err == nil {
+		host = parsed.Unmap().String()
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || !addr.IsGlobalUnicast()
 }
 
 func bump(counters map[string]*CountryStat, key string, allowed bool) {

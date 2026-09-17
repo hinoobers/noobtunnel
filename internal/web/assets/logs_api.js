@@ -56,32 +56,98 @@ function fmtMs(value) {
   return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
 }
 
-// renderRequests lists individual requests and their decision.
+// requestsPerPage is how many rows the Requests tab shows at once: the control
+// node keeps the last few hundred, far more than anyone reads in one go.
+const requestsPerPage = 30;
+// requestPage is which page of the request list is on screen.
+let requestPage = 1;
+
+// renderRequests lists individual requests and their decision, one page at a time.
 function renderRequests(node, recent) {
   if (!node) return;
   recent = recent || [];
   clear(node);
   if (!recent.length) {
+    requestPage = 1;
     node.append(h('div', { class: 'empty' },
       h('p', { class: 'muted', text: 'No requests yet. They appear here as soon as a published service is used.' })));
     return;
   }
+  const pages = Math.max(1, Math.ceil(recent.length / requestsPerPage));
+  if (requestPage > pages) requestPage = pages;
+  if (requestPage < 1) requestPage = 1;
+  const start = (requestPage - 1) * requestsPerPage;
+  const page = recent.slice(start, start + requestsPerPage);
   node.append(h('table', null,
     h('thead', null, h('tr', null,
       h('th', null, 'Timestamp'), h('th', null, 'Took'), h('th', null, 'Host'), h('th', null, 'Client'),
       h('th', null, 'Country'), h('th', null, 'Resource'), h('th', null, 'Decision'))),
-    h('tbody', null, recent.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
+    h('tbody', null, page.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
       // The exact time, with the relative one on hover: a log is read by
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
       h('td', { class: 'mono tiny', title: entry.durationMs ? entry.durationMs + ' ms inside the control node' : '' }, fmtMs(entry.durationMs)),
       h('td', { class: 'mono tiny' }, entry.host || '—'),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
-      h('td', null, entry.country
-        ? h('span', { class: 'chip chip-quiet' }, entry.country)
-        : h('span', { class: 'muted tiny' }, 'unknown')),
+      h('td', null, countryCell(entry)),
       h('td', { class: 'muted tiny' }, entry.resource || '—'),
       h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
+  if (pages > 1) node.append(requestPager(recent.length, pages, start, page.length));
+  node.append(requestCountryNote(recent));
+}
+
+// setRequestPage walks the request list without asking the control node for
+// anything: the rows are already in the page.
+function setRequestPage(page) {
+  if (!Number.isFinite(page) || page < 1) return;
+  requestPage = page;
+  renderShell();
+}
+
+// countryCell says what is known about where a request came from, and why when
+// nothing is: "unknown" with no reason is the least useful cell in the table.
+function countryCell(entry) {
+  if (entry.country) return h('span', { class: 'chip chip-quiet' }, entry.country);
+  const geo = (state.data && state.data.server && state.data.server.geoip) || {};
+  const why = !geo.configured
+    ? 'no IP API is configured (Settings -> IP API), so no country is known'
+    : (geo.lastError
+      ? 'the IP API is not answering: ' + geo.lastError
+      : 'the IP API has no country for ' + (entry.ip || 'this address'));
+  return h('span', { class: 'muted tiny', title: why }, 'unknown');
+}
+
+// requestPager walks the list: newest first, thirty at a time.
+function requestPager(total, pages, start, shown) {
+  return h('div', { class: 'pager' },
+    h('span', { class: 'muted tiny' },
+      'Showing ' + (start + 1) + '-' + (start + shown) + ' of ' + total + ', newest first'),
+    h('button', {
+      class: 'btn btn-sm', type: 'button', 'data-action': 'requests-page',
+      'data-page': String(requestPage - 1), disabled: requestPage <= 1,
+    }, 'Previous'),
+    h('span', { class: 'muted tiny' }, 'Page ' + requestPage + ' of ' + pages),
+    h('button', {
+      class: 'btn btn-sm', type: 'button', 'data-action': 'requests-page',
+      'data-page': String(requestPage + 1), disabled: requestPage >= pages,
+    }, 'Next'));
+}
+
+// requestCountryNote explains the countries that are missing, once, instead of
+// leaving a table full of "unknown".
+function requestCountryNote(recent) {
+  const missing = recent.filter((entry) => !entry.country).length;
+  if (!missing) return h('span', { hidden: true });
+  const geo = (state.data && state.data.server && state.data.server.geoip) || {};
+  let text = missing + ' of these requests have no country';
+  if (!geo.configured) {
+    text += ': no IP API is configured yet (Settings -> IP API).';
+  } else if (geo.lastError) {
+    text += ': the IP API is not answering (' + geo.lastError + ').';
+  } else {
+    text += ': the IP API had no answer for those addresses. Requests from this machine and from private addresses never have one.';
+  }
+  return h('p', { class: 'muted tiny' }, text);
 }
 
 // showError is what an "error" chip in another view does: open Logs, select the

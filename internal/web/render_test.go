@@ -263,6 +263,33 @@ resourceEditorPage(null);
 resourceEditorPage(resource);
 openResourceEditor(null);
 
+// Requests: thirty per page, with a way to walk the rest. A country the API did
+// not answer for is explained rather than left as a bare "unknown".
+const manyRequests = [];
+for (let i = 0; i < 35; i++) {
+  manyRequests.push({
+    time: new Date(Date.now() - i * 1000).toISOString(), host: 'app.example.com', ip: '203.0.113.' + (i + 1),
+    country: i % 2 ? 'EE' : '', allowed: true, resource: 'web', durationMs: 12,
+  });
+}
+requestPage = 1;
+const pagedNode = document.createElement('div');
+renderRequests(pagedNode, manyRequests);
+const pageRows = pagedNode.childNodes[0].childNodes[1].childNodes;
+if (pageRows.length !== 30) {
+  throw new Error('the requests table should show thirty rows, it shows ' + pageRows.length);
+}
+if (textsOf(pagedNode).join(' | ').indexOf('Page 1 of 2') === -1) {
+  throw new Error('the requests table needs a pager: ' + textsOf(pagedNode).join(' | '));
+}
+requestPage = 2;
+const secondPage = document.createElement('div');
+renderRequests(secondPage, manyRequests);
+if (secondPage.childNodes[0].childNodes[1].childNodes.length !== 5) {
+  throw new Error('the second page should hold the remaining five rows');
+}
+requestPage = 1;
+
 // Resources: the dot next to the name says whether it is healthy, so there is no
 // separate status column, and the diagnosis is only offered when something is
 // wrong. An error is a way into Logs, Errors rather than a dead label.

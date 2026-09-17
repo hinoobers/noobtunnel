@@ -512,6 +512,7 @@ async function handleGlobalAction(event) {
     case 'clear-errors': await clearErrors(); break;
     case 'diagnose-target': await diagnoseTarget(actionEl.dataset.resource, actionEl.dataset.target); break;
     case 'show-error': await showError(actionEl.dataset.match); break;
+    case 'requests-page': setRequestPage(Number(actionEl.dataset.page)); break;
     case 'add-user': openAddUser(); break;
     case 'user-password': openUserPassword(actionEl.dataset.username, actionEl.dataset.id); break;
     case 'user-role': openRoleModal(actionEl.dataset.id); break;
