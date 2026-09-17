@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -209,6 +210,13 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	response, chosen, err := h.roundTrip(res, r)
 	if err != nil {
+		if callerGaveUp(r.Context(), err) {
+			// The caller went away before anything was served: nothing to record
+			// against the resource or the target, and the request was not blocked
+			// either.
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
 		res.stat.setError(err)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
@@ -261,6 +269,11 @@ func isUpgrade(r *http.Request) bool {
 func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res *resource, started time.Time) {
 	response, chosen, err := h.roundTrip(res, r)
 	if err != nil {
+		if callerGaveUp(r.Context(), err) {
+			// The caller went away; the target and the resource are not at fault.
+			w.WriteHeader(http.StatusGatewayTimeout)
+			return
+		}
 		res.stat.setError(err)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
@@ -475,13 +488,34 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 			return response, candidate, nil
 		}
 		lastErr = err
-		res.stat.targetFor(candidate.ID).setError(err)
-		res.stat.setError(fmt.Errorf("target %s: %w", candidate.Published(), err))
+		// A caller that went away says nothing about the target. Recording it made
+		// a healthy resource flap between live and error: a browser closing a tab,
+		// a health check giving up, or the country lookup that runs while a request
+		// is being served all cancel a dial, and every cancellation was being
+		// written down as "the target is not reachable".
+		if !callerGaveUp(r.Context(), err) {
+			res.stat.targetFor(candidate.ID).setError(err)
+			res.stat.setError(fmt.Errorf("target %s: %w", candidate.Published(), err))
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no targets are configured")
 	}
 	return nil, TargetSpec{}, lastErr
+}
+
+// callerGaveUp reports whether a failed connection says anything about the target.
+//
+// The transport dials with the request's context, so a client that disconnected, a
+// deadline the caller set, or a surrounding request that was cancelled all end as
+// an error on the dial - and none of them is the target's fault. Treating them as
+// target failures is what made a working service alternate between "live" and
+// "error" with "context canceled" as the reason.
+func callerGaveUp(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (h *httpResource) writeUnknownHost(w http.ResponseWriter, r *http.Request) {
