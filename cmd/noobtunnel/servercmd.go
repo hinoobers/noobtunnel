@@ -74,13 +74,16 @@ func runServer(args []string) error {
 		wgPort      = fs.Int("wg-port", envInt("NOOBTUNNEL_WG_PORT", 0), "WireGuard UDP port (default 51820)")
 		meshCIDR    = fs.String("mesh", env("NOOBTUNNEL_MESH", ""), "mesh address range (default 10.77.0.0/16)")
 		mtu         = fs.Int("mtu", 0, "WireGuard interface MTU (default 1420)")
-		direct      = fs.String("direct", env("NOOBTUNNEL_DIRECT", "true"), "allow direct agent to agent paths (true or false)")
-		logLevel    = fs.String("log-level", env("NOOBTUNNEL_LOG_LEVEL", "info"), "debug, info, warn or error")
-		printOnly   = fs.Bool("print-info", false, "print the control node summary and exit")
-		acmeEmail   = fs.String("acme-email", env("NOOBTUNNEL_ACME_EMAIL", ""), "email for Let's Encrypt certificates; empty uses self-signed certificates for HTTPS resources")
-		domain      = fs.String("domain", env("NOOBTUNNEL_DOMAIN", ""), "hostname this control node is published on, for example noobtunnel.example.com; serves the UI on https://<domain> with a managed certificate")
-		ipapiHost   = fs.String("ipapi-host", env("NOOBTUNNEL_IPAPI_HOST", ""), "hostname of the IP API used for country rules, for example iplog.example.com")
-		ipapiToken  = fs.String("ipapi-token", env("NOOBTUNNEL_IPAPI_TOKEN", ""), "token for that IP API, sent as a bearer token")
+		// Empty means "keep the persisted setting". DefaultSettings enables direct
+		// paths for a fresh install; making the flag itself default to true used to
+		// silently undo an operator disabling them on every server restart.
+		direct     = fs.String("direct", env("NOOBTUNNEL_DIRECT", ""), "allow direct agent to agent paths (true or false)")
+		logLevel   = fs.String("log-level", env("NOOBTUNNEL_LOG_LEVEL", "info"), "debug, info, warn or error")
+		printOnly  = fs.Bool("print-info", false, "print the control node summary and exit")
+		acmeEmail  = fs.String("acme-email", env("NOOBTUNNEL_ACME_EMAIL", ""), "email for Let's Encrypt certificates; empty uses self-signed certificates for HTTPS resources")
+		domain     = fs.String("domain", env("NOOBTUNNEL_DOMAIN", ""), "hostname this control node is published on, for example noobtunnel.example.com; serves the UI on https://<domain> with a managed certificate")
+		ipapiHost  = fs.String("ipapi-host", env("NOOBTUNNEL_IPAPI_HOST", ""), "hostname of the IP API used for country rules, for example iplog.example.com")
+		ipapiToken = fs.String("ipapi-token", env("NOOBTUNNEL_IPAPI_TOKEN", ""), "token for that IP API, sent as a bearer token")
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
