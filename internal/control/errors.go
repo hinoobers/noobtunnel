@@ -82,3 +82,25 @@ func (l *errorLog) clear() {
 	defer l.mu.Unlock()
 	l.entries = nil
 }
+
+// remove deletes only the entries named by fingerprint. Errors recorded while a
+// health recheck is running are therefore preserved unless that exact failure
+// was clean on every retry.
+func (l *errorLog) remove(fingerprints map[string]bool) {
+	if l == nil || len(fingerprints) == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.entries[:0]
+	for _, entry := range l.entries {
+		if !fingerprints[errorFingerprint(entry)] {
+			kept = append(kept, entry)
+		}
+	}
+	l.entries = kept
+}
+
+func errorFingerprint(entry ErrorEntry) string {
+	return entry.Source + "\x00" + entry.Message + "\x00" + entry.Detail
+}

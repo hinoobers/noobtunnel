@@ -436,6 +436,13 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(124, 140, 25
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: .89rem; }
 th { text-align: left; color: var(--dim); font-weight: 550; font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.table-header-button { appearance: none; border: 0; padding: 2px 0; background: transparent; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; white-space: nowrap; }
+.table-header-button:hover, .table-header-button:focus-visible { color: var(--text); }
+.table-header-button[data-sort="asc"]::after { content: " \2191"; color: var(--accent); }
+.table-header-button[data-sort="desc"]::after { content: " \2193"; color: var(--accent); }
+.table-header-button.has-filter::before { content: "\2022 "; color: var(--accent); }
+.request-filter-list { display: grid; gap: 8px; max-height: min(48vh, 420px); overflow: auto; }
+.request-column-options .row .btn { flex: 1; }
 td { padding: 11px 10px; border-bottom: 1px solid rgba(94, 118, 168, .12); vertical-align: middle; }
 tbody tr:hover { background: rgba(124, 140, 255, .05); }
 /* A request row is green or red as a whole, so the decision reads at a glance

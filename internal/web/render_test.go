@@ -249,6 +249,24 @@ if (decisionCells.some((cell) => cell.childNodes.some((kid) =>
   typeof kid.getAttribute === 'function' && (kid.getAttribute('class') || '').includes('chip')))) {
   throw new Error('the decision cell should not hold a pill any more');
 }
+const countryChip = requestsTable.childNodes[1].childNodes[0].childNodes[4].childNodes[0];
+if (!countryChip.getAttribute('title') || countryChip.getAttribute('title') === 'EE') {
+  throw new Error('a country code should reveal its country name on hover');
+}
+
+// Headers sort the request list, and country filters can include more than one
+// selected value without asking the server for another page.
+requestSort = { key: 'durationMs', direction: 'asc' };
+const sorted = sortAndFilterRequests([
+  { durationMs: 40, country: 'EE', allowed: true },
+  { durationMs: 10, country: 'US', allowed: false },
+]);
+if (sorted[0].durationMs !== 10) throw new Error('Took should sort numerically');
+requestFilters.country = new Set(['EE']);
+const filtered = sortAndFilterRequests(sorted);
+if (filtered.length !== 1 || filtered[0].country !== 'EE') throw new Error('country filtering did not apply');
+requestFilters.country = new Set();
+requestSort = { key: 'time', direction: 'desc' };
 
 // The chart keeps the whole label and lets the stylesheet clip it; a hostname
 // used to run into its own bar.

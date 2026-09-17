@@ -358,7 +358,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startGeoIP(ctx)
 
 	s.reconcileResources()
-	s.wg.Add(7)
+	s.wg.Add(8)
 	go func() { defer s.wg.Done(); s.discoveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.peerPushLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.latencyLoop(ctx) }()
@@ -366,6 +366,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.dnsLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.checkLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.routeLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.errorRecheckLoop(ctx) }()
 	// When the control node issues certificates it must answer the HTTP-01
 	// challenge on port 80, even if no HTTP resource is published there yet.
 	if s.proxies.ACMEChallenge != nil {

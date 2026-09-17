@@ -34,6 +34,27 @@ func TestErrorLogCollapsesRepeats(t *testing.T) {
 	}
 }
 
+func TestErrorLogRemovesOnlyConfirmedResolvedEntries(t *testing.T) {
+	log := newErrorLog()
+	log.record("dns", "could not update app.example.com", "token failed", "check token")
+	log.record("target", "app cannot connect", "connection refused", "check service")
+
+	entries := log.recent()
+	log.remove(map[string]bool{errorFingerprint(entries[1]): true})
+	remaining := log.recent()
+	if len(remaining) != 1 || remaining[0].Source != "target" {
+		t.Fatalf("only the confirmed resolved error should be removed: %+v", remaining)
+	}
+
+	// A fresh occurrence with a different detail is not accidentally swept up
+	// by a recheck of the older failure.
+	log.record("dns", "could not update app.example.com", "new failure", "check token")
+	log.remove(map[string]bool{errorFingerprint(entries[1]): true})
+	if remaining := log.recent(); len(remaining) != 2 {
+		t.Fatalf("new errors must survive an old recheck: %+v", remaining)
+	}
+}
+
 // TestCertificateNoiseIsNotReported keeps scanners out of the Errors view: a
 // client that sends no SNI, or a plain probe, is not a certificate failure worth
 // showing an operator.

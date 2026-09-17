@@ -2,6 +2,20 @@
 /* Logs tab: request analytics and the control node's activity feed. */
 
 let logView = 'requests';
+let requestSort = { key: 'time', direction: 'desc' };
+const requestFilters = {
+  host: new Set(), client: new Set(), country: new Set(), resource: new Set(), decision: new Set(),
+};
+
+const requestColumns = [
+  { key: 'time', label: 'Timestamp', sort: true },
+  { key: 'durationMs', label: 'Took', sort: true, title: 'Server-side proxy total; hover the phase below each value for details.' },
+  { key: 'host', label: 'Host', sort: true, filter: true },
+  { key: 'client', label: 'Client', sort: true, filter: true },
+  { key: 'country', label: 'Country', sort: true, filter: true },
+  { key: 'resource', label: 'Resource', sort: true, filter: true },
+  { key: 'decision', label: 'Decision', sort: true, filter: true },
+];
 
 // requestData reads the aggregates the control node publishes.
 function requestData() {
@@ -73,16 +87,17 @@ function renderRequests(node, recent) {
       h('p', { class: 'muted', text: 'No requests yet. They appear here as soon as a published service is used.' })));
     return;
   }
-  const pages = Math.max(1, Math.ceil(recent.length / requestsPerPage));
+  const visible = sortAndFilterRequests(recent);
+  const pages = Math.max(1, Math.ceil(visible.length / requestsPerPage));
   if (requestPage > pages) requestPage = pages;
   if (requestPage < 1) requestPage = 1;
   const start = (requestPage - 1) * requestsPerPage;
-  const page = recent.slice(start, start + requestsPerPage);
+  const page = visible.slice(start, start + requestsPerPage);
   node.append(h('table', null,
-    h('thead', null, h('tr', null,
-      h('th', null, 'Timestamp'), h('th', { title: 'Server-side proxy total; hover the phase below each value for details.' }, 'Took'), h('th', null, 'Host'), h('th', null, 'Client'),
-      h('th', null, 'Country'), h('th', null, 'Resource'), h('th', null, 'Decision'))),
-    h('tbody', null, page.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
+    h('thead', null, h('tr', null, requestColumns.map((column) => requestHeader(column, recent)))),
+    h('tbody', null,
+      !page.length ? h('tr', null, h('td', { colspan: '7', class: 'muted', text: 'No requests match these filters.' })) : null,
+      page.map((entry) => h('tr', { class: entry.allowed ? 'is-allowed' : 'is-blocked' },
       // The exact time, with the relative one on hover: a log is read by
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
@@ -92,7 +107,85 @@ function renderRequests(node, recent) {
       h('td', null, countryCell(entry)),
       h('td', { class: 'muted tiny', title: entry.target ? 'sent to ' + entry.target : '' }, entry.resource || '—'),
       h('td', { title: entry.allowed ? '' : entry.reason || '' }, entry.allowed ? 'allowed' : 'blocked'))))));
-  if (pages > 1) node.append(requestPager(recent.length, pages, start, page.length));
+  if (pages > 1 || visible.length !== recent.length) node.append(requestPager(visible.length, pages, start, page.length));
+}
+
+function requestHeader(column, recent) {
+  const selected = requestFilters[column.key];
+  const activeFilter = selected && selected.size;
+  const direction = requestSort.key === column.key ? requestSort.direction : '';
+  const title = [column.title || '', 'Click to sort' + (column.filter ? ' or filter' : '')].filter(Boolean).join(' ');
+  return h('th', { title }, h('button', {
+    class: 'table-header-button' + (activeFilter ? ' has-filter' : ''), type: 'button',
+    'data-sort': direction, onclick: () => openRequestColumn(column, recent),
+  }, column.label));
+}
+
+function requestValue(entry, key) {
+  switch (key) {
+  case 'time': return new Date(entry.time || 0).getTime();
+  case 'durationMs': return Number(entry.durationMs) || 0;
+  case 'client': return entry.ip || '—';
+  case 'country': return entry.country ? String(entry.country).toUpperCase() : 'unknown';
+  case 'decision': return entry.allowed ? 'allowed' : 'blocked';
+  default: return entry[key] || '—';
+  }
+}
+
+function sortAndFilterRequests(recent) {
+  return recent.filter((entry) => Object.keys(requestFilters).every((key) => {
+    const selected = requestFilters[key];
+    return !selected.size || selected.has(String(requestValue(entry, key)));
+  })).slice().sort((left, right) => {
+    const a = requestValue(left, requestSort.key);
+    const b = requestValue(right, requestSort.key);
+    const compared = typeof a === 'number' && typeof b === 'number'
+      ? a - b : String(a).localeCompare(String(b), undefined, { sensitivity: 'base' });
+    return requestSort.direction === 'asc' ? compared : -compared;
+  });
+}
+
+function openRequestColumn(column, recent) {
+  const current = requestFilters[column.key] || new Set();
+  const values = column.filter
+    ? Array.from(new Set(recent.map((entry) => String(requestValue(entry, column.key)))))
+      .sort((a, b) => requestOptionLabel(column.key, a).localeCompare(requestOptionLabel(column.key, b)))
+    : [];
+  const selected = current.size ? new Set(current) : new Set(values);
+  const body = h('div', { class: 'stack request-column-options' },
+    column.sort ? h('div', { class: 'row' },
+      h('button', { class: 'btn', type: 'button', onclick: () => applyRequestColumn(column.key, 'asc', current) },
+        column.key === 'time' ? 'Oldest first' : column.key === 'durationMs' ? 'Fastest first' : 'A to Z'),
+      h('button', { class: 'btn', type: 'button', onclick: () => applyRequestColumn(column.key, 'desc', current) },
+        column.key === 'time' ? 'Newest first' : column.key === 'durationMs' ? 'Slowest first' : 'Z to A')) : null,
+    values.length ? h('div', { class: 'request-filter-list' }, values.map((value) => h('label', { class: 'switch' },
+      h('input', {
+        type: 'checkbox', checked: !current.size || current.has(value), onchange: (event) => {
+          selected.delete('__none__');
+          if (event.target.checked) selected.add(value); else selected.delete(value);
+        },
+      }),
+      h('span', null, h('strong', null, requestOptionLabel(column.key, value)))))) : null);
+  const footer = column.filter ? h('div', { class: 'modal-foot' },
+    h('button', { class: 'btn', type: 'button', onclick: () => applyRequestColumn(column.key, requestSort.direction, new Set()) }, 'Show all'),
+    h('button', { class: 'btn btn-primary', type: 'button', onclick: () => {
+      const filter = selected.size === values.length ? new Set() : selected.size ? selected : new Set(['__none__']);
+      applyRequestColumn(column.key, requestSort.direction, filter);
+    } }, 'Apply')) : null;
+  modal(column.label, column.filter ? 'Sort this column or choose which values are shown.' : 'Choose the sort order.', body, footer);
+}
+
+function applyRequestColumn(key, direction, selected) {
+  requestSort = { key, direction: direction === 'asc' ? 'asc' : 'desc' };
+  if (requestFilters[key]) requestFilters[key] = new Set(selected);
+  requestPage = 1;
+  closeModal();
+  renderShell();
+}
+
+function requestOptionLabel(key, value) {
+  if (key === 'country') return value === 'unknown' ? 'Unknown' : countryName(value) + ' (' + value + ')';
+  return value;
 }
 
 // setRequestPage walks the request list without asking the control node for
@@ -130,7 +223,7 @@ function timingBreakdown(entry) {
 // countryCell says what is known about where a request came from, and why when
 // nothing is: "unknown" with no reason is the least useful cell in the table.
 function countryCell(entry) {
-  if (entry.country) return h('span', { class: 'chip chip-quiet' }, entry.country);
+  if (entry.country) return h('span', { class: 'chip chip-quiet', title: countryName(entry.country) }, entry.country);
   const geo = (state.data && state.data.server && state.data.server.geoip) || {};
   const why = !geo.configured
     ? 'no IP API is configured (Settings -> IP API), so no country is known'
@@ -140,11 +233,22 @@ function countryCell(entry) {
   return h('span', { class: 'muted tiny', title: why }, 'unknown');
 }
 
+function countryName(code) {
+  code = String(code || '').toUpperCase();
+  if (!code) return 'Unknown';
+  try {
+    if (typeof Intl !== 'undefined' && Intl.DisplayNames) {
+      return new Intl.DisplayNames([navigator.language || 'en'], { type: 'region' }).of(code) || code;
+    }
+  } catch (_) { /* Older browsers simply keep the country code. */ }
+  return code;
+}
+
 // requestPager walks the list: newest first, thirty at a time.
 function requestPager(total, pages, start, shown) {
   return h('div', { class: 'pager' },
     h('span', { class: 'muted tiny' },
-      'Showing ' + (start + 1) + '-' + (start + shown) + ' of ' + total + ', newest first'),
+      (shown ? 'Showing ' + (start + 1) + '-' + (start + shown) : 'Showing 0') + ' of ' + total),
     h('button', {
       class: 'btn btn-sm', type: 'button', 'data-action': 'requests-page',
       'data-page': String(requestPage - 1), disabled: requestPage <= 1,
@@ -184,7 +288,7 @@ function renderErrors(node, subNode, entries) {
       ? 'Nothing has failed since the control node started'
       : entries.length + ' error' + (entries.length === 1 ? '' : 's') +
         ', newest first \u00b7 ' + relTime(entries[0].time) +
-        ' \u00b7 history: an entry stays until you clear it, the dashboard shows what is true now';
+        ' \u00b7 active failures are rechecked every 30 seconds and clear after three clean checks';
   }
   if (!entries.length) {
     node.append(h('div', { class: 'empty' },
