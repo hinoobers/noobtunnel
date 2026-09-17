@@ -13,16 +13,26 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
-// worthReporting keeps the Errors view about the operator's own names. A
-// handshake without SNI, or from a scanner, is not a certificate problem: those
-// clients get the self-signed fallback and would otherwise bury the real failures
-// under "missing server name" lines.
+// worthReporting keeps the Errors view about the operator's own names.
+//
+// A handshake with no server name, or one asking for a name that is not published
+// here, is a scanner or a misconfigured client. There is nothing to fix, and
+// reporting it does two harmful things: it buries the failures the operator can
+// act on, and it names domains they do not own - which reasonably makes people
+// wonder what happened to their server. The certificate is never requested for
+// such a name either: the host policy refuses it before anything is asked of the
+// certificate authority.
 func worthReporting(name string, err error) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	return !strings.Contains(message, "missing server name")
+	for _, noise := range []string{"missing server name", "no https resource is published"} {
+		if strings.Contains(message, noise) {
+			return false
+		}
+	}
+	return true
 }
 
 // newProxyManager builds the resource proxy manager, wiring in the certificate
@@ -70,12 +80,17 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 			Primary:  acmeManager,
 			Fallback: selfSigned,
 			OnError: func(name string, err error) {
-				opts.Logger.Warn("could not obtain a managed certificate, serving a self-signed one",
-					"domain", name, "error", err)
 				if worthReporting(name, err) {
+					opts.Logger.Warn("could not obtain a managed certificate, serving a self-signed one",
+						"domain", name, "error", err)
 					errorEvents.record("certificate", "no managed certificate for "+name, err.Error(),
 						"check that the name resolves here and that port 80 is reachable for the ACME challenge")
+					return
 				}
+				// A scanner asking for somebody else's name is worth a debug line,
+				// not a warning people will read and worry about.
+				opts.Logger.Debug("ignoring a certificate request for a name that is not published here",
+					"domain", name, "error", err)
 			},
 		}
 		// HTTP-01 validation is answered on the ports HTTP resources use.

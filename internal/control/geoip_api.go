@@ -11,6 +11,18 @@ import (
 	"github.com/noobtunnel/noobtunnel/internal/store"
 )
 
+// ReportGeoIPErrorForTest lets a test drive what the API client would report,
+// without standing up a failing API.
+func (s *Server) ReportGeoIPErrorForTest(err error) { s.reportGeoIPError(err) }
+
+// ErrorsForTest exposes the recorded errors, newest first.
+func (s *Server) ErrorsForTest() []ErrorEntry {
+	if s.errors == nil {
+		return nil
+	}
+	return s.errors.recent()
+}
+
 // GeoIPStatus describes the IP API for the settings panel.
 type GeoIPStatus struct {
 	Configured bool   `json:"configured"`

@@ -113,9 +113,12 @@ type Server struct {
 
 	mu sync.Mutex
 	// geoIP is the client for the operator's IP API, used by country rules.
-	geoIP    *geoip.API
-	requests *requestLog
-	errors   *errorLog
+	geoIP *geoip.API
+	// geoIPReported is the last API failure written to the Errors view, so an API
+	// that is down is reported once rather than once per request.
+	geoIPReported string
+	requests      *requestLog
+	errors        *errorLog
 	// reportedErrors remembers the last failure reported per resource, target and
 	// agent, so the Errors view gets one entry per change rather than one per
 	// reconcile pass.

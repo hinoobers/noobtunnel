@@ -61,6 +61,42 @@ const answer = `{
   }
 }`
 
+// TestFailuresAreHandedToTheOperator covers the wiring that puts a broken API where
+// every other failure goes: the client reports what went wrong, and the same
+// failure twice is not reported twice.
+func TestFailuresAreHandedToTheOperator(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.status = http.StatusBadGateway
+	fake.body = `{"error": "the upstream is down"}`
+	api := New(fake.server.URL, "")
+	seen := []string{}
+	api.OnError = func(err error) { seen = append(seen, err.Error()) }
+
+	ctx := context.Background()
+	addr := netip.MustParseAddr("1.1.1.1")
+	_, _ = api.Lookup(ctx, addr)
+	// The failed answer is remembered, so a retry within the failure window does
+	// not ask again and does not report again.
+	_, _ = api.Lookup(ctx, addr)
+	if len(seen) != 1 {
+		t.Fatalf("the failure should be reported once, got %d: %v", len(seen), seen)
+	}
+	if !strings.Contains(seen[0], "502") {
+		t.Fatalf("the report should carry the API's status: %v", seen)
+	}
+
+	// A response that is not the documented JSON is reported too, because that is
+	// what "unexpected answer" looks like from here.
+	fake.status = http.StatusOK
+	fake.body = `not json at all`
+	if _, err := api.Lookup(ctx, netip.MustParseAddr("1.1.1.2")); err == nil {
+		t.Fatal("an unexpected answer has to be an error")
+	}
+	if len(seen) != 2 || !strings.Contains(seen[1], "not the documented JSON") {
+		t.Fatalf("the unexpected answer should be reported: %v", seen)
+	}
+}
+
 // TestLookupReadsTheDocumentedAnswer covers the fields country rules need, and the
 // order they are taken from: the abuse report first, then the allocation, then the
 // network's ASN.

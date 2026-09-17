@@ -65,6 +65,9 @@ type API struct {
 	lookups   int
 	lastError string
 	lastAt    time.Time
+	// OnError is told about a failed lookup, so an API that stops answering or
+	// sends something unexpected shows up where every other failure does.
+	OnError func(error)
 }
 
 type entry struct {
@@ -178,6 +181,7 @@ func (a *API) Lookup(ctx context.Context, addr netip.Addr) (Lookup, error) {
 	info, err := a.fetch(ctx, host, token, addr)
 	a.remember(addr, info, err)
 	if err != nil {
+		a.report(err)
 		return Lookup{}, err
 	}
 	return info, nil
@@ -226,6 +230,17 @@ func (a *API) remember(addr netip.Addr, info Lookup, err error) {
 	a.lastAt = time.Now()
 	a.lookups++
 	a.cache[addr] = entry{info: info, at: time.Now()}
+}
+
+// report hands a failure to whoever is listening, without holding the lock: the
+// callback records an error, and that reads this client's own status.
+func (a *API) report(err error) {
+	a.mu.Lock()
+	callback := a.OnError
+	a.mu.Unlock()
+	if callback != nil {
+		callback(err)
+	}
 }
 
 // cached returns a remembered outcome while it is still fresh: the answer, the

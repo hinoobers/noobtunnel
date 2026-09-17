@@ -2,12 +2,53 @@ package control_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/noobtunnel/noobtunnel/internal/control"
 )
+
+// TestIPAPIFailuresReachTheErrorsView covers an API that stops answering, or sends
+// something unexpected: that is a failure like any other, so it has to appear
+// where every failure does - once per distinct message, because lookups happen on
+// the request path.
+func TestIPAPIFailuresReachTheErrorsView(t *testing.T) {
+	h := newHarness(t, true)
+	failure := errors.New(`geoip: https://iplog.example.com: Get "https://iplog.example.com/checkip?ip=1.1.1.1": context deadline exceeded`)
+	h.server.ReportGeoIPErrorForTest(failure)
+	h.server.ReportGeoIPErrorForTest(failure)
+
+	entries := geoIPEntries(h.server.ErrorsForTest())
+	if len(entries) != 1 {
+		t.Fatalf("the failure should be reported once, got %d: %+v", len(entries), entries)
+	}
+	if entries[0].Source != "geoip" || !strings.Contains(entries[0].Detail, "context deadline exceeded") {
+		t.Fatalf("the entry should carry the API's own error: %+v", entries[0])
+	}
+	if !strings.Contains(entries[0].Hint, "Settings") {
+		t.Fatalf("the entry should say where to fix it: %+v", entries[0])
+	}
+
+	// A different failure is a new entry; the same one again is not.
+	h.server.ReportGeoIPErrorForTest(errors.New("geoip: the API sent something that is not the documented JSON"))
+	if got := len(geoIPEntries(h.server.ErrorsForTest())); got != 2 {
+		t.Fatalf("a different failure should be reported, got %d entries", got)
+	}
+}
+
+// geoIPEntries keeps the entries this test is about: the harness records its own
+// simulated-backend note as well.
+func geoIPEntries(entries []control.ErrorEntry) []control.ErrorEntry {
+	var out []control.ErrorEntry
+	for _, entry := range entries {
+		if entry.Source == "geoip" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
 
 // TestIPAPISettingsAreStoredAndUsed covers the settings panel end to end: the host
 // and token are saved, the lookup uses them straight away, and the country a rule

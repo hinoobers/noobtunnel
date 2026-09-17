@@ -856,6 +856,10 @@ consulted once per address, not once per request. Until a host is configured,
 country rules simply have no data and stay inactive. `Settings -> IP API` shows
 whether the host and token work, and can test them against `1.1.1.1`.
 
+When the API stops answering, or sends something that is not the documented JSON,
+that failure appears in **Logs -> Errors** with the API's own message - once per
+distinct failure, not once per request.
+
 The same settings can be given at startup:
 
 ```sh

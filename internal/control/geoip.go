@@ -45,7 +45,31 @@ func (s *Server) geoIPClient() *geoip.API {
 	if token == "" {
 		token = settings.Token
 	}
-	return geoip.New(host, token)
+	api := geoip.New(host, token)
+	// A failing API is a failure like any other: it belongs in Logs, Errors, with
+	// the reason, instead of only in the settings panel.
+	api.OnError = s.reportGeoIPError
+	return api
+}
+
+// reportGeoIPError records an API failure once per distinct message. Country
+// lookups happen on the request path, so an API that is down would otherwise fill
+// the Errors view with one entry per request.
+func (s *Server) reportGeoIPError(err error) {
+	if err == nil || s.errors == nil {
+		return
+	}
+	message := err.Error()
+	s.mu.Lock()
+	changed := s.geoIPReported != message
+	s.geoIPReported = message
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+	s.log.Warn("the IP API is not answering", "error", message)
+	s.errors.record("geoip", "the IP API is not answering", message,
+		"check the host and token in Settings -> IP API; country rules have no data until it answers")
 }
 
 // geoIPCredentials is what the control node would use right now, for the panel.
