@@ -9,3 +9,6 @@
 .DS_Store
 Thumbs.db
 *.swp
+
+# Operator SSH credentials are local-only and must never enter the repository.
+sshkeys/
