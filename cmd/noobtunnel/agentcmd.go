@@ -20,6 +20,7 @@ func runAgent(args []string) error {
 		fingerprint  = fs.String("fingerprint", env("NOOBTUNNEL_FINGERPRINT", ""), "control node certificate fingerprint (sha256, hex)")
 		insecure     = fs.Bool("insecure", envBool("NOOBTUNNEL_INSECURE", false), "skip certificate verification (testing only)")
 		iface        = fs.String("interface", env("NOOBTUNNEL_INTERFACE", "noobtun"), "WireGuard interface name")
+		wgPort       = fs.Int("wg-port", envInt("NOOBTUNNEL_WG_PORT", 0), "stable WireGuard UDP port (zero derives it from the agent ID)")
 		stateDir     = fs.String("state-dir", env("NOOBTUNNEL_STATE_DIR", defaultStateDir()), "directory for the agent identity")
 		name         = fs.String("name", env("NOOBTUNNEL_NAME", ""), "name reported to the control node (defaults to the hostname)")
 		advertise    = fs.String("advertise", env("NOOBTUNNEL_ADVERTISE", ""), "comma separated CIDRs this agent routes for the mesh")
@@ -50,6 +51,7 @@ func runAgent(args []string) error {
 		Fingerprint:     strings.TrimSpace(*fingerprint),
 		Insecure:        *insecure,
 		Interface:       *iface,
+		WGListenPort:    *wgPort,
 		StateDir:        *stateDir,
 		Name:            *name,
 		Advertise:       parseCommaList([]string{*advertise}),

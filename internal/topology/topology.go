@@ -266,9 +266,12 @@ func BuildHubConfig(in HubInput) (wg.Config, []Rejected) {
 
 // AgentInput describes everything needed to build an agent's device.
 type AgentInput struct {
-	Mesh     Mesh
-	Self     Member
-	Hub      HubMember
+	Mesh Mesh
+	Self Member
+	Hub  HubMember
+	// WGPort is the agent's stable local UDP port. A stable five-tuple avoids
+	// landing on a different cloud/NAT path every time the process restarts.
+	WGPort   int
 	Peers    []Member
 	PairKeys map[uint32]string
 	// PrivateKey is the agent's own WireGuard private key.
@@ -292,6 +295,7 @@ func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
 		Interface: wg.InterfaceConfig{
 			PrivateKey: in.PrivateKey,
 			Addresses:  []string{netip.PrefixFrom(in.Self.Address, 32).String()},
+			ListenPort: in.WGPort,
 			MTU:        in.Mesh.MTU,
 		},
 	}

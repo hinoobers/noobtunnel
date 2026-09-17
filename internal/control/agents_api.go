@@ -246,7 +246,8 @@ func (s *Server) AgentConfigPreview(id uint32) (string, error) {
 			KeepaliveSec:  settings.KeepaliveSec,
 			DirectEnabled: settings.DirectPaths,
 		},
-		Self: topology.Member{ID: id, Name: agent.Name, Address: addr},
+		Self:   topology.Member{ID: id, Name: agent.Name, Address: addr},
+		WGPort: 51820 + int(id%1000),
 		Hub: topology.HubMember{
 			Address:      pool.HubAddress(),
 			PublicKey:    st.Hub.PublicKey,

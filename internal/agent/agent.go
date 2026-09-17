@@ -43,7 +43,10 @@ type Options struct {
 	Insecure bool
 	// Interface is the WireGuard device name.
 	Interface string
-	StateDir  string
+	// WGListenPort is the stable UDP port for this agent. Zero derives one from
+	// the enrolled agent ID, avoiding a new NAT/ECMP path after every restart.
+	WGListenPort int
+	StateDir     string
 	// Name overrides the hostname reported to the control node.
 	Name string
 	// Advertise lists extra CIDRs this agent routes for the mesh.
@@ -139,6 +142,9 @@ func New(opts Options) (*Agent, error) {
 	}
 	if opts.Interface == "" {
 		opts.Interface = "noobtun"
+	}
+	if opts.WGListenPort < 0 || opts.WGListenPort > 65535 {
+		return nil, fmt.Errorf("agent: WireGuard listen port %d is invalid", opts.WGListenPort)
 	}
 	if opts.DialTimeout == 0 {
 		opts.DialTimeout = defaultDialTimeout
@@ -820,6 +826,10 @@ func (a *Agent) desiredConfig() (wg.Config, error) {
 	if err != nil {
 		return wg.Config{}, err
 	}
+	listenPort := a.opts.WGListenPort
+	if listenPort == 0 {
+		listenPort = defaultAgentListenPort(welcome.AgentID)
+	}
 	in := topology.AgentInput{
 		Mesh: topology.Mesh{
 			CIDR:          meshPrefix,
@@ -827,7 +837,8 @@ func (a *Agent) desiredConfig() (wg.Config, error) {
 			KeepaliveSec:  welcome.KeepaliveSec,
 			DirectEnabled: a.opts.Direct,
 		},
-		Self: topology.Member{ID: welcome.AgentID, Name: welcome.Name, Address: selfAddr},
+		Self:   topology.Member{ID: welcome.AgentID, Name: welcome.Name, Address: selfAddr},
+		WGPort: listenPort,
 		Hub: topology.HubMember{
 			Address:      hubAddr,
 			PublicKey:    welcome.Hub.PublicKey,
@@ -865,6 +876,12 @@ func (a *Agent) desiredConfig() (wg.Config, error) {
 	}
 	cfg, _ := topology.BuildAgentConfig(in)
 	return cfg, nil
+}
+
+// defaultAgentListenPort is stable yet different for the usual case of several
+// agents sharing one public NAT. The bounded offset keeps it in the valid range.
+func defaultAgentListenPort(agentID uint32) int {
+	return 51820 + int(agentID%1000)
 }
 
 // collectStats reads the live device state and packages it for the control node.

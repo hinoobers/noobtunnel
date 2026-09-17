@@ -73,11 +73,15 @@ func TestRelayedPeerIsOwnedByHub(t *testing.T) {
 		Mesh:       testMesh(),
 		Self:       self,
 		Hub:        hub,
+		WGPort:     51821,
 		Peers:      []Member{peer},
 		PrivateKey: "SELFPRIV",
 		PairKeys:   map[uint32]string{2: "PAIRPSK"},
 		Direct:     map[uint32]bool{},
 	})
+	if cfg.Interface.ListenPort != 51821 {
+		t.Fatalf("agent listen port = %d, want stable port 51821", cfg.Interface.ListenPort)
+	}
 
 	hubEntry, ok := hubPeer(cfg, "HUBKEY")
 	if !ok {
