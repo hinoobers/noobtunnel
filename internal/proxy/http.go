@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -24,7 +25,20 @@ import (
 // it.
 type dialTimingKey struct{}
 
-type dialTiming struct{ ms atomic.Int64 }
+type dialTiming struct {
+	ms        atomic.Int64
+	started   time.Time
+	wroteAt   atomic.Int64
+	firstByte atomic.Int64
+	reused    atomic.Bool
+}
+
+type backendTiming struct {
+	dialMs     int64
+	queueMs    int64
+	backendMs  int64
+	reusedConn bool
+}
 
 // maxRetryBody is how much of a request body is buffered so a failed target can
 // be retried without sending a truncated body.
@@ -256,7 +270,8 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = &countingBody{ReadCloser: r.Body, target: &res.stat.set}
 	}
 
-	response, chosen, dialMs, err := h.roundTrip(res, r)
+	policyMs := time.Since(started).Milliseconds()
+	response, chosen, timing, err := h.roundTrip(res, r)
 	if err != nil {
 		if callerGaveUp(r.Context(), err) {
 			// The caller went away before anything was served: nothing to record
@@ -270,7 +285,8 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
+			DurationMs: time.Since(started).Milliseconds(), DialMs: timing.dialMs,
+			PolicyMs: policyMs, QueueMs: timing.queueMs, BackendMs: timing.backendMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
@@ -297,7 +313,9 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 		Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
-		DurationMs: totalMs, DialMs: dialMs, HeaderMs: headerMs,
+		DurationMs: totalMs, DialMs: timing.dialMs, HeaderMs: headerMs,
+		PolicyMs: policyMs, QueueMs: timing.queueMs, BackendMs: timing.backendMs,
+		ReusedConn: timing.reusedConn,
 		TransferMs: max(0, totalMs-headerMs), Target: chosen.Published(),
 	})
 	if flusher, ok := w.(http.Flusher); ok {
@@ -325,7 +343,7 @@ func isUpgrade(r *http.Request) bool {
 // ways until either side closes. Everything before the upgrade - the identity
 // check and the access rules - has already run, so a rule can still refuse it.
 func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res *resource, started time.Time) {
-	response, chosen, dialMs, err := h.roundTrip(res, r)
+	response, chosen, timing, err := h.roundTrip(res, r)
 	if err != nil {
 		if callerGaveUp(r.Context(), err) {
 			// The caller went away; the target and the resource are not at fault.
@@ -337,7 +355,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
+			DurationMs: time.Since(started).Milliseconds(), DialMs: timing.dialMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
@@ -516,7 +534,7 @@ func (h *httpResource) cachedAuth(res *resource, username, password string, veri
 type authEntry struct{ expiry time.Time }
 
 // roundTrip tries each candidate target in order.
-func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response, TargetSpec, int64, error) {
+func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response, TargetSpec, backendTiming, error) {
 	candidates := res.candidates()
 	// Only buffer bounded, known-size bodies when there is a fallback target.
 	// Large and chunked uploads must start flowing immediately and stay bounded
@@ -527,15 +545,16 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 		raw, err := io.ReadAll(io.LimitReader(r.Body, maxRetryBody+1))
 		_ = r.Body.Close()
 		if err != nil {
-			return nil, TargetSpec{}, 0, err
+			return nil, TargetSpec{}, backendTiming{}, err
 		}
 		if int64(len(raw)) != r.ContentLength {
-			return nil, TargetSpec{}, 0, fmt.Errorf("request body length does not match Content-Length")
+			return nil, TargetSpec{}, backendTiming{}, fmt.Errorf("request body length does not match Content-Length")
 		}
 		buffered = raw
 		replayable = true
 	}
 	var lastErr error
+	var lastTiming backendTiming
 	for index, candidate := range candidates {
 		if index > 0 && !replayable {
 			// The body cannot be resent, so stop after the first attempt.
@@ -565,13 +584,26 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 		outbound.RequestURI = ""
 		outbound.Host = r.Host
 		outbound.Close = false
-		timing := &dialTiming{}
-		outbound = outbound.WithContext(context.WithValue(outbound.Context(), dialTimingKey{}, timing))
+		timing := &dialTiming{started: time.Now()}
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				timing.reused.Store(info.Reused)
+			},
+			WroteRequest: func(httptrace.WroteRequestInfo) {
+				timing.wroteAt.CompareAndSwap(0, time.Now().UnixNano())
+			},
+			GotFirstResponseByte: func() {
+				timing.firstByte.CompareAndSwap(0, time.Now().UnixNano())
+			},
+		}
+		outbound = outbound.WithContext(httptrace.WithClientTrace(
+			context.WithValue(outbound.Context(), dialTimingKey{}, timing), trace))
 		transport := h.transportFor(candidate, res.spec.ProxyProtocol)
 		response, err := transport.RoundTrip(outbound)
+		lastTiming = timing.snapshot()
 		if err == nil {
 			res.stat.targetFor(candidate.ID).setError(nil)
-			return response, candidate, timing.ms.Load(), nil
+			return response, candidate, lastTiming, nil
 		}
 		lastErr = err
 		// A caller that went away says nothing about the target. Recording it made
@@ -587,7 +619,22 @@ func (h *httpResource) roundTrip(res *resource, r *http.Request) (*http.Response
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no targets are configured")
 	}
-	return nil, TargetSpec{}, 0, lastErr
+	return nil, TargetSpec{}, lastTiming, lastErr
+}
+
+func (t *dialTiming) snapshot() backendTiming {
+	wroteAt := t.wroteAt.Load()
+	firstByte := t.firstByte.Load()
+	dialMs := t.ms.Load()
+	queueMs := int64(0)
+	backendMs := int64(0)
+	if wroteAt > 0 {
+		queueMs = max(0, time.Unix(0, wroteAt).Sub(t.started).Milliseconds()-dialMs)
+	}
+	if wroteAt > 0 && firstByte >= wroteAt {
+		backendMs = time.Duration(firstByte - wroteAt).Milliseconds()
+	}
+	return backendTiming{dialMs: dialMs, queueMs: queueMs, backendMs: backendMs, reusedConn: t.reused.Load()}
 }
 
 // Connection header tokens are hop-specific even when their names are custom.

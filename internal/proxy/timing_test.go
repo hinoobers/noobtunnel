@@ -69,6 +69,9 @@ func TestTheRequestLogSeparatesConnectingFromWaiting(t *testing.T) {
 		if event.HeaderMs < 30 || event.HeaderMs > event.DurationMs {
 			t.Fatalf("backend header timing is wrong: %+v", event)
 		}
+		if event.BackendMs < 25 || event.BackendMs > event.HeaderMs {
+			t.Fatalf("the exact request-written to first-byte timing is wrong: %+v", event)
+		}
 		if event.TransferMs < 20 || event.HeaderMs+event.TransferMs > event.DurationMs+1 {
 			t.Fatalf("response transfer timing is wrong: %+v", event)
 		}

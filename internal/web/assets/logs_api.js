@@ -102,7 +102,7 @@ function renderRequests(node, recent) {
       // timestamps, and "2m ago" is unhelpful once a row is a few hours old.
       h('td', { class: 'mono tiny', title: relTime(entry.time) }, absTime(entry.time)),
       h('td', { class: 'mono tiny' }, fmtMs(entry.durationMs), timingBreakdown(entry)),
-      h('td', { class: 'mono tiny' }, entry.host || '—'),
+      h('td', { class: 'mono tiny', title: (entry.path || '/') + (entry.status ? ' · HTTP ' + entry.status : '') }, entry.host || '—'),
       h('td', { class: 'mono tiny', title: entry.account ? 'signed in as ' + entry.account : '' }, entry.ip || '—'),
       h('td', null, countryCell(entry)),
       h('td', { class: 'muted tiny', title: entry.target ? 'sent to ' + entry.target : '' }, entry.resource || '—'),
@@ -205,17 +205,26 @@ function timingBreakdown(entry) {
   const dial = entry.dialMs || 0;
   if (!total) return null;
   const headers = entry.headerMs || total;
-  const backend = Math.max(0, headers - dial);
+  const policy = entry.policyMs || 0;
+  const queue = entry.queueMs || 0;
+  // Older servers did not report the exact request-written -> first-byte span,
+  // so retain their former estimate while a page is rolling through an update.
+  const backend = entry.backendMs === undefined
+    ? Math.max(0, headers - dial) : Math.max(0, entry.backendMs || 0);
   const transfer = Math.max(0, entry.transferMs || total - headers);
   const phases = [
+    ['policy', policy],
     ['connect', dial],
+    ['queue', queue],
     ['backend', backend],
     ['send', transfer],
   ];
   const dominant = phases.reduce((best, phase) => phase[1] > best[1] ? phase : best, phases[0]);
   const note = h('div', { class: 'muted tiny' },
     dominant[0] + ' ' + fmtMs(dominant[1]));
-  note.title = 'connect ' + fmtMs(dial) + ', backend ' + fmtMs(backend) +
+  note.title = 'policy ' + fmtMs(policy) + ', connect ' + fmtMs(dial) +
+    (entry.reusedConn ? ' (reused connection)' : ' (new connection)') +
+    ', queue/write ' + fmtMs(queue) + ', backend first byte ' + fmtMs(backend) +
     ', response transfer ' + fmtMs(transfer) + ' (proxy total ' + fmtMs(total) + ')';
   return note;
 }

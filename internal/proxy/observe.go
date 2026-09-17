@@ -33,6 +33,17 @@ type RequestEvent struct {
 	// connection to a service that then answers in milliseconds is the tunnel, and
 	// a connection made in a millisecond followed by a slow answer is the service.
 	DialMs int64 `json:"dialMs,omitempty"`
+	// PolicyMs is time spent inside the proxy before the upstream request starts:
+	// authentication, country rules and request preparation.
+	PolicyMs int64 `json:"policyMs,omitempty"`
+	// QueueMs is transport overhead after policy evaluation and before the request
+	// has been written, excluding a fresh connection's DialMs.
+	QueueMs int64 `json:"queueMs,omitempty"`
+	// BackendMs begins only after the upstream request is written and ends at the
+	// first response byte. Unlike HeaderMs it cannot include access-rule work.
+	BackendMs int64 `json:"backendMs,omitempty"`
+	// ReusedConn says the upstream HTTP connection came from the idle pool.
+	ReusedConn bool `json:"reusedConn,omitempty"`
 	// HeaderMs is elapsed time until the backend response headers arrived.
 	HeaderMs int64 `json:"headerMs,omitempty"`
 	// TransferMs is time spent copying the response body after its headers.

@@ -35,6 +35,10 @@ type RequestEntry struct {
 	// tunnel apart from a slow service: seconds to connect is the path, milliseconds
 	// to connect followed by a slow answer is the service.
 	DialMs     int64 `json:"dialMs,omitempty"`
+	PolicyMs   int64 `json:"policyMs,omitempty"`
+	QueueMs    int64 `json:"queueMs,omitempty"`
+	BackendMs  int64 `json:"backendMs,omitempty"`
+	ReusedConn bool  `json:"reusedConn,omitempty"`
 	HeaderMs   int64 `json:"headerMs,omitempty"`
 	TransferMs int64 `json:"transferMs,omitempty"`
 }
@@ -97,6 +101,10 @@ func (l *requestLog) record(event proxy.RequestEvent) {
 		Target:     event.Target,
 		DurationMs: event.DurationMs,
 		DialMs:     event.DialMs,
+		PolicyMs:   event.PolicyMs,
+		QueueMs:    event.QueueMs,
+		BackendMs:  event.BackendMs,
+		ReusedConn: event.ReusedConn,
 		HeaderMs:   event.HeaderMs,
 		TransferMs: event.TransferMs,
 	}
