@@ -496,6 +496,12 @@ tbody tr:last-child td { border-bottom: 0; }
 
 .modal { width: min(680px, 100%); max-height: 88vh; overflow: auto; animation: rise .18s ease; }
 @keyframes rise { from { transform: translateY(8px); opacity: .6; } to { transform: none; opacity: 1; } }
+.modal.modal-shake { animation: modal-shake .34s ease; }
+@keyframes modal-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-9px); }
+  40%, 80% { transform: translateX(9px); }
+}
 
 .drawer-overlay { place-items: stretch end; padding: 0; }
 .drawer { width: min(580px, 100%); height: 100%; max-height: 100vh; overflow: auto; border-radius: 0; border-right: 0; border-top: 0; border-bottom: 0; animation: slide .2s ease; }

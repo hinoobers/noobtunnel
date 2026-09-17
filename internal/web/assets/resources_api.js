@@ -291,12 +291,19 @@ function openResourceEditor(id) {
   }
   state.resourceForm = { id: id === null || id === undefined ? null : Number(id) };
   state.resourceEditorKey = '';
+  if (state.resourceForm.id !== null && window.history && window.history.pushState) {
+    const target = '/resources/' + state.resourceForm.id;
+    if (window.location.pathname !== target) window.history.pushState({ view: 'resources', resourceId: state.resourceForm.id }, '', target);
+  }
   renderShell();
 }
 
-function closeResourceEditor() {
+function closeResourceEditor(push = true) {
   state.resourceForm = null;
   state.resourceEditorKey = '';
+  if (push && window.history && window.history.pushState && window.location.pathname !== '/resources') {
+    window.history.pushState({ view: 'resources' }, '', '/resources');
+  }
   if (shell && shell.resourceEditor) clear(shell.resourceEditor);
   renderShell();
 }
@@ -318,6 +325,14 @@ function renderResourceEditor() {
   const existing = isEdit ? findResource(state.resourceForm.id) : null;
   if (isEdit && !existing) {
     state.resourceForm = null;
+    state.resourceEditorKey = '';
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({ view: 'resources' }, '', '/resources');
+    }
+    shell.resourceEditor.hidden = true;
+    clear(shell.resourceEditor);
+    shell.resourceList.hidden = false;
+    toast('That resource no longer exists.', 'fail');
     return;
   }
   const key = isEdit ? 'edit:' + state.resourceForm.id : 'add';
@@ -850,6 +865,9 @@ function resourceEditorPage(existing) {
       else await api('/api/resources', { method: 'POST', body });
       state.resourceForm = null;
       state.resourceEditorKey = '';
+      if (window.history && window.history.pushState && window.location.pathname !== '/resources') {
+        window.history.pushState({ view: 'resources' }, '', '/resources');
+      }
       await refresh();
       toast(isEdit ? 'Resource updated' : 'Service published', 'ok');
     } catch (err) {

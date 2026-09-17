@@ -204,8 +204,27 @@ const appRoot = () => $('#app');
 const VIEW_PATHS = ['overview', 'agents', 'resources', 'domains', 'exitnodes', 'users', 'activity', 'settings'];
 
 function viewFromPath(pathname) {
+  const route = routeFromPath(pathname);
+  return route ? route.view : '';
+}
+
+// routeFromPath also recognises an open resource editor. Keeping the resource
+// id in the URL means refresh, back/forward and shared links all restore the
+// same editor instead of dropping the operator back on the resource list.
+function routeFromPath(pathname) {
   const name = String(pathname || '').replace(/^\/+|\/+$/g, '').toLowerCase();
-  return VIEW_PATHS.includes(name) ? name : '';
+  const resource = name.match(/^resources\/(\d+)$/);
+  if (resource) return { view: 'resources', resourceId: Number(resource[1]) };
+  return VIEW_PATHS.includes(name) ? { view: name, resourceId: null } : null;
+}
+
+function applyRoute(route) {
+  if (!route) return;
+  state.view = route.view;
+  state.resourceForm = route.view === 'resources' && route.resourceId !== null
+    ? { id: route.resourceId }
+    : null;
+  state.resourceEditorKey = '';
 }
 
 // setView switches tabs and keeps the address bar in step. push=false is used
@@ -213,6 +232,8 @@ function viewFromPath(pathname) {
 function setView(view, push = true) {
   if (!VIEW_PATHS.includes(view)) return;
   state.view = view;
+  state.resourceForm = null;
+  state.resourceEditorKey = '';
   // A highlight belongs to the visit that asked for it: leaving Logs drops it.
   if (view !== 'logs') state.errorMatch = '';
   if (push && typeof window !== 'undefined' && window.history && window.history.pushState) {
@@ -235,8 +256,8 @@ async function boot() {
     render();
     return;
   }
-  const deepLink = viewFromPath(window.location.pathname);
-  if (deepLink) state.view = deepLink;
+  const deepLink = routeFromPath(window.location.pathname);
+  if (deepLink) applyRoute(deepLink);
   await refresh(true);
   startStream();
 }
@@ -448,15 +469,20 @@ function installGlobalActions() {
   globalActionsInstalled = true;
   document.addEventListener('click', handleGlobalAction);
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') { closeModal(); renderShell(); }
+    if (event.key === 'Escape') {
+      if (dismissModalPassively()) renderShell();
+    }
     if (event.key === '/' && document.activeElement === document.body) {
       event.preventDefault();
       if (shell && shell.filter) { setView('agents'); shell.filter.focus(); }
     }
   });
   window.addEventListener('popstate', () => {
-    const view = viewFromPath(window.location.pathname);
-    if (view) setView(view, false);
+    const route = routeFromPath(window.location.pathname);
+    if (route) {
+      applyRoute(route);
+      renderShell();
+    }
   });
 }
 
@@ -654,6 +680,29 @@ function describeAgents(summary) {
 
 /* ---------- modal plumbing ---------- */
 
+let modalSession = null;
+
+function shakeModal(node) {
+  if (!node) return;
+  node.classList.remove('modal-shake');
+  // Restart the animation even when two rejected dismissals happen quickly.
+  void node.offsetWidth;
+  node.classList.add('modal-shake');
+  setTimeout(() => node.classList.remove('modal-shake'), 360);
+}
+
+// Backdrop clicks and Escape are passive dismissal attempts. Once a form has
+// been touched they refuse to discard it; an explicit close/cancel control is
+// still allowed to call closeModal directly.
+function dismissModalPassively() {
+  if (modalSession && modalSession.dirty) {
+    shakeModal(modalSession.node);
+    return false;
+  }
+  closeModal();
+  return true;
+}
+
 function openModal(node, { drawer = false } = {}) {
   closeModal();
   const overlay = h('div', { class: 'overlay' + (drawer ? ' drawer-overlay' : '') }, node);
@@ -661,18 +710,33 @@ function openModal(node, { drawer = false } = {}) {
   // then let the same click land on whatever sat behind it (usually the button
   // that opened the dialog), which re-opened it and looked like a shake.
   overlay.addEventListener('click', (event) => {
-    if (event.target !== overlay) return;
+    if (event.target !== overlay) {
+      // Buttons that add/remove dynamic form rows may not emit input or change.
+      const button = event.target.closest && event.target.closest('button');
+      if (button && button.dataset.action !== 'modal-close' && button.type !== 'submit' &&
+          modalSession && modalSession.node === node) {
+        modalSession.dirty = true;
+      }
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
-    closeModal();
+    dismissModalPassively();
   });
   $('#modal-root').append(overlay);
+  modalSession = { node, dirty: false };
+  const markDirty = () => {
+    if (modalSession && modalSession.node === node) modalSession.dirty = true;
+  };
+  node.addEventListener('input', markDirty);
+  node.addEventListener('change', markDirty);
   const firstInput = $('input, textarea, select', node);
   if (firstInput && !drawer) firstInput.focus();
   return overlay;
 }
 
 function closeModal() {
+  modalSession = null;
   const root = $('#modal-root');
   if (root) root.replaceChildren();
   // Also clear the drawer state, otherwise dismissing the drawer by clicking

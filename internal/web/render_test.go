@@ -59,6 +59,7 @@ function fakeEl(tag = 'div') {
   Object.assign(el, {
     tagName: String(tag).toUpperCase(),
     childNodes: [], dataset: {}, style: {}, files: [],
+    _listeners: {},
     classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
     hidden: false, value: '', textContent: '', innerHTML: '', checked: false,
     required: false, placeholder: '', src: '', disabled: false,
@@ -71,7 +72,15 @@ function fakeEl(tag = 'div') {
     setAttribute(name, value) { el.attrs[name] = String(value); if (name === 'class') el.className = String(value); },
     removeAttribute(name) { delete el.attrs[name]; },
     getAttribute(name) { return name in el.attrs ? el.attrs[name] : null; },
-    addEventListener() {}, removeEventListener() {}, contains() { return false; },
+    addEventListener(type, fn) { (el._listeners[type] ||= []).push(fn); },
+    removeEventListener() {},
+    dispatchEvent(event) {
+      event.target ||= el;
+      event.preventDefault ||= () => {};
+      event.stopPropagation ||= () => {};
+      for (const fn of el._listeners[event.type] || []) fn(event);
+    },
+    contains() { return false; },
     scrollIntoView() {}, querySelector() { return fakeEl('div'); },
     querySelectorAll() { return []; }, closest() { return null; },
   });
@@ -184,6 +193,31 @@ state.data = {
   logoVersion: 'default',
 };
 state.users = [user];
+
+// Resource editors are addressable pages, not transient in-memory state.
+const editRoute = routeFromPath('/resources/42');
+if (!editRoute || editRoute.view !== 'resources' || editRoute.resourceId !== 42) {
+  throw new Error('a resource edit URL should restore its resource id');
+}
+applyRoute(editRoute);
+if (state.view !== 'resources' || !state.resourceForm || state.resourceForm.id !== 42) {
+  throw new Error('applying a resource route should reopen the editor');
+}
+applyRoute(routeFromPath('/resources'));
+if (state.resourceForm !== null) throw new Error('the resource list URL should close the editor');
+
+// Untouched dialogs dismiss from the backdrop; touched ones stay mounted until
+// an explicit close control is used.
+const cleanDialog = document.createElement('div');
+const cleanOverlay = openModal(cleanDialog);
+cleanOverlay.dispatchEvent({ type: 'click', target: cleanOverlay });
+if (modalSession !== null) throw new Error('an untouched modal should close from its backdrop');
+const dirtyDialog = document.createElement('div');
+const dirtyOverlay = openModal(dirtyDialog);
+dirtyDialog.dispatchEvent({ type: 'input', target: dirtyDialog });
+dirtyOverlay.dispatchEvent({ type: 'click', target: dirtyOverlay });
+if (!modalSession || !modalSession.dirty) throw new Error('a changed modal should reject backdrop dismissal');
+closeModal();
 
 const node = document.createElement('div');
 renderStats(node, state.data.summary, state.data.settings, state.data.server);

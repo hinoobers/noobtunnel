@@ -245,7 +245,7 @@ func TestUIAssetsAreServed(t *testing.T) {
 	}
 	// Unknown paths must not leak the SPA shell.
 	// Tab URLs (and any other path) serve the app so a browser refresh works.
-	for _, path := range []string{"/settings", "/resources", "/domains", "/agents", "/some/deep/path"} {
+	for _, path := range []string{"/settings", "/resources", "/resources/42", "/domains", "/agents", "/some/deep/path"} {
 		status, body, _ := h.api("GET", path, nil, nil)
 		if status != http.StatusOK || !strings.Contains(string(body), "/assets/app.js") {
 			t.Fatalf("GET %s returned %d, it should serve the app so refreshes work", path, status)
