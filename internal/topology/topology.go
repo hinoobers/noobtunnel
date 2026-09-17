@@ -247,6 +247,13 @@ func BuildHubConfig(in HubInput) (wg.Config, []Rejected) {
 			PublicKey:    mem.PublicKey,
 			PresharedKey: in.HubPSKs[mem.ID],
 			AllowedIPs:   allowed,
+			// The hub keeps its own sessions warm too. Without this, an idle peer's
+			// session expires and the packet that arrives next waits for a new
+			// handshake - and if the agent's UDP mapping has moved since, that
+			// handshake goes to a stale port and is only retried five seconds later.
+			// That is the whole of the "the first request takes seconds, the next
+			// one is instant" behaviour.
+			PersistentKeepalive: in.Mesh.KeepaliveSec,
 		}
 		if ep := in.DiscoveredEPs[mem.ID]; ep != "" {
 			peer.Endpoint = ep

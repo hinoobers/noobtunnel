@@ -22,11 +22,15 @@ import (
 // DefaultSettings are applied to a fresh control node.
 func DefaultSettings() Settings {
 	return Settings{
-		MeshName:           "noobtunnel",
-		BrandName:          "noobtunnel",
-		MeshCIDR:           "10.77.0.0/16",
-		MTU:                1420,
-		KeepaliveSec:       25,
+		MeshName:  "noobtunnel",
+		BrandName: "noobtunnel",
+		MeshCIDR:  "10.77.0.0/16",
+		MTU:       1420,
+		// Fifteen seconds rather than the usual twenty-five: the agent's UDP
+		// mapping is what the control node's packets travel back through, and a
+		// mapping that expires between keepalives leaves the next packet waiting
+		// for a handshake that is retried five seconds later.
+		KeepaliveSec:       15,
 		DirectPaths:        true,
 		Interface:          "noobtun",
 		WGListenPort:       51820,

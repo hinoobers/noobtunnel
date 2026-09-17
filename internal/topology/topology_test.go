@@ -272,6 +272,33 @@ func TestPinnedAddressBeatsAnotherMachinesRange(t *testing.T) {
 	}
 }
 
+// TestTheHubKeepsItsSessionsWarm covers the delay that made the first request
+// after an idle spell take seconds: an expired session means the next packet waits
+// for a new handshake, and if the agent's UDP mapping moved since, that handshake
+// goes to a stale port and is only retried five seconds later.
+func TestTheHubKeepsItsSessionsWarm(t *testing.T) {
+	mesh := testMesh()
+	mesh.KeepaliveSec = 15
+	agent := stubAgent(1, "homelab", "10.77.0.2", "192.168.7.0/24")
+	agent.PublicKey = "KEY1"
+
+	cfg, _ := BuildHubConfig(HubInput{
+		Mesh:       mesh,
+		HubAddress: mustAddr(t, "10.77.0.1"),
+		PrivateKey: "HUBPRIV",
+		WGPort:     51820,
+		Members:    []Member{agent},
+		HubPSKs:    map[uint32]string{1: "PSK1"},
+	})
+	if len(cfg.Peers) != 1 {
+		t.Fatalf("one peer expected, got %d", len(cfg.Peers))
+	}
+	if cfg.Peers[0].PersistentKeepalive != 15 {
+		t.Fatalf("the hub has to keep the session warm, keepalive = %d",
+			cfg.Peers[0].PersistentKeepalive)
+	}
+}
+
 func TestHubConfigCarriesAgentsAndPSKs(t *testing.T) {
 	mesh := testMesh()
 	agents := []Member{

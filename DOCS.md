@@ -650,9 +650,21 @@ timer now, and report it when they cannot install them.
 
 A published service always takes the path *client -> control node -> tunnel ->
 agent -> service*, so the control node's own numbers tell you which part is slow.
-**Logs -> Requests** shows how long the control node spent on each request and the
-average in the subtitle; compare it with the same request made on the agent
-machine itself (there it never enters the tunnel).
+**Logs -> Requests** shows how long the control node spent on each request, split
+into the part spent **connecting** to the service and the part spent waiting for
+its answer: a row that says `connect 1.2 s` under the total is the path, and
+`service 1.2 s` is the service itself. The backend each request reached is in the
+resource cell's tooltip. Compare with the same request made on the agent machine
+itself (there it never enters the tunnel).
+
+The first request after an idle spell being seconds slower than the next one is
+the tunnel's session, not the service: an expired WireGuard session makes the
+packet wait for a new handshake, and if the agent's UDP mapping has moved since,
+that handshake goes to a stale port and is only retried five seconds later - which
+is why the delays look like 5 s, 11 s or 15 s. Both ends now send keepalives
+(**Settings -> Mesh & control node -> Keepalive**, fifteen seconds by default) so
+the session stays warm and the mapping stays current; a busy tunnel is never slow
+to start.
 
 Two things cause a tunnel that works but crawls, and both are fixable:
 
