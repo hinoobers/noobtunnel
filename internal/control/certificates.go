@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/noobtunnel/noobtunnel/internal/geoip"
 	"github.com/noobtunnel/noobtunnel/internal/proxy"
@@ -129,5 +130,12 @@ func (s *Server) wireCountryLookup(api *geoip.API) {
 	if api == nil {
 		return
 	}
-	s.proxies.CountryOf = func(addr netip.Addr) string { return api.Country(addr) }
+	// A decision waits, briefly, for an answer; the request log never waits, and
+	// starts a lookup in the background instead.
+	s.proxies.CountryOf = func(addr netip.Addr) string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return api.CountryForDecision(ctx, addr)
+	}
+	s.proxies.CountryOfFast = func(addr netip.Addr) string { return api.Country(addr) }
 }

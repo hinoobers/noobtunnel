@@ -25,8 +25,14 @@ import (
 var ErrNotConfigured = errors.New("geoip: no IP API is configured")
 
 const (
-	// lookupTimeout bounds one lookup while a request is waiting for an answer.
-	lookupTimeout = 3 * time.Second
+	// lookupTimeout bounds one lookup that a decision is waiting for: an access
+	// rule cannot be evaluated without an answer, and a request should not wait
+	// long for one.
+	lookupTimeout = 2 * time.Second
+	// warmTimeout bounds a lookup nobody is waiting for. It is generous on purpose:
+	// the API may be a published service of this same control node, which makes a
+	// cold answer slow, and a country that arrives late is still useful.
+	warmTimeout = 20 * time.Second
 	// clientTimeout is the cap for one HTTP call. It is longer than lookupTimeout
 	// so the settings panel can afford to wait for a slow API while the request
 	// path stays bounded by its own context.
@@ -35,10 +41,17 @@ const (
 	// move often, and the API is spared a call per request.
 	cacheTTL = 12 * time.Hour
 	// failureTTL is how long a failed lookup is remembered, so an API that is down
-	// is not retried on every request.
-	failureTTL = time.Minute
+	// is not retried on every request. It is short: the answer is usually a slow
+	// one rather than a broken one, and waiting a minute to try again is what made
+	// countries take minutes to appear.
+	failureTTL = 15 * time.Second
 	// maxResponse caps what is read from the API.
 	maxResponse = 1 << 20
+	// warmConcurrency bounds lookups that nobody is waiting for, so a burst of new
+	// client addresses cannot open hundreds of calls at once.
+	warmConcurrency = 8
+	// retryMax caps the retry backoff for an address the API has not answered for.
+	retryMax = 5 * time.Minute
 )
 
 // Lookup is what the API says about one address.
@@ -68,6 +81,15 @@ type API struct {
 	// OnError is told about a failed lookup, so an API that stops answering or
 	// sends something unexpected shows up where every other failure does.
 	OnError func(error)
+	// warming tracks addresses with a lookup in flight, and warmingAt when the next
+	// retry is due for one the API has not answered for.
+	warming   map[netip.Addr]bool
+	warmingAt map[netip.Addr]time.Time
+	// attempts counts how many times an address has failed in a row, for the retry
+	// backoff.
+	attempts map[netip.Addr]int
+	// warmSlots bounds how many background lookups run at once.
+	warmSlots chan struct{}
 }
 
 type entry struct {
@@ -81,6 +103,10 @@ type entry struct {
 // during setup and in tests.
 func New(host, token string) *API {
 	api := &API{cache: map[netip.Addr]entry{}, client: &http.Client{Timeout: clientTimeout}}
+	api.warming = map[netip.Addr]bool{}
+	api.warmingAt = map[netip.Addr]time.Time{}
+	api.attempts = map[netip.Addr]int{}
+	api.warmSlots = make(chan struct{}, warmConcurrency)
 	api.Configure(host, token)
 	return api
 }
@@ -92,6 +118,9 @@ func (a *API) Configure(host, token string) {
 	defer a.mu.Unlock()
 	if host != a.host || token != a.token {
 		a.cache = map[netip.Addr]entry{}
+		a.warming = map[netip.Addr]bool{}
+		a.warmingAt = map[netip.Addr]time.Time{}
+		a.attempts = map[netip.Addr]int{}
 		a.lookups = 0
 		a.lastError = ""
 	}
@@ -133,8 +162,13 @@ func (a *API) Stats() (host string, cached int, lookups int, lastAt time.Time, l
 	return a.host, len(a.cache), a.lookups, a.lastAt, a.lastError
 }
 
-// Country is the ISO country code for an address, or "" when it is unknown. It is
-// what country rules on resources are evaluated against.
+// Country is the ISO country code for an address, or "" when it is not known yet.
+//
+// It never waits: a request must not be held up by a lookup, and the answer is
+// useful the moment it arrives (the request log fills in every earlier entry from
+// that address). A lookup that is not cached is started in the background, with a
+// generous timeout and a retry, which is what makes a country appear in seconds
+// instead of minutes.
 func (a *API) Country(addr netip.Addr) string {
 	if !addr.IsValid() {
 		return ""
@@ -149,16 +183,88 @@ func (a *API) Country(addr netip.Addr) string {
 	if hit, _, ok := a.cached(addr); ok {
 		return hit.Country
 	}
-	// Not cached: ask, with a short deadline. A country rule that cannot see an
-	// answer would silently stop matching, which is worse than the latency of one
-	// lookup per address.
-	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
-	defer cancel()
+	a.warm(addr)
+	return ""
+}
+
+// CountryForDecision answers for a decision that cannot be made without it - an
+// access rule that tests a country - and waits, briefly, for an answer.
+func (a *API) CountryForDecision(ctx context.Context, addr netip.Addr) string {
+	if !addr.IsValid() {
+		return ""
+	}
+	addr = addr.Unmap()
+	if hit, _, ok := a.cached(addr); ok {
+		return hit.Country
+	}
+	if !a.Configured() {
+		return ""
+	}
 	info, err := a.Lookup(ctx, addr)
 	if err != nil {
+		// The rule sees no country, which the rule itself decides what to do with.
 		return ""
 	}
 	return info.Country
+}
+
+// warm looks an address up in the background, at most once at a time, and retries
+// with backoff while the API has no answer.
+func (a *API) warm(addr netip.Addr) {
+	a.mu.Lock()
+	if a.warming[addr] {
+		a.mu.Unlock()
+		return
+	}
+	if next, ok := a.warmingAt[addr]; ok && time.Now().Before(next) {
+		a.mu.Unlock()
+		return
+	}
+	a.warming[addr] = true
+	a.mu.Unlock()
+
+	go func() {
+		select {
+		case a.warmSlots <- struct{}{}:
+			defer func() { <-a.warmSlots }()
+		case <-time.After(warmTimeout):
+			a.mu.Lock()
+			delete(a.warming, addr)
+			a.mu.Unlock()
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), warmTimeout)
+		defer cancel()
+		_, err := a.Lookup(ctx, addr)
+
+		a.mu.Lock()
+		delete(a.warming, addr)
+		if err == nil {
+			delete(a.warmingAt, addr)
+			delete(a.attempts, addr)
+			a.mu.Unlock()
+			return
+		}
+		// Try again soon, further apart each time, without waiting for another
+		// request to nudge it: an API that is slow rather than broken answers on one
+		// of these, and the country appears.
+		attempts := a.attempts[addr] + 1
+		if len(a.attempts) > 2048 {
+			// A very busy node: keep the maps from growing without bound.
+			a.attempts = map[netip.Addr]int{}
+			a.warmingAt = map[netip.Addr]time.Time{}
+			attempts = 1
+		}
+		a.attempts[addr] = attempts
+		backoff := failureTTL << min(attempts-1, 5)
+		if backoff > retryMax {
+			backoff = retryMax
+		}
+		next := time.Now().Add(backoff)
+		a.warmingAt[addr] = next
+		a.mu.Unlock()
+		time.AfterFunc(time.Until(next), func() { a.warm(addr) })
+	}()
 }
 
 // Lookup answers for one address, using the cache when it can.

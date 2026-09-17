@@ -862,11 +862,18 @@ report, then the allocation, then the network's ASN. Which one answered is repor
 with the answer, so a rule that matched unexpectedly can be understood. The
 security signals the API also returns (Tor, hosting, proxy) are recorded with it.
 
-Answers are cached for twelve hours, and a failed lookup is remembered for a
-minute: the proxy asks for a country while it is handling a request, so the API is
-consulted once per address, not once per request. Until a host is configured,
-country rules simply have no data and stay inactive. `Settings -> IP API` shows
-whether the host and token work, and can test them against `1.1.1.1`.
+Answers are cached for twelve hours, so the API is consulted once per address, not
+once per request. A lookup that is not cached runs **in the background**: a request
+is never held up waiting for one, and the country appears as soon as the API
+answers - filling in every earlier request from that address with it. A lookup that
+fails is retried on a backoff (fifteen seconds, then doubling to five minutes), so a
+slow API produces countries in seconds rather than minutes. An access rule that
+tests a country is the one exception: it waits, briefly, because a decision cannot
+be made without the answer.
+
+Until a host is configured, country rules simply have no data and stay inactive.
+`Settings -> IP API` shows whether the host and token work, and can test them
+against `1.1.1.1`.
 
 When the API stops answering, or sends something that is not the documented JSON,
 that failure appears in **Logs -> Errors** with the API's own message - once per

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeAPI answers /checkip the way the documented IP API does, counting how often
@@ -19,6 +20,8 @@ type fakeAPI struct {
 	// status and body let a test make the API fail.
 	status int
 	body   string
+	// delay makes the API slow, which is what the request path has to tolerate.
+	delay time.Duration
 	// tokens records the Authorization header it was given.
 	tokens []string
 }
@@ -28,6 +31,9 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	fake := &fakeAPI{status: http.StatusOK}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fake.calls.Add(1)
+		if fake.delay > 0 {
+			time.Sleep(fake.delay)
+		}
 		fake.tokens = append(fake.tokens, r.Header.Get("Authorization"))
 		if r.URL.Path != "/checkip" {
 			http.NotFound(w, r)
@@ -148,16 +154,16 @@ func TestLookupFallsBackToTheAllocationAndTheASN(t *testing.T) {
 	}
 }
 
-// TestAnswersAreCached covers what makes this usable in the request path: the API
-// is asked once per address, not once per request, because the proxy asks for a
-// country while it is handling one.
+// TestAnswersAreCached covers what makes this usable at all: the API is asked once
+// per address, not once per request, and a decision that needs the answer gets the
+// cached one.
 func TestAnswersAreCached(t *testing.T) {
 	fake := newFakeAPI(t)
 	fake.body = answer
 	api := New(fake.server.URL, "")
 	addr := netip.MustParseAddr("1.1.1.1")
 	for i := 0; i < 5; i++ {
-		if got := api.Country(addr); got != "AU" {
+		if got := api.CountryForDecision(context.Background(), addr); got != "AU" {
 			t.Fatalf("lookup %d answered %q", i, got)
 		}
 	}
@@ -167,9 +173,42 @@ func TestAnswersAreCached(t *testing.T) {
 	// Configuring a different API drops what came from the old one.
 	fake.body = `{"data": {"allocation": {"country_code": "FR"}}}`
 	api.Configure(fake.server.URL, "other")
-	if got := api.Country(addr); got != "FR" {
+	if got := api.CountryForDecision(context.Background(), addr); got != "FR" {
 		t.Fatalf("a new configuration should be asked again, got %q", got)
 	}
+}
+
+// TestTheRequestPathNeverWaitsForTheAPI is the fix for countries taking minutes to
+// appear: the answer is wanted while a request is being logged, and a slow lookup
+// must not hold that request up. The lookup happens behind the scenes, and the
+// answer is there for the next one - and for every earlier entry from the address.
+func TestTheRequestPathNeverWaitsForTheAPI(t *testing.T) {
+	fake := newFakeAPI(t)
+	fake.body = answer
+	fake.delay = 300 * time.Millisecond
+	api := New(fake.server.URL, "")
+	addr := netip.MustParseAddr("1.1.1.1")
+
+	started := time.Now()
+	if got := api.Country(addr); got != "" {
+		t.Fatalf("nothing is known yet, got %q", got)
+	}
+	if waited := time.Since(started); waited > 100*time.Millisecond {
+		t.Fatalf("the request path waited %s for a lookup", waited)
+	}
+
+	// The lookup finishes on its own, and the answer is cached.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := api.Country(addr); got == "AU" {
+			if fake.calls.Load() != 1 {
+				t.Fatalf("the address should be looked up once, got %d", fake.calls.Load())
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the background lookup never produced an answer")
 }
 
 // TestFailuresAreReportedAndRemembered keeps a broken API from being hammered: the

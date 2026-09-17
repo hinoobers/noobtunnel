@@ -251,6 +251,10 @@ type Manager struct {
 	// CountryOf resolves a client address to an ISO country code, or "" when the
 	// information is unavailable.
 	CountryOf func(addr netip.Addr) string
+	// CountryOfFast is the same answer without waiting for it: it returns what is
+	// already known and starts a lookup in the background. It is what the request
+	// log uses, so a slow lookup never holds up a request.
+	CountryOfFast func(addr netip.Addr) string
 	// ACMEChallenge serves /.well-known/acme-challenge/ when ACME is enabled.
 	ACMEChallenge http.Handler
 	// ControlDomain publishes the control node's own UI on the shared HTTPS

@@ -73,7 +73,10 @@ func (s *Server) GeoIPLookupForTest(addr string) string {
 	if err != nil {
 		return ""
 	}
-	return api.Country(parsed)
+	// The waiting form: a caller of this wants an answer, not a promise of one.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return api.CountryForDecision(ctx, parsed)
 }
 
 // handleGeoIP reads or updates the IP API settings, and can test them.

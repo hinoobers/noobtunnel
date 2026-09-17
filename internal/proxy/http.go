@@ -175,6 +175,8 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(res.spec.Rules) > 0 {
 		decision := access.Evaluate(res.spec.Rules, access.Request{
 			IP:      clientIP(r.RemoteAddr),
+			// A rule that tests a country cannot be evaluated without one, so this
+			// path does wait - briefly - for an answer.
 			Country: h.countryOf(r.RemoteAddr),
 			Host:    r.Host,
 			Path:    r.URL.Path,
@@ -183,7 +185,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !decision.Allow {
 			h.group.manager.observe(RequestEvent{
 				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-				Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+				Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: decision.Reason, Status: http.StatusForbidden, Path: r.URL.Path,
 				DurationMs: time.Since(started).Milliseconds(),
 			})
@@ -200,7 +202,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !res.spec.WebSockets {
 			h.group.manager.observe(RequestEvent{
 				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-				Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+				Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: "websockets are disabled for this resource",
 				Status: http.StatusNotImplemented, Path: r.URL.Path,
 				DurationMs: time.Since(started).Milliseconds(),
@@ -240,7 +242,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		res.stat.setError(err)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
 			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
 		})
@@ -258,7 +260,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res.stat.targetFor(chosen.ID).set.total.Add(1)
 	h.group.manager.observe(RequestEvent{
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-		Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+		Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
 		DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs, Target: chosen.Published(),
 	})
@@ -297,7 +299,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 		res.stat.setError(err)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
 			DurationMs: time.Since(started).Milliseconds(), DialMs: dialMs,
 		})
@@ -316,7 +318,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 		_, _ = io.Copy(w, response.Body)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-			Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
 			DurationMs: time.Since(started).Milliseconds(),
 		})
@@ -352,7 +354,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 	}
 	h.group.manager.observe(RequestEvent{
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
-		Country: h.countryOf(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+		Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: http.StatusSwitchingProtocols, Path: r.URL.Path,
 		DurationMs: time.Since(started).Milliseconds(),
 	})
@@ -402,6 +404,21 @@ func (h *httpResource) countryOf(raw string) string {
 		return ""
 	}
 	return h.group.manager.CountryOf(clientIP(raw))
+}
+
+// countryForLog is the same answer for the request log, which must never wait for
+// it: a lookup that is not cached yet starts in the background and the country is
+// filled in for this request - and every earlier one from the address - as soon as
+// the API answers.
+func (h *httpResource) countryForLog(raw string) string {
+	addr := clientIP(raw)
+	if h.group.manager.CountryOfFast != nil {
+		return h.group.manager.CountryOfFast(addr)
+	}
+	if h.group.manager.CountryOf == nil {
+		return ""
+	}
+	return h.group.manager.CountryOf(addr)
 }
 
 // accountOf reports the signed in account, when identity control ran first.
