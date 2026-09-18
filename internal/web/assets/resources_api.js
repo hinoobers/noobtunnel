@@ -19,6 +19,20 @@ const PROXY_PROTOCOL_INFO = {
   v2: { label: 'PROXY v2', hint: 'Binary header, for services that prefer it.' },
 };
 
+// Common SRV consumers are shortcuts; Custom keeps the full DNS service
+// namespace available instead of pretending this can be a complete enum.
+const SRV_PRESETS = {
+  minecraft: { label: 'Minecraft Java', service: 'minecraft', protocol: 'tcp' },
+  mumble: { label: 'Mumble', service: 'mumble', protocol: 'tcp' },
+  teamspeak: { label: 'TeamSpeak 3', service: 'ts3', protocol: 'udp' },
+  sip_udp: { label: 'SIP (UDP)', service: 'sip', protocol: 'udp' },
+  sip_tcp: { label: 'SIP (TCP)', service: 'sip', protocol: 'tcp' },
+  xmpp_client: { label: 'XMPP client', service: 'xmpp-client', protocol: 'tcp' },
+  xmpp_server: { label: 'XMPP server', service: 'xmpp-server', protocol: 'tcp' },
+  ldap: { label: 'LDAP', service: 'ldap', protocol: 'tcp' },
+  custom: { label: 'Custom service', service: '', protocol: 'tcp' },
+};
+
 // RULE_FIELDS describes what an access rule can look at.
 const RULE_FIELDS = {
   country: { label: 'Country', placeholder: 'EE' },
@@ -530,6 +544,37 @@ function resourceEditorPage(existing) {
   let subdomainTouched = isEdit;
   // The publish preview: exactly what the resource will answer on.
   const domainPreview = h('div', { class: 'callout' });
+
+  const existingSRV = isEdit ? existing.srv : null;
+  const srvToggle = h('input', { type: 'checkbox', name: 'createSrv', checked: existingSRV ? true : null });
+  const srvPreset = h('select', { name: 'srvPreset' },
+    Object.entries(SRV_PRESETS).map(([value, preset]) => h('option', {
+      value, selected: value === 'custom' ? true : null,
+    }, preset.label)));
+  const srvService = h('input', {
+    name: 'srvService', spellcheck: 'false', placeholder: 'minecraft',
+    value: existingSRV ? existingSRV.service : '',
+  });
+  const srvProtocol = h('select', { name: 'srvProtocol' },
+    h('option', { value: 'tcp', selected: !existingSRV || existingSRV.protocol === 'tcp' ? true : null }, 'TCP'),
+    h('option', { value: 'udp', selected: existingSRV && existingSRV.protocol === 'udp' ? true : null }, 'UDP'));
+  const srvPriority = h('input', { name: 'srvPriority', type: 'number', min: '0', max: '65535', value: existingSRV ? existingSRV.priority : 0 });
+  const srvWeight = h('input', { name: 'srvWeight', type: 'number', min: '0', max: '65535', value: existingSRV ? existingSRV.weight : 0 });
+  const srvHint = h('div', { class: 'muted tiny' });
+  const srvDetails = h('div', { class: 'fields' },
+    h('label', { class: 'field' }, h('span', null, 'Application preset'), srvPreset),
+    h('div', { class: 'grid-2' },
+      h('label', { class: 'field' }, h('span', null, 'Service'), srvService),
+      h('label', { class: 'field' }, h('span', null, 'Transport'), srvProtocol)),
+    h('div', { class: 'grid-2' },
+      h('label', { class: 'field' }, h('span', null, 'Priority'), srvPriority),
+      h('label', { class: 'field' }, h('span', null, 'Weight'), srvWeight)));
+  const srvField = h('div', { class: 'subpanel' },
+    h('label', { class: 'switch' }, srvToggle,
+      h('span', null, h('strong', null, 'Create SRV record'),
+        h('em', null, 'Let compatible clients discover this service without typing its public port.'))),
+    srvDetails,
+    srvHint);
   // A name is optional for everything that is not routed by name, so the choice
   // to publish it on a port only is explicit rather than implied.
   const noNameOption = h('option', { value: '' }, '(no name - reachable on the port only)');
@@ -542,6 +587,29 @@ function resourceEditorPage(existing) {
     if (domainSelect.contains(noNameOption) && domainSelect.value === '') return null;
     return domains[0] || null;
   };
+  const syncSRV = () => {
+    const stream = type.value === 'tcp' || type.value === 'udp';
+    const domain = selectedDomain();
+    const automatic = !!domain && !!domain.providerId;
+    srvField.hidden = !stream;
+    srvToggle.disabled = !stream || !automatic;
+    if (!stream) srvToggle.checked = false;
+    srvDetails.hidden = !srvToggle.checked;
+    if (!domain) srvHint.textContent = 'Choose a domain before creating an SRV record.';
+    else if (!automatic) srvHint.textContent = 'Enable DNS automation for this domain before creating an SRV record.';
+    else srvHint.textContent = 'Creates _' + (srvService.value || 'service') + '._' + srvProtocol.value + '.' + resolvedHostname() +
+      ' pointing to ' + resolvedHostname() + ':' + listenPort() + '.';
+  };
+  srvToggle.addEventListener('change', syncSRV);
+  srvPreset.addEventListener('change', () => {
+    const preset = SRV_PRESETS[srvPreset.value];
+    if (preset && srvPreset.value !== 'custom') {
+      srvService.value = preset.service;
+      srvProtocol.value = preset.protocol;
+    }
+    syncSRV();
+  });
+  [srvService, srvProtocol, srvPriority, srvWeight].forEach((input) => input.addEventListener('input', syncSRV));
   const syncDomainOptions = () => {
     const byDomain = protocolIsByDomain(type.value);
     const present = domainSelect.contains(noNameOption);
@@ -641,10 +709,12 @@ function resourceEditorPage(existing) {
     syncSubdomainField();
     syncDomainNote();
     refreshPreview();
+    syncSRV();
   });
   listenInput.addEventListener('input', () => {
     syncDomainNote();
     refreshPreview();
+    syncSRV();
   });
 
   const proxyHint = h('div', { class: 'muted tiny' });
@@ -761,12 +831,14 @@ function resourceEditorPage(existing) {
     syncDomainNote();
     syncProxy();
     refreshPreview();
+    syncSRV();
   }
 
   syncProtocol();
   syncStrategy();
   syncSubdomainField();
   refreshPreview();
+  syncSRV();
   new MutationObserver(syncStrategy).observe(targetList, { childList: true });
 
   const error = h('div', { class: 'field-error', 'data-error': 'resource', hidden: true });
@@ -785,6 +857,7 @@ function resourceEditorPage(existing) {
       domainRow,
       listenField,
       h('div', { class: 'stack', style: 'gap:4px' }, listenHint, domainNote, domainPreview),
+      srvField,
       h('div', { class: 'field' }, h('span', null, 'PROXY protocol'), proxyCards, proxyHint),
       enabledField),
     h('div', { class: 'fields' },
@@ -888,6 +961,12 @@ function resourceEditorPage(existing) {
       exitNodeId: exitNodeSelect.value,
       listenPort: listenPort === '' ? 0 : Number(listenPort),
       domain: domainField.hidden ? '' : resolvedHostname(),
+      srv: srvToggle.checked ? {
+        service: srvService.value.trim().replace(/^_+/, ''),
+        protocol: srvProtocol.value,
+        priority: Number(srvPriority.value || 0),
+        weight: Number(srvWeight.value || 0),
+      } : null,
       proxyProtocol: type.value === 'udp' ? '' : proxyProtocol.value,
       rules: type.value === 'http' || type.value === 'https' ? readRules(ruleList) : [],
       identity: data.get('identity') !== null,
@@ -941,6 +1020,7 @@ function resourceBody(resource, overrides) {
     exitNodeId: resource.exitNodeId || '',
     listenPort: resource.listenPort,
     domain: resource.domain || '',
+    srv: resource.srv || null,
     proxyProtocol: resource.proxyProtocol || '',
     // Carried through every edit, so toggling a resource cannot silently change
     // what it forwards.
@@ -1090,6 +1170,7 @@ function domainOptions() {
     value: domain.hostname,
     kind: domain.kind === 'wildcard' ? 'wildcard' : 'direct',
     pattern: domain.pattern || domain.hostname,
+    providerId: domain.providerId || '',
   }));
 }
 

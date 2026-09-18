@@ -30,6 +30,13 @@ type DNSClient interface {
 	EnsureA(ctx context.Context, hostname, address string) error
 }
 
+// dnsSRVClient is implemented by providers that can manage service-discovery
+// records in addition to address records.
+type dnsSRVClient interface {
+	EnsureSRV(ctx context.Context, name, target string, port, priority, weight int) error
+	DeleteSRV(ctx context.Context, name string) error
+}
+
 // desiredDomainAddress decides which address a domain should resolve to: the
 // exit node its resources are published on, or the control node itself. It always
 // answers with an IPv4 address, because an A record cannot hold a hostname.
@@ -143,11 +150,84 @@ func (s *Server) syncDomains(ctx context.Context) {
 				"check the provider token's DNS edit permission and that the zone is in this account")
 			continue
 		}
+		serviceClient, supportsSRV := client.(dnsSRVClient)
+		if supportsSRV {
+			failed := false
+			for _, resource := range s.store.Resources() {
+				if resource.SRV == nil || !domain.Covers(resource.Domain) {
+					continue
+				}
+				if err := serviceClient.EnsureSRV(ctx, resource.SRV.RecordName(resource.Domain), resource.Domain,
+					resource.EffectiveListenPort(), resource.SRV.Priority, resource.SRV.Weight); err != nil {
+					_ = s.store.RecordDomainSync(domain.Hostname, address, err)
+					s.recordError("dns", "could not update "+resource.SRV.RecordName(resource.Domain), err.Error(),
+						"check the provider token's DNS edit permission and the SRV values")
+					failed = true
+					break
+				}
+			}
+			if failed {
+				continue
+			}
+		}
 		s.log.Info("DNS updated", "domain", domain.Hostname, "record", recordName, "address", address,
 			"exitNode", exitName, "provider", provider.Name)
 		_ = s.store.RecordDomainSync(domain.Hostname, address, nil)
 	}
 	s.broadcastState()
+}
+
+// srvDNSClient returns the automatic provider that covers a resource's domain.
+func (s *Server) srvDNSClient(resource store.Resource) (dnsSRVClient, store.Domain, error) {
+	for _, domain := range s.store.Domains() {
+		if !domain.Covers(resource.Domain) {
+			continue
+		}
+		if domain.ProviderID == "" {
+			return nil, domain, errors.New("the selected domain uses manual DNS")
+		}
+		provider, err := s.store.DNSProvider(domain.ProviderID)
+		if err != nil || !provider.Enabled {
+			return nil, domain, errors.New("the selected domain's DNS provider is unavailable")
+		}
+		factory := s.opts.DNSFactory
+		if factory == nil {
+			factory = newDNSClient
+		}
+		client, err := factory(provider)
+		if err != nil {
+			return nil, domain, err
+		}
+		serviceClient, ok := client.(dnsSRVClient)
+		if !ok {
+			return nil, domain, errors.New("the selected DNS provider does not support SRV records")
+		}
+		return serviceClient, domain, nil
+	}
+	return nil, store.Domain{}, errors.New("the resource domain is not configured")
+}
+
+func (s *Server) syncResourceSRV(ctx context.Context, resource store.Resource) error {
+	if resource.SRV == nil {
+		return nil
+	}
+	client, _, err := s.srvDNSClient(resource)
+	if err != nil {
+		return err
+	}
+	return client.EnsureSRV(ctx, resource.SRV.RecordName(resource.Domain), resource.Domain,
+		resource.EffectiveListenPort(), resource.SRV.Priority, resource.SRV.Weight)
+}
+
+func (s *Server) deleteResourceSRV(ctx context.Context, resource store.Resource) error {
+	if resource.SRV == nil {
+		return nil
+	}
+	client, _, err := s.srvDNSClient(resource)
+	if err != nil {
+		return err
+	}
+	return client.DeleteSRV(ctx, resource.SRV.RecordName(resource.Domain))
 }
 
 // verifyEvery is how long a confirmed record is trusted before the control node

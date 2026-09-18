@@ -20,6 +20,11 @@ class PublishNoobtunnelRequest extends ClientApiRequest
             'protocol' => ['required', Rule::in(['tcp', 'udp', 'http', 'https'])],
             'public_port' => ['required', 'integer', 'between:1,65535'],
             'domain' => ['nullable', 'string', 'max:253', 'required_if:protocol,https'],
+            'srv' => ['nullable', 'array'],
+            'srv.service' => ['required_with:srv', 'string', 'max:63', 'regex:/^_?[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?$/'],
+            'srv.protocol' => ['required_with:srv', Rule::in(['tcp', 'udp'])],
+            'srv.priority' => ['required_with:srv', 'integer', 'between:0,65535'],
+            'srv.weight' => ['required_with:srv', 'integer', 'between:0,65535'],
         ];
     }
 }

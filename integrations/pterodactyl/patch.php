@@ -111,6 +111,23 @@ if ($mode === 'install') {
         $replacement = "            <div className={'flex justify-end space-x-4 mt-4 w-full md:mt-0 md:w-auto'}>\n" . $componentButton . "\n";
         replaceOnce($allocationFile, $anchor, $replacement);
     }
+    $component = file_get_contents($allocationFile);
+    $component = str_replace(
+        "className={'flex-wrap md:flex-nowrap mt-2'}",
+        "className={'flex-wrap md:flex-nowrap mt-2 md:gap-x-4'}",
+        $component,
+    );
+    $component = str_replace(
+        "className={'mt-4 w-full md:mt-0 md:flex-1 md:w-auto'}",
+        "className={'mt-4 w-full md:mt-0 md:flex-1 md:w-auto md:min-w-0'}",
+        $component,
+    );
+    $component = str_replace(
+        "className={'flex justify-end space-x-4 mt-4 w-full md:mt-0 md:w-auto'}",
+        "className={'flex flex-wrap justify-end gap-4 mt-4 w-full md:mt-0 md:w-auto md:flex-shrink-0'}",
+        $component,
+    );
+    file_put_contents($allocationFile, $component);
     echo "Noobtunnel Panel integration patched.\n";
     exit(0);
 }
@@ -124,6 +141,9 @@ $component = str_replace($componentImport, '', $component);
 $component = str_replace($componentState, '', $component);
 $component = preg_replace('/\n\s*\{\/\* noobtunnel:begin \*\/\}.*?\{\/\* noobtunnel:end \*\/\}/s', '', $component);
 $component = str_replace("md:w-auto'}>\n                {allocation.isDefault", "md:w-48'}>\n                {allocation.isDefault", $component);
+$component = str_replace("className={'flex-wrap md:flex-nowrap mt-2 md:gap-x-4'}", "className={'flex-wrap md:flex-nowrap mt-2'}", $component);
+$component = str_replace("className={'mt-4 w-full md:mt-0 md:flex-1 md:w-auto md:min-w-0'}", "className={'mt-4 w-full md:mt-0 md:flex-1 md:w-auto'}", $component);
+$component = str_replace("className={'flex flex-wrap justify-end gap-4 mt-4 w-full md:mt-0 md:w-auto md:flex-shrink-0'}", "className={'flex justify-end space-x-4 mt-4 w-full md:mt-0 md:w-48'}", $component);
 file_put_contents($allocationFile, $component);
 removeTreeFiles($sourceRoot, $panel);
 echo "Noobtunnel Panel integration unpatched; its database records were preserved.\n";

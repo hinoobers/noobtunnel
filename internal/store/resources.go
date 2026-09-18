@@ -125,7 +125,10 @@ type Resource struct {
 	// default (80 for http, 443 for https).
 	ListenPort int    `json:"listenPort"`
 	Domain     string `json:"domain,omitempty"`
-	Enabled    bool   `json:"enabled"`
+	// SRV publishes a DNS service-discovery record for TCP and UDP resources.
+	// Its target and port are always this resource's domain and public port.
+	SRV     *SRVConfig `json:"srv,omitempty"`
+	Enabled bool       `json:"enabled"`
 	// ProxyProtocol prepends a PROXY protocol header ("v1" or "v2") to every
 	// connection forwarded to the service, so it can see the real client address.
 	ProxyProtocol string `json:"proxyProtocol,omitempty"`
@@ -152,6 +155,21 @@ type Resource struct {
 	AgentID    uint32 `json:"agentId,omitempty"`
 	TargetHost string `json:"targetHost,omitempty"`
 	TargetPort int    `json:"targetPort,omitempty"`
+}
+
+// SRVConfig describes the variable part of an SRV record. The owner is
+// _<service>._<protocol>.<resource domain>; the target and port follow the
+// resource so they cannot silently drift apart.
+type SRVConfig struct {
+	Service  string `json:"service"`
+	Protocol string `json:"protocol"`
+	Priority int    `json:"priority"`
+	Weight   int    `json:"weight"`
+}
+
+// RecordName returns the fully-qualified SRV owner name.
+func (s SRVConfig) RecordName(domain string) string {
+	return "_" + s.Service + "._" + s.Protocol + "." + domain
 }
 
 // AllowsWebSockets reports whether protocol upgrades may pass through. Resources
@@ -268,6 +286,7 @@ type ResourceInput struct {
 	ExitNodeID       string
 	ListenPort       int
 	Domain           string
+	SRV              *SRVConfig
 	Enabled          *bool
 	ProxyProtocol    string
 	Identity         bool
@@ -473,6 +492,10 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 	if in.Protocol == ProtocolHTTPSPassthrough && domain == "" {
 		return Resource{}, fmt.Errorf("%w: a TLS passthrough resource needs a domain, because the connection is routed by its server name", ErrBadResource)
 	}
+	srv, err := normaliseSRV(in.SRV, in.Protocol, domain)
+	if err != nil {
+		return Resource{}, err
+	}
 	if in.Identity && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",
 			ErrBadResource, in.Protocol)
@@ -512,6 +535,7 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		ExitNodeID:       exitNodeID,
 		ListenPort:       in.ListenPort,
 		Domain:           domain,
+		SRV:              srv,
 		Enabled:          true,
 		Identity:         in.Identity,
 		IdentityMode:     identityMode,
@@ -547,6 +571,38 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		return Resource{}, err
 	}
 	return resource, nil
+}
+
+// normaliseSRV validates a generic DNS SRV record. Service is intentionally not
+// an enum: the DNS namespace is extensible, so custom applications work too.
+func normaliseSRV(in *SRVConfig, resourceProtocol Protocol, domain string) (*SRVConfig, error) {
+	if in == nil {
+		return nil, nil
+	}
+	if resourceProtocol != ProtocolTCP && resourceProtocol != ProtocolUDP {
+		return nil, fmt.Errorf("%w: SRV records are only available for TCP and UDP resources", ErrBadResource)
+	}
+	if domain == "" {
+		return nil, fmt.Errorf("%w: an SRV record needs a resource domain", ErrBadResource)
+	}
+	service := strings.ToLower(strings.Trim(strings.TrimSpace(in.Service), "_"))
+	if service == "" || len(service) > 63 {
+		return nil, fmt.Errorf("%w: SRV service must be a DNS label up to 63 characters", ErrBadResource)
+	}
+	for i, r := range service {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || (r == '-' && i > 0 && i < len(service)-1) {
+			continue
+		}
+		return nil, fmt.Errorf("%w: SRV service may contain lowercase letters, numbers and internal hyphens", ErrBadResource)
+	}
+	protocol := strings.ToLower(strings.Trim(strings.TrimSpace(in.Protocol), "_"))
+	if protocol != "tcp" && protocol != "udp" {
+		return nil, fmt.Errorf("%w: SRV transport must be tcp or udp", ErrBadResource)
+	}
+	if in.Priority < 0 || in.Priority > 65535 || in.Weight < 0 || in.Weight > 65535 {
+		return nil, fmt.Errorf("%w: SRV priority and weight must be between 0 and 65535", ErrBadResource)
+	}
+	return &SRVConfig{Service: service, Protocol: protocol, Priority: in.Priority, Weight: in.Weight}, nil
 }
 
 // maxTargets bounds how many backends one resource may front.

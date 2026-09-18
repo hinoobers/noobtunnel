@@ -69,7 +69,7 @@ func (c *Cloudflare) EnsureA(ctx context.Context, hostname, address string) erro
 	// Read the record back. Reporting "in sync" from a create that the provider
 	// accepted but did not keep is how a domain ends up looking fine with no
 	// record in the zone.
-	written, err := c.findRecord(ctx, zoneID, recordName)
+	written, err := c.findRecord(ctx, zoneID, "A", recordName)
 	if err != nil {
 		return err
 	}
@@ -82,6 +82,65 @@ func (c *Cloudflare) EnsureA(ctx context.Context, hostname, address string) erro
 	return nil
 }
 
+// EnsureSRV creates or updates one DNS service-discovery record.
+func (c *Cloudflare) EnsureSRV(ctx context.Context, name, target string, port, priority, weight int) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	target = strings.ToLower(strings.TrimSpace(target))
+	if name == "" || target == "" || port < 1 || port > 65535 {
+		return fmt.Errorf("dns: an SRV name, target and valid port are required")
+	}
+	zoneID, _, err := c.findZone(ctx, name)
+	if err != nil {
+		return err
+	}
+	body := map[string]any{
+		"type": "SRV", "name": name, "ttl": c.ttl(), "comment": c.comment(),
+		"data": map[string]any{
+			"priority": priority, "weight": weight, "port": port, "target": target,
+		},
+	}
+	existing, err := c.findRecord(ctx, zoneID, "SRV", name)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		if existing.Data.Priority == priority && existing.Data.Weight == weight &&
+			existing.Data.Port == port && strings.EqualFold(existing.Data.Target, target) &&
+			existing.Comment == c.comment() {
+			return nil
+		}
+		if err := c.request(ctx, http.MethodPut, "/zones/"+zoneID+"/dns_records/"+existing.ID, body, nil); err != nil {
+			return err
+		}
+	} else if err := c.request(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", body, nil); err != nil {
+		return err
+	}
+	written, err := c.findRecord(ctx, zoneID, "SRV", name)
+	if err != nil {
+		return err
+	}
+	if written == nil || written.Data.Priority != priority || written.Data.Weight != weight ||
+		written.Data.Port != port || !strings.EqualFold(written.Data.Target, target) {
+		return fmt.Errorf("dns: the SRV record for %s did not read back with the requested values", name)
+	}
+	return nil
+}
+
+// DeleteSRV removes an SRV record previously managed by noobtunnel. Records
+// without our comment are left alone to avoid deleting an operator's record.
+func (c *Cloudflare) DeleteSRV(ctx context.Context, name string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	zoneID, _, err := c.findZone(ctx, name)
+	if err != nil {
+		return err
+	}
+	existing, err := c.findRecord(ctx, zoneID, "SRV", name)
+	if err != nil || existing == nil || existing.Comment != c.comment() {
+		return err
+	}
+	return c.request(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+existing.ID, nil, nil)
+}
+
 // upsertA creates or updates the record with the address.
 func (c *Cloudflare) upsertA(ctx context.Context, zoneID, recordName, address string) error {
 	body := map[string]any{
@@ -92,7 +151,7 @@ func (c *Cloudflare) upsertA(ctx context.Context, zoneID, recordName, address st
 		"proxied": false,
 		"comment": c.comment(),
 	}
-	existing, err := c.findRecord(ctx, zoneID, recordName)
+	existing, err := c.findRecord(ctx, zoneID, "A", recordName)
 	if err != nil {
 		return err
 	}
@@ -109,7 +168,7 @@ func (c *Cloudflare) upsertA(ctx context.Context, zoneID, recordName, address st
 	// The provider says a record with that name exists even though the lookup did
 	// not return it (a record type we cannot read, or a filter miss). Find it
 	// again and update it instead of failing the sync.
-	existing, findErr := c.findRecord(ctx, zoneID, recordName)
+	existing, findErr := c.findRecord(ctx, zoneID, "A", recordName)
 	if findErr != nil || existing == nil {
 		return err
 	}
@@ -177,13 +236,19 @@ type record struct {
 	ID      string `json:"id"`
 	Content string `json:"content"`
 	Comment string `json:"comment"`
+	Data    struct {
+		Priority int    `json:"priority"`
+		Weight   int    `json:"weight"`
+		Port     int    `json:"port"`
+		Target   string `json:"target"`
+	} `json:"data"`
 }
 
-func (c *Cloudflare) findRecord(ctx context.Context, zoneID, hostname string) (*record, error) {
+func (c *Cloudflare) findRecord(ctx context.Context, zoneID, recordType, hostname string) (*record, error) {
 	var records []record
 	// The name is escaped: a wildcard record is literally "*.example.com", and an
 	// unescaped "*" is not a query string character.
-	query := "/zones/" + zoneID + "/dns_records?type=A&name=" + url.QueryEscape(hostname)
+	query := "/zones/" + zoneID + "/dns_records?type=" + url.QueryEscape(recordType) + "&name=" + url.QueryEscape(hostname)
 	if err := c.request(ctx, http.MethodGet, query, nil, &records); err != nil {
 		return nil, err
 	}

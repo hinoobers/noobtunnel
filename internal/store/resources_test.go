@@ -188,17 +188,15 @@ func TestALoopbackTargetIsKeptForTheAgentToCarry(t *testing.T) {
 	}
 }
 
-// TestALoopbackUDPTargetIsRefusedForNow says what is not supported, instead of
-// publishing something that cannot work: only TCP services are carried from an
-// agent's loopback so far.
-func TestALoopbackUDPTargetIsRefusedForNow(t *testing.T) {
+// TestALoopbackUDPTargetIsCarried covers UDP forwards handled by the agent in
+// the same way as TCP, including Pterodactyl allocations on its local bridge.
+func TestALoopbackUDPTargetIsCarried(t *testing.T) {
 	st, agent := resourceFixture(t)
-	_, err := st.AddResource(ResourceInput{
+	if _, err := st.AddResource(ResourceInput{
 		Name: "dns", Protocol: ProtocolUDP, ListenPort: 5353,
 		Targets: oneTarget(agent.ID, "127.0.0.1", 53),
-	})
-	if err == nil || !strings.Contains(err.Error(), "cannot be carried yet") {
-		t.Fatalf("a udp loopback target should be refused with the reason, got %v", err)
+	}); err != nil {
+		t.Fatalf("a udp loopback target should be carried by the agent: %v", err)
 	}
 }
 
@@ -225,6 +223,34 @@ func TestADomainOnATCPResourceIsAllowed(t *testing.T) {
 	// DNS automation can create the record.
 	if !containsDomain(st.Domains(), "mail.example.com") {
 		t.Fatalf("the domain should be registered: %v", st.Domains())
+	}
+}
+
+func TestTCPResourceKeepsGenericSRVOptions(t *testing.T) {
+	st, agent := resourceFixture(t)
+	resource, err := st.AddResource(ResourceInput{
+		Name: "game", Protocol: ProtocolTCP, ListenPort: 25570, Domain: "play.example.com",
+		Targets: oneTarget(agent.ID, "10.0.0.20", 25565),
+		SRV:     &SRVConfig{Service: "_minecraft", Protocol: "_tcp", Priority: 10, Weight: 20},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.SRV == nil || resource.SRV.Service != "minecraft" || resource.SRV.Protocol != "tcp" ||
+		resource.SRV.RecordName(resource.Domain) != "_minecraft._tcp.play.example.com" {
+		t.Fatalf("unexpected SRV config: %+v", resource.SRV)
+	}
+}
+
+func TestSRVRequiresAStreamResourceAndDomain(t *testing.T) {
+	st, agent := resourceFixture(t)
+	for _, input := range []ResourceInput{
+		{Name: "web", Protocol: ProtocolHTTPS, ListenPort: 443, Domain: "web.example.com", Targets: oneTarget(agent.ID, "10.0.0.20", 80), SRV: &SRVConfig{Service: "https", Protocol: "tcp"}},
+		{Name: "nameless", Protocol: ProtocolTCP, ListenPort: 22, Targets: oneTarget(agent.ID, "10.0.0.20", 22), SRV: &SRVConfig{Service: "ssh", Protocol: "tcp"}},
+	} {
+		if _, err := st.AddResource(input); err == nil {
+			t.Fatalf("invalid SRV resource was accepted: %+v", input)
+		}
 	}
 }
 

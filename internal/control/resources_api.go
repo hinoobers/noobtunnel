@@ -28,20 +28,21 @@ type TargetView struct {
 
 // ResourceView is a published service as the UI sees it.
 type ResourceView struct {
-	ID           uint32       `json:"id"`
-	Name         string       `json:"name"`
-	Protocol     string       `json:"protocol"`
-	Targets      []TargetView `json:"targets"`
-	Strategy     string       `json:"strategy"`
-	ExitNodeID   string       `json:"exitNodeId,omitempty"`
-	ExitNodeName string       `json:"exitNodeName"`
-	ExitNodeAddr string       `json:"exitNodeAddress,omitempty"`
-	ListenPort   int          `json:"listenPort"`
-	Domain       string       `json:"domain,omitempty"`
-	Public       string       `json:"public"`
-	Enabled      bool         `json:"enabled"`
-	Listening    bool         `json:"listening"`
-	LastError    string       `json:"lastError,omitempty"`
+	ID           uint32           `json:"id"`
+	Name         string           `json:"name"`
+	Protocol     string           `json:"protocol"`
+	Targets      []TargetView     `json:"targets"`
+	Strategy     string           `json:"strategy"`
+	ExitNodeID   string           `json:"exitNodeId,omitempty"`
+	ExitNodeName string           `json:"exitNodeName"`
+	ExitNodeAddr string           `json:"exitNodeAddress,omitempty"`
+	ListenPort   int              `json:"listenPort"`
+	Domain       string           `json:"domain,omitempty"`
+	SRV          *store.SRVConfig `json:"srv,omitempty"`
+	Public       string           `json:"public"`
+	Enabled      bool             `json:"enabled"`
+	Listening    bool             `json:"listening"`
+	LastError    string           `json:"lastError,omitempty"`
 	// ProxyProtocol is "", "v1" or "v2": the header prepended for the service.
 	ProxyProtocol string `json:"proxyProtocol,omitempty"`
 	// Rules are the access rules, in evaluation order.
@@ -144,6 +145,7 @@ func (s *Server) resourceViews() []ResourceView {
 			ExitNodeName:     controlName,
 			ListenPort:       r.EffectiveListenPort(),
 			Domain:           r.Domain,
+			SRV:              r.SRV,
 			Enabled:          r.Enabled,
 			ProxyProtocol:    r.ProxyProtocol,
 			Rules:            r.Rules,
@@ -331,17 +333,25 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		if err := s.checkControlDomain(body.input()); err != nil {
+		input := body.input()
+		if err := s.checkControlDomain(input); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		resource, err := s.store.AddResource(body.input())
+		if err := s.checkSRVAutomation(input); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		resource, err := s.store.AddResource(input)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
+		if err := s.syncResourceSRV(r.Context(), resource); err != nil {
+			s.recordError("dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
+		}
 		s.recordEvent("resource", "published "+resource.Name+" ("+string(resource.Protocol)+")")
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"resource": s.resourceView(resource.ID)})
@@ -377,17 +387,31 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		if err := s.checkControlDomain(body.input()); err != nil {
+		input := body.input()
+		if err := s.checkControlDomain(input); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		resource, err := s.store.UpdateResource(id, body.input())
+		if err := s.checkSRVAutomation(input); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		previous, _ := s.store.Resource(id)
+		resource, err := s.store.UpdateResource(id, input)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
+		if previous.SRV != nil && (resource.SRV == nil || previous.SRV.RecordName(previous.Domain) != resource.SRV.RecordName(resource.Domain)) {
+			if err := s.deleteResourceSRV(r.Context(), previous); err != nil {
+				s.recordError("dns", "could not remove old SRV for "+resource.Name, err.Error(), "remove the old record manually if it remains")
+			}
+		}
+		if err := s.syncResourceSRV(r.Context(), resource); err != nil {
+			s.recordError("dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
+		}
 		s.recordEvent("resource", "updated "+resource.Name)
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"resource": s.resourceView(id)})
@@ -395,6 +419,9 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 		name := ""
 		if existing, err := s.store.Resource(id); err == nil {
 			name = existing.Name
+			if err := s.deleteResourceSRV(r.Context(), existing); err != nil {
+				s.recordError("dns", "could not remove SRV for "+existing.Name, err.Error(), "remove the record manually if it remains")
+			}
 		}
 		if err := s.store.RemoveResource(id); err != nil {
 			writeJSON(w, http.StatusNotFound, errBody("no such resource"))
@@ -408,6 +435,29 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("unsupported operation"))
 	}
+}
+
+// checkSRVAutomation makes the promise behind "Create SRV record" explicit:
+// the selected domain must already have an enabled automatic DNS provider.
+func (s *Server) checkSRVAutomation(in store.ResourceInput) error {
+	if in.SRV == nil {
+		return nil
+	}
+	host := strings.ToLower(strings.TrimSpace(in.Domain))
+	for _, domain := range s.store.Domains() {
+		if !domain.Covers(host) {
+			continue
+		}
+		if domain.ProviderID == "" {
+			return errors.New("Create SRV record needs automatic DNS on the selected domain")
+		}
+		provider, err := s.store.DNSProvider(domain.ProviderID)
+		if err != nil || !provider.Enabled {
+			return errors.New("Create SRV record needs an enabled DNS provider on the selected domain")
+		}
+		return nil
+	}
+	return errors.New("Create SRV record needs a configured domain")
 }
 
 // syncMeshAfterResourceChange re-programs what a published target changes.
@@ -435,20 +485,21 @@ func (s *Server) resourceView(id uint32) ResourceView {
 
 // resourcePayload is the wire form of a resource.
 type resourcePayload struct {
-	Name             string          `json:"name"`
-	Protocol         string          `json:"protocol"`
-	Targets          []targetPayload `json:"targets"`
-	Strategy         string          `json:"strategy"`
-	ExitNodeID       string          `json:"exitNodeId"`
-	ListenPort       int             `json:"listenPort"`
-	Domain           string          `json:"domain"`
-	Enabled          *bool           `json:"enabled"`
-	ProxyProtocol    string          `json:"proxyProtocol"`
-	Rules            []access.Rule   `json:"rules"`
-	Identity         bool            `json:"identity"`
-	IdentityMode     string          `json:"identityMode"`
-	BlockExploits    bool            `json:"blockExploits"`
-	BlockHighRiskIPs bool            `json:"blockHighRiskIps"`
+	Name             string           `json:"name"`
+	Protocol         string           `json:"protocol"`
+	Targets          []targetPayload  `json:"targets"`
+	Strategy         string           `json:"strategy"`
+	ExitNodeID       string           `json:"exitNodeId"`
+	ListenPort       int              `json:"listenPort"`
+	Domain           string           `json:"domain"`
+	SRV              *store.SRVConfig `json:"srv"`
+	Enabled          *bool            `json:"enabled"`
+	ProxyProtocol    string           `json:"proxyProtocol"`
+	Rules            []access.Rule    `json:"rules"`
+	Identity         bool             `json:"identity"`
+	IdentityMode     string           `json:"identityMode"`
+	BlockExploits    bool             `json:"blockExploits"`
+	BlockHighRiskIPs bool             `json:"blockHighRiskIps"`
 	// WebSockets is a pointer: omitting it keeps the default, which allows
 	// protocol upgrades.
 	WebSockets *bool `json:"websockets"`
@@ -480,6 +531,7 @@ func (p resourcePayload) input() store.ResourceInput {
 		ExitNodeID:       strings.TrimSpace(p.ExitNodeID),
 		ListenPort:       p.ListenPort,
 		Domain:           p.Domain,
+		SRV:              p.SRV,
 		Enabled:          p.Enabled,
 		ProxyProtocol:    p.ProxyProtocol,
 		Rules:            p.Rules,

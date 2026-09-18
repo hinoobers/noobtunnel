@@ -8,6 +8,11 @@ required. HTTP resources select from domains that already exist in Noobtunnel;
 wildcard domains expose adjacent subdomain and domain controls, while exact
 domains use the complete hostname automatically.
 
+TCP and UDP publications can also create a managed DNS SRV record when the
+selected domain has DNS automation enabled. The add-on suggests Minecraft Java,
+Mumble or TeamSpeak settings when the server egg or nest identifies them, and
+keeps the service label, transport, priority and weight editable.
+
 Install on the Panel host:
 
 ```sh

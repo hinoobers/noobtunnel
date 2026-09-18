@@ -10,6 +10,7 @@ import {
     NoobtunnelDomain,
     NoobtunnelProtocol,
     NoobtunnelPublication,
+    NoobtunnelSrv,
     publishWithNoobtunnel,
     unpublishFromNoobtunnel,
 } from '@/api/server/network/noobtunnel';
@@ -38,11 +39,17 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
     const [dirty, setDirty] = useState(false);
     const [publications, setPublications] = useState<NoobtunnelPublication[]>([]);
     const [domains, setDomains] = useState<NoobtunnelDomain[]>([]);
+    const [suggestedSrv, setSuggestedSrv] = useState<NoobtunnelSrv | null>(null);
     const [protocol, setProtocol] = useState<NoobtunnelProtocol>('tcp');
     const [name, setName] = useState(`${serverName} ${allocationPort}`);
     const [publicPort, setPublicPort] = useState(allocationPort);
     const [domainChoice, setDomainChoice] = useState('');
     const [subdomain, setSubdomain] = useState(slugify(serverName));
+    const [createSrv, setCreateSrv] = useState(false);
+    const [srvService, setSrvService] = useState('minecraft');
+    const [srvProtocol, setSrvProtocol] = useState<'tcp' | 'udp'>('tcp');
+    const [srvPriority, setSrvPriority] = useState(0);
+    const [srvWeight, setSrvWeight] = useState(0);
     const { clearFlashes, clearAndAddHttpError } = useFlashKey('server:network');
 
     const current = useMemo(
@@ -65,6 +72,7 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
             .then((options) => {
                 setPublications(options.publications);
                 setDomains(options.domains);
+                setSuggestedSrv(options.suggestedSrv);
             })
             .catch(clearAndAddHttpError)
             .then(() => setLoaded(true));
@@ -80,15 +88,27 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                 (item.kind === 'direct' && item.hostname === publishedDomain) ||
                 (item.kind === 'wildcard' && publishedDomain.endsWith(`.${item.hostname}`))
         );
-        const choice = matching || domains[0];
+        const choice = matching ||
+            (protocol === 'http' || protocol === 'https' || publishedDomain ? domains[0] : undefined);
         setDomainChoice(choice?.hostname || '');
         setSubdomain(
             matching?.kind === 'wildcard'
                 ? publishedDomain.slice(0, -(matching.hostname.length + 1))
                 : slugify(serverName)
         );
+        const srv = publication?.srv;
+        setCreateSrv(!!srv);
+        setSrvService(srv?.service || suggestedSrv?.service || 'minecraft');
+        setSrvProtocol(srv?.protocol || suggestedSrv?.protocol || (protocol === 'udp' ? 'udp' : 'tcp'));
+        setSrvPriority(srv?.priority || suggestedSrv?.priority || 0);
+        setSrvWeight(srv?.weight || suggestedSrv?.weight || 0);
         setDirty(false);
-    }, [protocol, publications, domains, serverName, allocationPort]);
+    }, [protocol, publications, domains, serverName, allocationPort, suggestedSrv]);
+
+    const open = () => {
+        if (publications.length) setProtocol(publications[0].protocol);
+        setVisible(true);
+    };
 
     const save = async () => {
         clearFlashes();
@@ -98,7 +118,11 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                 name,
                 protocol,
                 publicPort,
-                domain: protocol === 'http' || protocol === 'https' ? resolvedDomain : '',
+                domain: resolvedDomain,
+                srv:
+                    createSrv && (protocol === 'tcp' || protocol === 'udp')
+                        ? { service: srvService, protocol: srvProtocol, priority: srvPriority, weight: srvWeight }
+                        : null,
             });
             setPublications((items) => items.filter((item) => item.protocol !== protocol).concat(publication));
             setDirty(false);
@@ -128,7 +152,7 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
             <Button.Text
                 size={Button.Sizes.Small}
                 disabled={!loaded}
-                onClick={() => setVisible(true)}
+                onClick={open}
                 title={'Publish this private allocation through Noobtunnel'}
             >
                 {publications.length ? `Published (${publications.length})` : 'Publish'}
@@ -183,8 +207,7 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                             }}
                         />
                     </label>
-                    {(protocol === 'http' || protocol === 'https') &&
-                        (domains.length ? (
+                    {domains.length ? (
                             <>
                                 {selectedDomain?.kind === 'wildcard' && (
                                     <label css={tw`block text-sm text-neutral-200`}>
@@ -213,6 +236,9 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                                             setDirty(true);
                                         }}
                                     >
+                                        {(protocol === 'tcp' || protocol === 'udp') && (
+                                            <option value={''}>No domain (port only)</option>
+                                        )}
                                         {domains.map((item) => (
                                             <option key={`${item.kind}:${item.hostname}`} value={item.hostname}>
                                                 {item.kind === 'wildcard' ? item.pattern : item.hostname}
@@ -228,7 +254,74 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                             <p css={tw`text-sm text-red-300 sm:col-span-2`}>
                                 No existing Noobtunnel domain is available. Add one in Noobtunnel first.
                             </p>
-                        ))}
+                        )}
+                    {(protocol === 'tcp' || protocol === 'udp') && (
+                        <div css={tw`sm:col-span-2 rounded bg-neutral-800 p-4`}>
+                            <label css={tw`flex items-start gap-3 text-sm text-neutral-200`}>
+                                <input
+                                    type={'checkbox'}
+                                    checked={createSrv}
+                                    disabled={!selectedDomain?.automatic}
+                                    onChange={(event) => {
+                                        setCreateSrv(event.currentTarget.checked);
+                                        setDirty(true);
+                                    }}
+                                />
+                                <span>
+                                    <strong css={tw`block`}>Create SRV record</strong>
+                                    <span css={tw`text-xs text-neutral-400`}>
+                                        {suggestedSrv
+                                            ? `${suggestedSrv.label || suggestedSrv.service} detected from this server's egg.`
+                                            : 'Let compatible clients discover the public port automatically.'}
+                                    </span>
+                                </span>
+                            </label>
+                            {!selectedDomain?.automatic && (
+                                <p css={tw`mt-2 text-xs text-yellow-300`}>
+                                    Select a domain with DNS automation enabled to create an SRV record.
+                                </p>
+                            )}
+                            {createSrv && selectedDomain?.automatic && (
+                                <div css={tw`grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4`}>
+                                    <label css={tw`block text-sm text-neutral-200`}>
+                                        <span css={tw`block mb-2`}>Service</span>
+                                        <Input
+                                            value={srvService}
+                                            placeholder={'minecraft'}
+                                            onChange={(event) => {
+                                                setSrvService(event.currentTarget.value.replace(/^_+/, ''));
+                                                setDirty(true);
+                                            }}
+                                        />
+                                    </label>
+                                    <label css={tw`block text-sm text-neutral-200`}>
+                                        <span css={tw`block mb-2`}>Transport</span>
+                                        <Select
+                                            value={srvProtocol}
+                                            onChange={(event) => {
+                                                setSrvProtocol(event.currentTarget.value as 'tcp' | 'udp');
+                                                setDirty(true);
+                                            }}
+                                        >
+                                            <option value={'tcp'}>TCP</option>
+                                            <option value={'udp'}>UDP</option>
+                                        </Select>
+                                    </label>
+                                    <label css={tw`block text-sm text-neutral-200`}>
+                                        <span css={tw`block mb-2`}>Priority</span>
+                                        <Input type={'number'} min={0} max={65535} value={srvPriority} onChange={(event) => { setSrvPriority(Number(event.currentTarget.value)); setDirty(true); }} />
+                                    </label>
+                                    <label css={tw`block text-sm text-neutral-200`}>
+                                        <span css={tw`block mb-2`}>Weight</span>
+                                        <Input type={'number'} min={0} max={65535} value={srvWeight} onChange={(event) => { setSrvWeight(Number(event.currentTarget.value)); setDirty(true); }} />
+                                    </label>
+                                    <p css={tw`text-xs text-neutral-400 sm:col-span-2`}>
+                                        Creates _{srvService || 'service'}._{srvProtocol}.{resolvedDomain} pointing to {resolvedDomain}:{publicPort}.
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
                 {current?.publicAddress && (
                     <p css={tw`mt-4 text-sm text-green-300 break-all`}>Live at {current.publicAddress}</p>
@@ -245,7 +338,8 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                         disabled={
                             loading ||
                             !name ||
-                            ((protocol === 'http' || protocol === 'https') && !resolvedDomain)
+                            ((protocol === 'http' || protocol === 'https') && !resolvedDomain) ||
+                            (createSrv && (!resolvedDomain || !selectedDomain?.automatic || !srvService))
                         }
                     >
                         {current ? 'Update publication' : `Publish ${protocol.toUpperCase()}`}
