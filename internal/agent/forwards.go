@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -33,10 +34,11 @@ type forwardKey struct {
 // node can never reach `127.0.0.1:3306` on an agent: it would reach its own. The
 // agent is the machine that can, which is what these forwards are for.
 type forwarder struct {
-	agent   *Agent
-	target  string
-	port    int
-	network string
+	agent          *Agent
+	target         string
+	resolvedTarget string
+	port           int
+	network        string
 
 	mu   sync.Mutex
 	ln   net.Listener
@@ -119,6 +121,11 @@ func (a *Agent) syncForwards(ctx context.Context) {
 // start opens the listener on the agent's mesh address, which is the only place
 // the control node can reach it.
 func (f *forwarder) start(ctx context.Context, mesh netip.Addr) error {
+	resolved, err := resolveForwardTarget(f.target)
+	if err != nil {
+		return err
+	}
+	f.resolvedTarget = resolved
 	address := net.JoinHostPort(mesh.String(), strconv.Itoa(f.port))
 	if f.network == "udp" {
 		pc, err := net.ListenPacket("udp", address)
@@ -140,6 +147,31 @@ func (f *forwarder) start(ctx context.Context, mesh netip.Addr) error {
 	f.mu.Unlock()
 	go f.serve(ctx, ln)
 	return nil
+}
+
+// resolveForwardTarget turns the Pterodactyl-local marker into the address
+// Wings really binds on this machine. Reading the host interface is enough; the
+// agent deliberately does not mount Docker's root-equivalent control socket.
+func resolveForwardTarget(target string) (string, error) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil || !strings.EqualFold(host, "pterodactyl") {
+		return target, err
+	}
+	iface, err := net.InterfaceByName("pterodactyl0")
+	if err != nil {
+		return "", fmt.Errorf("find Pterodactyl bridge pterodactyl0: %w", err)
+	}
+	addresses, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("read Pterodactyl bridge pterodactyl0: %w", err)
+	}
+	for _, raw := range addresses {
+		prefix, err := netip.ParsePrefix(raw.String())
+		if err == nil && prefix.Addr().Is4() && !prefix.Addr().IsLoopback() {
+			return net.JoinHostPort(prefix.Addr().String(), port), nil
+		}
+	}
+	return "", fmt.Errorf("Pterodactyl bridge pterodactyl0 has no IPv4 address")
 }
 
 // servePackets keeps one connected loopback socket per mesh-side client. The
@@ -210,10 +242,10 @@ func (f *forwarder) servePackets(ctx context.Context, pc net.PacketConn) {
 		sessionsMu.Lock()
 		s := sessions[key]
 		if s == nil {
-			conn, err := net.DialTimeout("udp", f.target, forwardTimeout)
+			conn, err := net.DialTimeout("udp", f.resolvedTarget, forwardTimeout)
 			if err != nil {
 				sessionsMu.Unlock()
-				f.agent.log.Debug("forwarded UDP service is not reachable", "target", f.target, "error", err)
+				f.agent.log.Debug("forwarded UDP service is not reachable", "target", f.resolvedTarget, "error", err)
 				continue
 			}
 			s = &session{client: client, conn: conn, last: time.Now()}
@@ -267,9 +299,9 @@ func (f *forwarder) handle(ctx context.Context, client net.Conn) {
 	defer client.Close()
 	dialCtx, cancel := context.WithTimeout(ctx, forwardTimeout)
 	defer cancel()
-	upstream, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", f.target)
+	upstream, err := (&net.Dialer{}).DialContext(dialCtx, "tcp", f.resolvedTarget)
 	if err != nil {
-		f.agent.log.Debug("forwarded service is not reachable", "target", f.target, "error", err)
+		f.agent.log.Debug("forwarded service is not reachable", "target", f.resolvedTarget, "error", err)
 		return
 	}
 	defer upstream.Close()

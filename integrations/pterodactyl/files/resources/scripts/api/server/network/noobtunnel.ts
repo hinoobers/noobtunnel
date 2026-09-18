@@ -11,15 +11,26 @@ export interface NoobtunnelPublication {
     publicAddress: string | null;
 }
 
+export interface NoobtunnelDomain {
+    hostname: string;
+    pattern: string;
+    kind: 'direct' | 'wildcard';
+}
+
+export interface NoobtunnelOptions {
+    publications: NoobtunnelPublication[];
+    domains: NoobtunnelDomain[];
+}
+
 const endpoint = (uuid: string, allocationId: number) =>
     `/api/client/servers/${uuid}/network/allocations/${allocationId}/noobtunnel`;
 
 export const getNoobtunnelPublications = async (
     uuid: string,
     allocationId: number
-): Promise<NoobtunnelPublication[]> => {
+): Promise<NoobtunnelOptions> => {
     const { data } = await http.get(endpoint(uuid, allocationId));
-    return data.publications || [];
+    return { publications: data.publications || [], domains: data.domains || [] };
 };
 
 export const publishWithNoobtunnel = async (

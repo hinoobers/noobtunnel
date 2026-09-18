@@ -1,9 +1,12 @@
 # Pterodactyl integration
 
 This native Pterodactyl 1.15 add-on adds **Publish with Noobtunnel** to every
-allocation in a server's Network tab. It targets the allocation address and
-port on the Wings host, so private `127.0.0.1` allocations stay private and no
-Docker `172.18.x` address needs to be discovered or stored.
+allocation in a server's Network tab. Loopback allocations are resolved by the
+Noobtunnel agent through the Wings host's `pterodactyl0` bridge, so the target
+remains stable when container addresses change and no Docker socket access is
+required. HTTP resources select from domains that already exist in Noobtunnel;
+wildcard domains expose adjacent subdomain and domain controls, while exact
+domains use the complete hostname automatically.
 
 Install on the Panel host:
 

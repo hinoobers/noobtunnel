@@ -2,7 +2,6 @@ package control
 
 import (
 	"net"
-	"net/netip"
 	"sort"
 	"strings"
 
@@ -13,11 +12,7 @@ import (
 // isLoopbackTarget reports whether a target address can only be reached by the
 // machine it names: 127.0.0.0/8, ::1.
 func isLoopbackTarget(host string) bool {
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false
-	}
-	return addr.IsLoopback()
+	return store.IsAgentLocalTarget(host)
 }
 
 // DialAddress is the address the control node dials for a target.

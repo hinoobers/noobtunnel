@@ -316,6 +316,22 @@ var (
 	ErrDomainInUse = errors.New("store: that domain is still used by a resource")
 )
 
+// PterodactylTargetHost asks the selected agent to resolve the host-side
+// pterodactyl0 bridge address locally. Panel allocations can say 127.0.0.1
+// while Wings actually publishes them on that bridge, so the control node
+// cannot derive the usable address itself.
+const PterodactylTargetHost = "pterodactyl"
+
+// IsAgentLocalTarget reports targets that must be opened on the selected agent
+// instead of routed as ordinary mesh addresses.
+func IsAgentLocalTarget(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), PterodactylTargetHost) {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
+}
+
 // Resources lists resources sorted by name.
 func (s *Store) Resources() []Resource {
 	s.mu.RLock()
@@ -673,6 +689,9 @@ func normaliseTargetHost(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("%w: a target address is required", ErrBadResource)
 	}
+	if strings.EqualFold(raw, PterodactylTargetHost) {
+		return PterodactylTargetHost, nil
+	}
 	// The port has its own field: "10.77.0.2:4547" here is a common slip, and
 	// "not an IP address" does not tell anyone what to do about it.
 	if _, _, err := net.SplitHostPort(raw); err == nil {
@@ -788,10 +807,6 @@ func (s *Store) CheckTargetReachability(agentID uint32, host string) error {
 // a target that the mesh sends somewhere else, and it would fail as a plain "no
 // route to host" with nothing to act on.
 func checkTargetReachability(st *State, agent *Agent, host string) error {
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return fmt.Errorf("%w: %q is not an IP address", ErrBadResource, host)
-	}
 	if agent.Address == host {
 		return nil
 	}
@@ -800,6 +815,13 @@ func checkTargetReachability(st *State, agent *Agent, host string) error {
 	}
 	if agent.PublicKey == "" {
 		return fmt.Errorf("%w: %s has not enrolled yet, so nothing can be reached through it", ErrBadResource, agent.Name)
+	}
+	if strings.EqualFold(host, PterodactylTargetHost) {
+		return nil
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("%w: %q is not an IP address", ErrBadResource, host)
 	}
 	// The target's agent is what scopes the address: it connects from its own
 	// machine, so its own 172.18.0.5 is the one this resource means. The only

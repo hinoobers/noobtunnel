@@ -7,6 +7,7 @@ import { Button } from '@/components/elements/button';
 import { useFlashKey } from '@/plugins/useFlash';
 import {
     getNoobtunnelPublications,
+    NoobtunnelDomain,
     NoobtunnelProtocol,
     NoobtunnelPublication,
     publishWithNoobtunnel,
@@ -21,6 +22,14 @@ interface Props {
 }
 
 const protocols: NoobtunnelProtocol[] = ['tcp', 'udp', 'http', 'https'];
+const slugify = (value: string) =>
+    value
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .replace(/-{2,}/g, '-')
+        .slice(0, 40);
 
 const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverName }: Props) => {
     const [visible, setVisible] = useState(false);
@@ -28,20 +37,35 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
     const [loaded, setLoaded] = useState(false);
     const [dirty, setDirty] = useState(false);
     const [publications, setPublications] = useState<NoobtunnelPublication[]>([]);
+    const [domains, setDomains] = useState<NoobtunnelDomain[]>([]);
     const [protocol, setProtocol] = useState<NoobtunnelProtocol>('tcp');
     const [name, setName] = useState(`${serverName} ${allocationPort}`);
     const [publicPort, setPublicPort] = useState(allocationPort);
-    const [domain, setDomain] = useState('');
+    const [domainChoice, setDomainChoice] = useState('');
+    const [subdomain, setSubdomain] = useState(slugify(serverName));
     const { clearFlashes, clearAndAddHttpError } = useFlashKey('server:network');
 
     const current = useMemo(
         () => publications.find((publication) => publication.protocol === protocol),
         [publications, protocol]
     );
+    const selectedDomain = useMemo(
+        () => domains.find((domain) => domain.hostname === domainChoice),
+        [domains, domainChoice]
+    );
+    const resolvedDomain = useMemo(() => {
+        if (!selectedDomain) return '';
+        if (selectedDomain.kind !== 'wildcard') return selectedDomain.hostname;
+        const label = slugify(subdomain);
+        return label ? `${label}.${selectedDomain.hostname}` : '';
+    }, [selectedDomain, subdomain]);
 
     useEffect(() => {
         getNoobtunnelPublications(uuid, allocationId)
-            .then(setPublications)
+            .then((options) => {
+                setPublications(options.publications);
+                setDomains(options.domains);
+            })
             .catch(clearAndAddHttpError)
             .then(() => setLoaded(true));
     }, [uuid, allocationId]);
@@ -50,9 +74,21 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
         const publication = publications.find((item) => item.protocol === protocol);
         setName(publication?.name || `${serverName} ${allocationPort} ${protocol.toUpperCase()}`);
         setPublicPort(publication?.publicPort || (protocol === 'https' ? 443 : allocationPort));
-        setDomain(publication?.domain || '');
+        const publishedDomain = publication?.domain || '';
+        const matching = domains.find(
+            (item) =>
+                (item.kind === 'direct' && item.hostname === publishedDomain) ||
+                (item.kind === 'wildcard' && publishedDomain.endsWith(`.${item.hostname}`))
+        );
+        const choice = matching || domains[0];
+        setDomainChoice(choice?.hostname || '');
+        setSubdomain(
+            matching?.kind === 'wildcard'
+                ? publishedDomain.slice(0, -(matching.hostname.length + 1))
+                : slugify(serverName)
+        );
         setDirty(false);
-    }, [protocol, publications, serverName, allocationPort]);
+    }, [protocol, publications, domains, serverName, allocationPort]);
 
     const save = async () => {
         clearFlashes();
@@ -62,7 +98,7 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                 name,
                 protocol,
                 publicPort,
-                domain,
+                domain: protocol === 'http' || protocol === 'https' ? resolvedDomain : '',
             });
             setPublications((items) => items.filter((item) => item.protocol !== protocol).concat(publication));
             setDirty(false);
@@ -147,19 +183,52 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                             }}
                         />
                     </label>
-                    {(protocol === 'http' || protocol === 'https') && (
-                        <label css={tw`block text-sm text-neutral-200 sm:col-span-2`}>
-                            <span css={tw`block mb-2`}>Domain {protocol === 'https' ? '(required)' : '(optional)'}</span>
-                            <Input
-                                value={domain}
-                                placeholder={'game.example.com'}
-                                onChange={(event) => {
-                                    setDomain(event.currentTarget.value);
-                                    setDirty(true);
-                                }}
-                            />
-                        </label>
-                    )}
+                    {(protocol === 'http' || protocol === 'https') &&
+                        (domains.length ? (
+                            <>
+                                {selectedDomain?.kind === 'wildcard' && (
+                                    <label css={tw`block text-sm text-neutral-200`}>
+                                        <span css={tw`block mb-2`}>Subdomain</span>
+                                        <Input
+                                            value={subdomain}
+                                            placeholder={'game'}
+                                            onChange={(event) => {
+                                                setSubdomain(event.currentTarget.value);
+                                                setDirty(true);
+                                            }}
+                                        />
+                                    </label>
+                                )}
+                                <label
+                                    css={[
+                                        tw`block text-sm text-neutral-200`,
+                                        selectedDomain?.kind !== 'wildcard' && tw`sm:col-span-2`,
+                                    ]}
+                                >
+                                    <span css={tw`block mb-2`}>Domain</span>
+                                    <Select
+                                        value={domainChoice}
+                                        onChange={(event) => {
+                                            setDomainChoice(event.currentTarget.value);
+                                            setDirty(true);
+                                        }}
+                                    >
+                                        {domains.map((item) => (
+                                            <option key={`${item.kind}:${item.hostname}`} value={item.hostname}>
+                                                {item.kind === 'wildcard' ? item.pattern : item.hostname}
+                                            </option>
+                                        ))}
+                                    </Select>
+                                </label>
+                                <p css={tw`text-xs text-neutral-400 sm:col-span-2`}>
+                                    Publishes as {resolvedDomain || '—'}. Domains are managed in Noobtunnel.
+                                </p>
+                            </>
+                        ) : (
+                            <p css={tw`text-sm text-red-300 sm:col-span-2`}>
+                                No existing Noobtunnel domain is available. Add one in Noobtunnel first.
+                            </p>
+                        ))}
                 </div>
                 {current?.publicAddress && (
                     <p css={tw`mt-4 text-sm text-green-300 break-all`}>Live at {current.publicAddress}</p>
@@ -170,7 +239,15 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                             Unpublish {protocol.toUpperCase()}
                         </Button.Danger>
                     )}
-                    <Button type={'button'} onClick={save} disabled={loading || !name || (protocol === 'https' && !domain)}>
+                    <Button
+                        type={'button'}
+                        onClick={save}
+                        disabled={
+                            loading ||
+                            !name ||
+                            ((protocol === 'http' || protocol === 'https') && !resolvedDomain)
+                        }
+                    >
                         {current ? 'Update publication' : `Publish ${protocol.toUpperCase()}`}
                     </Button>
                 </div>

@@ -32,7 +32,21 @@ class NoobtunnelController extends ClientApiController
             ->get()
             ->map(fn ($row) => $this->publication($row));
 
-        return new JsonResponse(['publications' => $rows]);
+        try {
+            $response = $this->client()->get('/api/resources');
+        } catch (Throwable $exception) {
+            throw new DisplayException('Could not reach Noobtunnel: ' . $exception->getMessage());
+        }
+        if (!$response->successful()) {
+            throw new DisplayException('Noobtunnel could not list the available domains.');
+        }
+        $domains = collect($response->json('domains') ?: [])->map(fn ($domain) => [
+            'hostname' => $domain['hostname'],
+            'pattern' => $domain['pattern'] ?? $domain['hostname'],
+            'kind' => ($domain['kind'] ?? 'direct') === 'wildcard' ? 'wildcard' : 'direct',
+        ])->values();
+
+        return new JsonResponse(['publications' => $rows, 'domains' => $domains]);
     }
 
     public function publish(
@@ -176,7 +190,11 @@ class NoobtunnelController extends ClientApiController
     private function targetHost(string $ip): string
     {
         $ip = trim($ip, '[] ');
-        return in_array($ip, ['0.0.0.0', '::', ''], true) ? '127.0.0.1' : $ip;
+        if ($ip === '' || $ip === '0.0.0.0' || $ip === '::' || $ip === '::1' || str_starts_with($ip, '127.')) {
+            return 'pterodactyl';
+        }
+
+        return $ip;
     }
 
     private function assertAllocation(Server $server, Allocation $allocation): void
