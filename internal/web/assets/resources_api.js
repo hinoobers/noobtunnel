@@ -592,7 +592,7 @@ function resourceEditorPage(existing) {
     const domain = selectedDomain();
     const automatic = !!domain && !!domain.providerId;
     srvField.hidden = !stream;
-    srvToggle.disabled = !stream || !automatic;
+    srvToggle.disabled = !stream || (!automatic && !srvToggle.checked);
     if (!stream) srvToggle.checked = false;
     srvDetails.hidden = !srvToggle.checked;
     if (!domain) srvHint.textContent = 'Choose a domain before creating an SRV record.';

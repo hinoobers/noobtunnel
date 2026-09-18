@@ -261,7 +261,7 @@ const NoobtunnelPublishButton = ({ uuid, allocationId, allocationPort, serverNam
                                 <input
                                     type={'checkbox'}
                                     checked={createSrv}
-                                    disabled={!selectedDomain?.automatic}
+                                    disabled={!selectedDomain?.automatic && !createSrv}
                                     onChange={(event) => {
                                         setCreateSrv(event.currentTarget.checked);
                                         setDirty(true);
