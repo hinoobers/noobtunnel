@@ -214,8 +214,12 @@ func Evaluate(rules []Rule, req Request) Decision {
 	for _, rule := range rules {
 		matched, known := match(rule, req)
 		if !known {
-			// The data a rule needs is missing (no GeoIP database, for example).
-			// Skipping it keeps a missing database from blocking real users.
+			// A country restriction cannot be enforced without a country. Deny
+			// here so an unavailable IP API cannot bypass a blocking rule or
+			// let a later allow rule grant access.
+			if rule.Field == FieldCountry {
+				return Decision{Allow: false, Rule: describe(rule), Reason: "country could not be determined for rule: " + describe(rule)}
+			}
 			continue
 		}
 		if !matched {

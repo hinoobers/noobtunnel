@@ -34,7 +34,7 @@ func TestForwardPreservesReplyAfterClientHalfClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	f := &forwarder{target: service.Addr().String(), done: make(chan struct{}), agent: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}}
+	f := &forwarder{target: service.Addr().String(), resolvedTarget: service.Addr().String(), done: make(chan struct{}), agent: &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 	go f.serve(context.Background(), ln)
 	defer f.stop()
 	conn, err := net.Dial("tcp", ln.Addr().String())

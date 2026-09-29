@@ -67,6 +67,7 @@ type Hub struct {
 type Peer struct {
 	ID        uint32   `json:"id"`
 	Name      string   `json:"name"`
+	MeshDNS   string   `json:"meshDns,omitempty"`
 	Address   string   `json:"address"`
 	PublicKey string   `json:"publicKey"`
 	Advertise []string `json:"advertise,omitempty"`
@@ -102,6 +103,7 @@ type Welcome struct {
 	T            string `json:"t"`
 	AgentID      uint32 `json:"agentId"`
 	Name         string `json:"name"`
+	MeshDNS      string `json:"meshDns,omitempty"`
 	Address      string `json:"address"`
 	Prefix       int    `json:"prefix"`
 	MeshCIDR     string `json:"meshCidr"`
@@ -126,9 +128,10 @@ type Welcome struct {
 
 // Peers is a full membership snapshot; agents replace their view with it.
 type Peers struct {
-	T          string `json:"t"`
-	Generation uint64 `json:"generation"`
-	Peers      []Peer `json:"peers"`
+	T           string `json:"t"`
+	Generation  uint64 `json:"generation"`
+	SelfMeshDNS string `json:"selfMeshDns,omitempty"`
+	Peers       []Peer `json:"peers"`
 	// Carry is what the mesh routes through this agent: the networks the control
 	// node resolved to it. It is what the agent has to forward, which is not
 	// necessarily what the agent offered - the operator can change the list here
@@ -177,18 +180,24 @@ type PeerStat struct {
 }
 
 // Stats is reported periodically by the agent.
+type NetworkCandidate struct {
+	Interface string `json:"interface"`
+	Prefix    string `json:"prefix"`
+}
+
 type Stats struct {
-	T          string     `json:"t"`
-	UptimeSec  int64      `json:"uptimeSec"`
-	RxBytes    uint64     `json:"rxBytes"`
-	TxBytes    uint64     `json:"txBytes"`
-	PeerStats  []PeerStat `json:"peerStats,omitempty"`
-	Interface  string     `json:"interface,omitempty"`
-	MTU        int        `json:"mtu,omitempty"`
-	Routes     []string   `json:"routes,omitempty"`
-	LastError  string     `json:"lastError,omitempty"`
-	Generation uint64     `json:"generation"`
-	Backend    string     `json:"backend,omitempty"`
+	T          string             `json:"t"`
+	UptimeSec  int64              `json:"uptimeSec"`
+	RxBytes    uint64             `json:"rxBytes"`
+	TxBytes    uint64             `json:"txBytes"`
+	PeerStats  []PeerStat         `json:"peerStats,omitempty"`
+	Interface  string             `json:"interface,omitempty"`
+	MTU        int                `json:"mtu,omitempty"`
+	Routes     []string           `json:"routes,omitempty"`
+	Networks   []NetworkCandidate `json:"networks,omitempty"`
+	LastError  string             `json:"lastError,omitempty"`
+	Generation uint64             `json:"generation"`
+	Backend    string             `json:"backend,omitempty"`
 }
 
 // Log is a line from the agent's log.

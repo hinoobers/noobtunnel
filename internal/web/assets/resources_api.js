@@ -19,8 +19,7 @@ const PROXY_PROTOCOL_INFO = {
   v2: { label: 'PROXY v2', hint: 'Binary header, for services that prefer it.' },
 };
 
-// Common SRV consumers are shortcuts; Custom keeps the full DNS service
-// namespace available instead of pretending this can be a complete enum.
+// Common SRV consumers are presets. Admins can still enter a custom service.
 const SRV_PRESETS = {
   minecraft: { label: 'Minecraft Java', service: 'minecraft', protocol: 'tcp' },
   mumble: { label: 'Mumble', service: 'mumble', protocol: 'tcp' },
@@ -163,23 +162,31 @@ function errorLink(message, match) {
 function renderResources(node, subNode, resources) {
   if (!node) return;
   resources = resources || [];
+  const filtered = canAdmin() && !!state.resourceFilterEmail;
   clear(node);
-  // One button only: the header keeps its button while there is a table to act
-  // on, and the empty state owns it when there is nothing to show.
+  // Keep the add button beside the account filter in every list state.
   if (shell && shell.resourcesAdd) {
-    shell.resourcesAdd.hidden = !canAdmin() || resources.length === 0;
+    shell.resourcesAdd.hidden = !canManageMesh();
   }
   const listening = resources.filter((r) => r.listening).length;
   if (subNode) {
-    subNode.textContent = resources.length === 0
+    subNode.textContent = filtered && !state.resourceFilterData ? 'Searching account...'
+      : filtered && !state.resourceFilterData.matched ? 'No account with that email'
+      : filtered && resources.length === 0 ? 'No resources for ' + state.resourceFilterEmail
+      : filtered ? resources.length + ' resources for ' + state.resourceFilterEmail
+      : resources.length === 0
       ? 'Nothing published yet'
       : resources.length + ' published · ' + listening + ' listening';
   }
   if (!resources.length) {
+    if (filtered) {
+      node.append(h('div', { class: 'empty' }, h('p', { class: 'muted', text: subNode.textContent })));
+      return;
+    }
     node.append(h('div', { class: 'empty' },
       h('h3', null, 'Publish a service'),
       h('p', { class: 'muted', text: 'Expose something running on an agent — a web UI, SSH, a game server — on a public address of the control node, without opening any port on the agent.' }),
-      canAdmin() ? h('button', { class: 'btn btn-primary', 'data-action': 'add-resource' }, 'Add resource') : null));
+    ));
     return;
   }
   const rows = resources.map((resource) => {
@@ -214,22 +221,22 @@ function renderResources(node, subNode, resources) {
       h('td', null,
         h('div', { class: 'row' },
           publicAddress(resource),
-          copyButton(resource.public, 'Copy')),
-        h('div', { class: 'muted tiny', text: 'on ' + (resource.exitNodeName || 'Control node') })),
+          copyButton(resource.public, 'Copy'))),
       // The dot next to the name already says whether this resource is healthy, so
-      // there is no separate status column: the counters live with the traffic.
+      // there is no separate status column.
       h('td', null,
         h('div', null, fmtBytes(resource.rxBytes) + ' / ' + fmtBytes(resource.txBytes)),
-        h('div', { class: 'muted tiny', text: resource.active + ' active · ' + resource.total + ' total' })),
-      h('td', null, canAdmin() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        resource.monthlyQuotaBytes ? h('div', { class: 'muted tiny', text: 'This month ' + fmtBytes(resource.monthlyUsedBytes || 0) + ' / ' + fmtBytes(resource.monthlyQuotaBytes) }) : null,
+        resource.monthlyRequestQuota ? h('div', { class: 'muted tiny', text: 'Requests ' + (resource.monthlyUsedRequests || 0).toLocaleString() + ' / ' + resource.monthlyRequestQuota.toLocaleString() + ' this month' }) : null),
+      h('td', null, canManageMesh() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
         h('button', { class: 'btn btn-sm', 'data-action': 'resource-edit', 'data-id': resource.id }, 'Edit'),
-        h('button', {
+        filtered ? null : h('button', {
           class: 'btn btn-sm',
           'data-action': 'resource-toggle',
           'data-id': resource.id,
           'data-enabled': resource.enabled ? 'false' : 'true',
         }, resource.enabled ? 'Disable' : 'Enable'),
-        h('button', {
+        filtered ? null : h('button', {
           class: 'btn btn-sm btn-danger',
           'data-action': 'resource-delete',
           'data-id': resource.id,
@@ -256,7 +263,7 @@ function renderDomains(node, subNode, domains) {
   clear(node);
   // Same single-button rule as resources.
   if (shell && shell.domainsAdd) {
-    shell.domainsAdd.hidden = !canAdmin() || domains.length === 0;
+    shell.domainsAdd.hidden = !canManageMesh() || domains.length === 0;
   }
   if (subNode) {
     subNode.textContent = domains.length === 0
@@ -267,7 +274,7 @@ function renderDomains(node, subNode, domains) {
     node.append(h('div', { class: 'empty' },
       h('h3', null, 'Add a domain'),
       h('p', { class: 'muted', text: 'Domains let HTTP and HTTPS resources be reached by name instead of by port.' }),
-      canAdmin() ? h('button', { class: 'btn btn-primary', 'data-action': 'add-domain' }, 'Add domain') : null));
+      canManageMesh() ? h('button', { class: 'btn btn-primary', 'data-action': 'add-domain' }, 'Add domain') : null));
     return;
   }
   node.append(h('table', null,
@@ -276,7 +283,12 @@ function renderDomains(node, subNode, domains) {
     h('tbody', null, domains.map((domain) => h('tr', null,
       // A wildcard domain is stored as its base name plus a kind: show the
       // pattern the operator typed, so "*.example.com" stays recognisable.
-      h('td', null, h('span', { class: 'mono', text: domain.pattern || domain.hostname })),
+      h('td', null, h('div', { class: 'row', style: 'gap:6px; flex-wrap:wrap' },
+        h('span', { class: 'mono', text: domain.pattern || domain.hostname }),
+        domain.publicPool ? h('span', { class: 'chip chip-direct' }, 'public pool') : null,
+        !domain.verified && domain.ownerId ? h('span', { class: 'chip chip-warn' }, 'verify ownership') : null),
+        !domain.verified && domain.ownerId && domain.verificationName ? h('div', { class: 'muted tiny' },
+          'TXT ', h('code', { text: domain.verificationName }), ' = ', h('code', { text: domain.verificationToken })) : null),
       h('td', { class: 'muted tiny' },
         h('div', { class: 'row', style: 'gap:6px' },
           h('span', { class: 'mono tiny', text: domain.address || '—' }),
@@ -292,19 +304,22 @@ function renderDomains(node, subNode, domains) {
             ? h('span', { class: 'chip chip-quiet' }, domain.resources[0])
             : h('span', { class: 'chip chip-quiet' }, domain.resources.length + ' resources'))
         : h('span', { class: 'muted tiny' }, 'nothing yet')),
-      h('td', null, canAdmin() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
-        h('button', { class: 'btn btn-sm', 'data-action': 'domain-edit', 'data-hostname': domain.hostname }, 'Edit'),
-        h('button', { class: 'btn btn-sm btn-danger', 'data-action': 'domain-delete', 'data-hostname': domain.hostname }, 'Delete')) : null))))));
+      h('td', null, h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        !domain.verified && domain.ownerId ? h('button', { class: 'btn btn-sm', 'data-action': 'domain-verify', 'data-hostname': domain.hostname }, 'Verify') : null,
+        canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'domain-edit', 'data-hostname': domain.hostname }, 'Edit') : null,
+        (!domain.publicPool || canAdmin()) ? h('button', { class: 'btn btn-sm btn-danger', 'data-action': 'domain-delete', 'data-hostname': domain.hostname }, 'Delete') : null)))))));
 }
 
 /* ---------- publish page ---------- */
 
 function enrolledAgents() {
-  return (state.data.agents || []).filter((agent) => agent.publicKey);
+  const source = state.resourceFilterEmail && state.resourceFilterData?.matched
+    ? state.resourceFilterData.agents : state.data.agents;
+  return (source || []).filter((agent) => agent.publicKey);
 }
 
 function openResourceEditor(id) {
-  if (!enrolledAgents().length) {
+  if (!enrolledAgents().length && id === null) {
     toast('Enroll an agent first: services are published through an agent.', 'fail');
     return;
   }
@@ -316,8 +331,9 @@ function openResourceEditor(id) {
   state.resourceForm = { id: id === null || id === undefined ? null : Number(id) };
   state.resourceEditorKey = '';
   if (state.resourceForm.id !== null && window.history && window.history.pushState) {
-    const target = '/resources/' + state.resourceForm.id;
-    if (window.location.pathname !== target) window.history.pushState({ view: 'resources', resourceId: state.resourceForm.id }, '', target);
+    const target = '/resources/' + state.resourceForm.id +
+      (state.resourceFilterEmail ? '?email=' + encodeURIComponent(state.resourceFilterEmail) : '');
+    if (window.location.pathname + window.location.search !== target) window.history.pushState({ view: 'resources', resourceId: state.resourceForm.id }, '', target);
   }
   renderShell();
 }
@@ -379,6 +395,7 @@ function cardPicker(name, options, choice, onChange) {
     });
     const card = h('label', { class: 'type-card' + (choice.value === option.value ? ' is-selected' : '') },
       input,
+      option.icon ? option.icon() : null,
       h('span', { class: 'type-card-body' },
         h('strong', null, option.label),
         option.hint ? h('span', { class: 'muted tiny', text: option.hint }) : null));
@@ -437,7 +454,8 @@ function targetRow(agents, target, onRemove) {
 
 // resourceEditorPage builds the publish form as a page.
 function resourceEditorPage(existing) {
-  const agents = enrolledAgents();
+  const foreign = canAdmin() && !!state.resourceFilterEmail && !state.resourceFilterData?.own;
+  const agents = canAdmin() && !foreign ? enrolledAgents().concat([{ id: 0, name: 'Control node', address: '127.0.0.1' }]) : enrolledAgents();
   const isEdit = !!existing;
   const domains = domainOptions();
   // Disabled exit nodes are not offered, except the one this resource already
@@ -505,6 +523,44 @@ function resourceEditorPage(existing) {
   });
   const listenHint = h('div', { class: 'muted tiny' });
   const listenField = h('label', { class: 'field' }, h('span', null, 'Listening port'), listenInput);
+  const quotaInput = h('input', { type: 'number', name: 'quotaGB', min: '1', step: '1', value: isEdit && existing.monthlyQuotaBytes ? String(existing.monthlyQuotaBytes / 1e9) : '100' });
+  const requestInput = h('input', { type: 'number', name: 'monthlyRequests', min: '1', step: '1', value: isEdit && existing.monthlyRequestQuota ? String(existing.monthlyRequestQuota) : '3000000' });
+  const sustainedInput = h('input', { type: 'number', name: 'sustainedMbps', min: '0.064', step: '0.001', value: isEdit && existing.sustainedBps ? String(existing.sustainedBps / 1e6) : '15' });
+  const burstInput = h('input', { type: 'number', name: 'burstMbps', min: '0.064', step: '0.001', value: isEdit && existing.burstBps ? String(existing.burstBps / 1e6) : '30' });
+  const peakInput = h('input', { type: 'number', name: 'peakMbps', min: '0.064', step: '0.001', value: isEdit && existing.peakBps ? String(existing.peakBps / 1e6) : '100' });
+  const overInput = h('input', { type: 'number', name: 'overQuotaMbps', min: '0.064', step: '0.001', value: isEdit && existing.overQuotaBps ? String(existing.overQuotaBps / 1e6) : '0.512' });
+  const quotaField = h('label', { class: 'field' }, h('span', null, 'Monthly bandwidth quota (GB)'), quotaInput);
+  const requestField = h('label', { class: 'field' }, h('span', null, 'Monthly requests'), requestInput);
+  const peakField = h('label', { class: 'field' }, h('span', null, 'Peak'), peakInput);
+  const speedField = h('div', { class: 'field' }, h('span', null, 'Speed (Mbps)'),
+    h('div', { class: 'limit-speed-grid' },
+      h('label', { class: 'field' }, h('span', null, 'Sustained'), sustainedInput),
+      h('label', { class: 'field' }, h('span', null, 'Burst'), burstInput),
+      peakField,
+      h('label', { class: 'field' }, h('span', null, 'After quota'), overInput)));
+  const usageMetric = (label, used, limit, format) => h('div', { class: 'limit-usage-metric' },
+    h('div', { class: 'limit-usage-label' },
+      h('span', { text: label }),
+      h('strong', { text: format(used) + ' / ' + (limit ? format(limit) : 'unlimited') })),
+    h('div', { class: 'limit-usage-track' }, h('span', { style: 'width:' + (limit ? Math.min(100, used / limit * 100) : 0) + '%' })));
+  const requestUsage = isEdit ? usageMetric('Requests', existing.monthlyUsedRequests || 0, existing.monthlyRequestQuota || 0, (n) => Number(n).toLocaleString()) : null;
+  const usageBox = isEdit ? h('div', { class: 'subpanel limit-usage' },
+    h('strong', null, 'This month'),
+    usageMetric('Bandwidth', existing.monthlyUsedBytes || 0, existing.monthlyQuotaBytes || 0, fmtBytes),
+    requestUsage) : null;
+  const uncappedInput = h('input', { type: 'checkbox', name: 'uncapped', checked: canAdmin() && (!isEdit || existing.uncapped) ? true : null });
+  const uncappedField = canAdmin() ? h('label', { class: 'switch' }, uncappedInput,
+    h('span', null, h('strong', null, 'Uncapped'), h('em', null, 'No monthly quota, request quota, or speed limit. Usage is still recorded.')))
+    : isEdit && existing.uncapped ? h('p', { class: 'muted', text: 'Uncapped by an administrator. Usage is still recorded.' }) : null;
+  const limitsControls = h('div', { class: 'fields' },
+    h('div', { class: 'limit-quota-grid' }, quotaField, requestField),
+    speedField,
+    h('p', { class: 'muted tiny', text: 'After the bandwidth quota, the resource stays available at the reduced speed. HTTP and HTTPS stop accepting new requests after their monthly request quota.' }));
+  function syncUncapped() { limitsControls.hidden = canAdmin() ? uncappedInput.checked : isEdit && existing.uncapped; }
+  uncappedInput.addEventListener('change', syncUncapped);
+  syncUncapped();
+  if (!canAdmin()) { [quotaInput, requestInput, sustainedInput, burstInput, peakInput, overInput].forEach((input) => { input.disabled = true; }); }
+  let limitsProtocol = null;
 
   const exitNodeSelect = h('select', { name: 'exitNodeId' },
     exitNodes.map((node) => {
@@ -540,16 +596,20 @@ function resourceEditorPage(existing) {
   });
   const subdomainField = h('label', { class: 'field' },
     h('span', null, 'Subdomain'), subdomainInput);
-  const domainRow = h('div', { class: 'grid-2' }, subdomainField, domainField);
+  const domainRow = h('div', { class: 'grid-2 domain-row' }, subdomainField, domainField);
   let subdomainTouched = isEdit;
   // The publish preview: exactly what the resource will answer on.
   const domainPreview = h('div', { class: 'callout' });
 
   const existingSRV = isEdit ? existing.srv : null;
+  const existingPreset = existingSRV
+    ? (Object.entries(SRV_PRESETS).find(([key, preset]) => key !== 'custom' &&
+        preset.service === existingSRV.service && preset.protocol === existingSRV.protocol) || ['custom'])[0]
+    : 'minecraft';
   const srvToggle = h('input', { type: 'checkbox', name: 'createSrv', checked: existingSRV ? true : null });
   const srvPreset = h('select', { name: 'srvPreset' },
-    Object.entries(SRV_PRESETS).map(([value, preset]) => h('option', {
-      value, selected: value === 'custom' ? true : null,
+    Object.entries(SRV_PRESETS).filter(([value]) => canAdmin() || value !== 'custom').map(([value, preset]) => h('option', {
+      value, selected: value === existingPreset ? true : null,
     }, preset.label)));
   const srvService = h('input', {
     name: 'srvService', spellcheck: 'false', placeholder: 'minecraft',
@@ -558,17 +618,13 @@ function resourceEditorPage(existing) {
   const srvProtocol = h('select', { name: 'srvProtocol' },
     h('option', { value: 'tcp', selected: !existingSRV || existingSRV.protocol === 'tcp' ? true : null }, 'TCP'),
     h('option', { value: 'udp', selected: existingSRV && existingSRV.protocol === 'udp' ? true : null }, 'UDP'));
-  const srvPriority = h('input', { name: 'srvPriority', type: 'number', min: '0', max: '65535', value: existingSRV ? existingSRV.priority : 0 });
-  const srvWeight = h('input', { name: 'srvWeight', type: 'number', min: '0', max: '65535', value: existingSRV ? existingSRV.weight : 0 });
   const srvHint = h('div', { class: 'muted tiny' });
+  const srvCustomFields = h('div', { class: 'grid-2' },
+    h('label', { class: 'field' }, h('span', null, 'Custom service'), srvService),
+    h('label', { class: 'field' }, h('span', null, 'Transport'), srvProtocol));
   const srvDetails = h('div', { class: 'fields' },
     h('label', { class: 'field' }, h('span', null, 'Application preset'), srvPreset),
-    h('div', { class: 'grid-2' },
-      h('label', { class: 'field' }, h('span', null, 'Service'), srvService),
-      h('label', { class: 'field' }, h('span', null, 'Transport'), srvProtocol)),
-    h('div', { class: 'grid-2' },
-      h('label', { class: 'field' }, h('span', null, 'Priority'), srvPriority),
-      h('label', { class: 'field' }, h('span', null, 'Weight'), srvWeight)));
+    srvCustomFields);
   const srvField = h('div', { class: 'subpanel' },
     h('label', { class: 'switch' }, srvToggle,
       h('span', null, h('strong', null, 'Create SRV record'),
@@ -582,18 +638,35 @@ function resourceEditorPage(existing) {
   // have: the port carries the traffic either way. Without that option the select
   // shows its first domain, which is what a resource routed by name wants.
   const selectedDomain = () => {
+    if (domainSelect.value === '' && !protocolIsByDomain(type.value)) return null;
     const found = domains.find((d) => d.value === domainSelect.value);
     if (found) return found;
-    if (domainSelect.contains(noNameOption) && domainSelect.value === '') return null;
     return domains[0] || null;
   };
   const syncSRV = () => {
     const stream = type.value === 'tcp' || type.value === 'udp';
+    for (const option of srvPreset.options) {
+      const value = option.getAttribute('value') || option.value;
+      const preset = SRV_PRESETS[value];
+      option.hidden = option.disabled = value !== 'custom' && (!preset || preset.protocol !== type.value);
+    }
+    const selectedOption = Array.from(srvPreset.options).find((option) =>
+      (option.getAttribute('value') || option.value) === srvPreset.value);
+    if (!selectedOption || selectedOption.disabled) {
+      const available = Array.from(srvPreset.options).find((option) => !option.disabled);
+      if (available) srvPreset.value = available.getAttribute('value') || available.value;
+    }
+    const preset = SRV_PRESETS[srvPreset.value];
+    srvCustomFields.hidden = !canAdmin() || srvPreset.value !== 'custom';
+    if (preset && srvPreset.value !== 'custom') {
+      srvService.value = preset.service;
+      srvProtocol.value = preset.protocol;
+    }
     const domain = selectedDomain();
-    const automatic = !!domain && !!domain.providerId;
-    srvField.hidden = !stream;
+    const automatic = !!domain && !!domain.srvAvailable;
+    srvField.hidden = !stream || !domain;
     srvToggle.disabled = !stream || (!automatic && !srvToggle.checked);
-    if (!stream) srvToggle.checked = false;
+    if (!stream || !domain) srvToggle.checked = false;
     srvDetails.hidden = !srvToggle.checked;
     if (!domain) srvHint.textContent = 'Choose a domain before creating an SRV record.';
     else if (!automatic) srvHint.textContent = 'Enable DNS automation for this domain before creating an SRV record.';
@@ -601,15 +674,8 @@ function resourceEditorPage(existing) {
       ' pointing to ' + resolvedHostname() + ':' + listenPort() + '.';
   };
   srvToggle.addEventListener('change', syncSRV);
-  srvPreset.addEventListener('change', () => {
-    const preset = SRV_PRESETS[srvPreset.value];
-    if (preset && srvPreset.value !== 'custom') {
-      srvService.value = preset.service;
-      srvProtocol.value = preset.protocol;
-    }
-    syncSRV();
-  });
-  [srvService, srvProtocol, srvPriority, srvWeight].forEach((input) => input.addEventListener('input', syncSRV));
+  srvPreset.addEventListener('change', syncSRV);
+  [srvService, srvProtocol].forEach((input) => input.addEventListener('input', syncSRV));
   const syncDomainOptions = () => {
     const byDomain = protocolIsByDomain(type.value);
     const present = domainSelect.contains(noNameOption);
@@ -691,6 +757,7 @@ function resourceEditorPage(existing) {
     const domain = selectedDomain();
     const wildcard = !!domain && domain.kind === 'wildcard';
     subdomainField.hidden = !wildcard;
+    domainRow.classList.toggle('is-single', !wildcard);
     if (wildcard && !subdomainInput.value) subdomainInput.value = slugify(nameInput.value);
   }
   nameInput.addEventListener('input', () => {
@@ -743,11 +810,15 @@ function resourceEditorPage(existing) {
     { value: 'login', label: 'Noobtunnel login', hint: 'Show a branded login page, then continue automatically to the resource.' },
   ], identityMode);
   const identityModeField = h('div', { class: 'field' }, h('span', null, 'Identity experience'), identityModeCards);
+  const identityEmailsInput = h('textarea', { name: 'identityEmails', rows: '3', placeholder: 'you@example.com' });
+  identityEmailsInput.value = isEdit ? (existing.identityEmails || []).join('\n') : '';
+  const identityEmailsField = h('label', { class: 'field' }, h('span', null, 'Allowed account emails'), identityEmailsInput,
+    h('span', { class: 'muted tiny' }, 'One verified account email per line. Your account is always allowed by identity control.'));
   const identityField = h('label', { class: 'switch' },
     identityToggle,
     h('span', null, h('strong', null, 'Identity controlled'),
       h('em', null, 'Require a control node account before a request is forwarded.')));
-  const syncIdentity = () => { identityModeField.hidden = !identityToggle.checked; };
+  const syncIdentity = () => { identityModeField.hidden = !identityToggle.checked; identityEmailsField.hidden = !identityToggle.checked; };
   identityToggle.addEventListener('change', syncIdentity);
   syncIdentity();
   const exploitField = h('label', { class: 'switch' },
@@ -757,7 +828,7 @@ function resourceEditorPage(existing) {
   const highRiskField = h('label', { class: 'switch' },
     h('input', { type: 'checkbox', name: 'blockHighRiskIps', checked: isEdit && existing.blockHighRiskIps ? true : null }),
     h('span', null, h('strong', null, 'Block high-risk IPs'),
-      h('em', null, 'Use the configured IP API to reject clients with an abuse confidence score of 80 or higher.')));
+      h('em', null, 'Reject clients with an abuse confidence score of 80 or higher.')));
   // WebSockets: on for every existing resource, and the switch is only shown for
   // the protocols that can carry an upgrade.
   const websocketField = h('label', { class: 'switch' },
@@ -783,6 +854,7 @@ function resourceEditorPage(existing) {
     const web = type.value === 'http' || type.value === 'https';
     identityField.hidden = !web;
     identityModeField.hidden = !web || !identityToggle.checked;
+    identityEmailsField.hidden = !web || !identityToggle.checked;
     exploitField.hidden = !web;
     websocketField.hidden = !web;
     rulesBox.hidden = false;
@@ -804,8 +876,10 @@ function resourceEditorPage(existing) {
     const protocol = type.value;
     const defaults = { http: 80, https: 443, tcp: 0, udp: 0 };
     const fallback = defaults[protocol];
-    listenInput.placeholder = fallback ? String(fallback) : 'required';
-    listenHint.textContent = fallback
+    listenInput.placeholder = !canAdmin() && (protocol === 'tcp' || protocol === 'udp') ? 'automatic' : fallback ? String(fallback) : 'required';
+    listenHint.textContent = !canAdmin() && (protocol === 'tcp' || protocol === 'udp')
+      ? (isEdit ? 'Public port ' + existing.listenPort + ' was assigned automatically.' : 'An unused public port is assigned automatically.')
+      : fallback
       ? 'Leave empty for port ' + fallback + '. Several ' + protocol.toUpperCase() +
         ' resources can share it when each has its own domain.'
       : 'Required: ' + protocol.toUpperCase() + ' resources each need their own port.';
@@ -814,7 +888,18 @@ function resourceEditorPage(existing) {
     // HTTPS is always 443: the control node answers with its own certificate, so
     // there is no port for the operator to pick.
     const fixedPort = protocol === 'https';
-    listenField.hidden = fixedPort;
+    listenField.hidden = fixedPort || (!canAdmin() && (protocol === 'tcp' || protocol === 'udp'));
+    const web = protocol === 'http' || protocol === 'https';
+    requestField.hidden = !web;
+    peakField.hidden = !web;
+    if (requestUsage) requestUsage.hidden = !web;
+    if (limitsProtocol !== protocol && (!isEdit || limitsProtocol !== null || !canAdmin() || existing.uncapped)) {
+      const defaults = web ? ['100', '3000000', '15', '30', '100', '0.512'] :
+        protocol === 'tcp' ? (canAdmin() ? ['10000', '0', '100', '1000', '0', '10'] : ['250', '0', '5', '30', '0', '1']) :
+          (canAdmin() ? ['10000', '0', '100', '1000', '0', '10'] : ['100', '0', '3', '20', '0', '0.512']);
+      [quotaInput, requestInput, sustainedInput, burstInput, peakInput, overInput].forEach((input, index) => { input.value = defaults[index]; });
+    }
+    limitsProtocol = protocol;
     // The hint belongs to the field: hiding one hides both, so no orphan label
     // is left behind.
     listenHint.hidden = fixedPort;
@@ -861,15 +946,20 @@ function resourceEditorPage(existing) {
       h('div', { class: 'field' }, h('span', null, 'PROXY protocol'), proxyCards, proxyHint),
       enabledField),
     h('div', { class: 'fields' },
+      usageBox,
+      uncappedField,
+      limitsControls),
+    h('div', { class: 'fields' },
       identityField,
       identityModeField,
+      identityEmailsField,
       exploitField,
       highRiskField,
       websocketField,
       rulesBox,
       error),
   ];
-  const stepTitles = ['Service', 'Targets', 'Publishing', 'Security'];
+  const stepTitles = ['Service', 'Targets', 'Publishing', 'Limits', 'Security'];
   let step = 0;
 
   const stepPills = stepTitles.map((title, index) => h('button', {
@@ -964,13 +1054,21 @@ function resourceEditorPage(existing) {
       srv: srvToggle.checked ? {
         service: srvService.value.trim().replace(/^_+/, ''),
         protocol: srvProtocol.value,
-        priority: Number(srvPriority.value || 0),
-        weight: Number(srvWeight.value || 0),
+        priority: canAdmin() && existingSRV ? existingSRV.priority || 0 : 0,
+        weight: canAdmin() && existingSRV ? existingSRV.weight || 0 : 0,
       } : null,
       proxyProtocol: type.value === 'udp' ? '' : proxyProtocol.value,
-      rules: type.value === 'http' || type.value === 'https' ? readRules(ruleList) : [],
+      rules: readRules(ruleList),
       identity: data.get('identity') !== null,
       identityMode: data.get('identity') !== null ? identityMode.value : '',
+      identityEmails: data.get('identity') !== null ? identityEmailsInput.value.split(/[\n,]/).map((email) => email.trim()).filter(Boolean) : [],
+      uncapped: canAdmin() && uncappedInput.checked,
+      monthlyQuotaBytes: canAdmin() ? Math.round(Number(quotaInput.value) * 1e9) : 0,
+      monthlyRequestQuota: canAdmin() && (type.value === 'http' || type.value === 'https') ? Math.round(Number(requestInput.value)) : 0,
+      sustainedBps: canAdmin() ? Math.round(Number(sustainedInput.value) * 1e6) : 0,
+      burstBps: canAdmin() ? Math.round(Number(burstInput.value) * 1e6) : 0,
+      peakBps: canAdmin() && (type.value === 'http' || type.value === 'https') ? Math.round(Number(peakInput.value) * 1e6) : 0,
+      overQuotaBps: canAdmin() ? Math.round(Number(overInput.value) * 1e6) : 0,
       blockExploits: data.get('blockExploits') !== null,
       blockHighRiskIps: data.get('blockHighRiskIps') !== null,
       websockets: data.get('websockets') !== null,
@@ -985,6 +1083,7 @@ function resourceEditorPage(existing) {
         window.history.pushState({ view: 'resources' }, '', '/resources');
       }
       await refresh();
+      if (state.resourceFilterEmail) await filterResourcesByEmail(state.resourceFilterEmail);
       toast(isEdit ? 'Resource updated' : 'Service published', 'ok');
     } catch (err) {
       error.hidden = false;
@@ -1002,7 +1101,9 @@ function targetFromView(target) {
 }
 
 function findResource(id) {
-  return (state.data.resources || []).find((r) => r.id === Number(id)) || null;
+  const resources = state.resourceFilterEmail && state.resourceFilterData?.matched
+    ? state.resourceFilterData.resources : state.data.resources;
+  return (resources || []).find((r) => r.id === Number(id)) || null;
 }
 
 // resourceBody rebuilds an API payload from a resource view.
@@ -1026,6 +1127,13 @@ function resourceBody(resource, overrides) {
     // what it forwards.
     identity: !!resource.identity,
     identityMode: resource.identityMode || 'basic',
+    identityEmails: resource.identityEmails || [],
+    monthlyQuotaBytes: resource.monthlyQuotaBytes || 0,
+    monthlyRequestQuota: resource.monthlyRequestQuota || 0,
+    sustainedBps: resource.sustainedBps || 0,
+    burstBps: resource.burstBps || 0,
+    peakBps: resource.peakBps || 0,
+    overQuotaBps: resource.overQuotaBps || 0,
     blockExploits: !!resource.blockExploits,
     blockHighRiskIps: !!resource.blockHighRiskIps,
     websockets: resource.websockets !== false,
@@ -1090,9 +1198,13 @@ function openDomainModal(hostname) {
     }, provider.name + (provider.enabled ? '' : ' (disabled)'))));
   const providerField = h('label', { class: 'field' }, h('span', null, 'Provider'), providerSelect);
   const providerNote = h('div', { class: 'muted tiny' });
+  const publicPoolInput = h('input', { type: 'checkbox', name: 'publicPool', checked: isEdit && existing.publicPool ? true : null });
+  const publicPoolField = h('label', { class: 'switch' }, publicPoolInput,
+    h('span', null, h('strong', null, 'Add to public pool'), h('em', null, 'Let regular accounts publish distinct hostnames under this wildcard.')));
+  publicPoolField.hidden = !canAdmin() || !isEdit || existing.kind !== 'wildcard';
 
   function syncMode() {
-    const auto = mode.value === 'auto';
+    const auto = canAdmin() && mode.value === 'auto';
     providerField.hidden = !auto;
     if (!auto) {
       providerNote.hidden = true;
@@ -1109,9 +1221,10 @@ function openDomainModal(hostname) {
   const form = h('form', { class: 'stack' },
     h('div', { class: 'fields' },
       hostField,
-      h('div', { class: 'field' }, h('span', null, 'DNS'), modeCards),
+      canAdmin() ? h('div', { class: 'field' }, h('span', null, 'DNS'), modeCards) : h('p', { class: 'muted tiny' }, 'Add a DNS TXT record to verify ownership before publishing on this domain.'),
       providerField,
-      providerNote),
+      providerNote,
+      canAdmin() && isEdit ? publicPoolField : null),
     h('div', { class: 'field-error', 'data-error': 'domain', hidden: true }),
     h('div', { class: 'modal-foot' },
       h('button', { class: 'btn', type: 'button', 'data-action': 'modal-close' }, 'Cancel'),
@@ -1121,7 +1234,9 @@ function openDomainModal(hostname) {
     const providerID = mode.value === 'auto' ? providerSelect.value : '';
     try {
       if (isEdit) {
-        await setDomainProvider(existing.hostname, providerID);
+        if (canAdmin()) {
+          await api('/api/domains/' + encodeURIComponent(existing.hostname), { method: 'PATCH', body: { providerId: providerID, publicPool: publicPoolInput.checked } });
+        }
       } else {
         const created = await api('/api/domains', {
           method: 'POST',
@@ -1131,7 +1246,7 @@ function openDomainModal(hostname) {
       }
       closeModal();
       await refresh();
-      toast(isEdit ? 'Domain updated' : 'Domain added', 'ok');
+      toast(isEdit ? 'Domain updated' : (canAdmin() ? 'Domain added' : 'Domain added. Set the TXT record and verify ownership.'), 'ok');
     } catch (err) {
       const box = $('[data-error=domain]', form);
       box.hidden = false;
@@ -1140,6 +1255,14 @@ function openDomainModal(hostname) {
   });
   modal(isEdit ? 'Edit domain' : 'Add domain',
     isEdit ? existing.hostname : 'A name that resources can be reached on', form);
+}
+
+async function verifyDomain(hostname) {
+  try {
+    await api('/api/domains/' + encodeURIComponent(hostname) + '/verify', { method: 'POST', body: {} });
+    await refresh();
+    toast('Domain ownership verified', 'ok');
+  } catch (err) { toast(err.message, 'fail'); }
 }
 
 async function deleteDomain(hostname) {
@@ -1166,11 +1289,13 @@ function slugify(value) {
 
 // domainOptions lists direct domains as-is and wildcard domains as suffixes.
 function domainOptions() {
-  return (state.data.domains || []).map((domain) => ({
+  const domains = state.resourceFilterEmail && state.resourceFilterData?.matched
+    ? state.resourceFilterData.domains : state.data.domains;
+  return (domains || []).filter((domain) => domain.verified || !domain.ownerId).map((domain) => ({
     value: domain.hostname,
     kind: domain.kind === 'wildcard' ? 'wildcard' : 'direct',
     pattern: domain.pattern || domain.hostname,
-    providerId: domain.providerId || '',
+    srvAvailable: !!domain.srvAvailable,
   }));
 }
 

@@ -74,19 +74,21 @@ func TestAddAgentReturnsUsableInstallCommand(t *testing.T) {
 	h := newHarness(t, true)
 	cookies := h.login(t)
 	status, body, _ := h.api("POST", "/api/agents", map[string]any{
-		"name": "new box", "advertise": []string{"192.168.44.0/24"}, "ttlHours": 24,
+		"name": "new box", "advertise": []string{"192.168.44.0/24"},
 	}, cookies)
 	if status != http.StatusOK {
 		t.Fatalf("add agent returned %d: %s", status, body)
 	}
 	var result struct {
 		Agent struct {
-			ID        uint32   `json:"id"`
-			Name      string   `json:"name"`
-			Address   string   `json:"address"`
-			Prefix    string   `json:"prefix"`
-			Token     string   `json:"token"`
-			Advertise []string `json:"advertise"`
+			ID        uint32     `json:"id"`
+			Name      string     `json:"name"`
+			Address   string     `json:"address"`
+			Prefix    string     `json:"prefix"`
+			Token     string     `json:"token"`
+			Advertise []string   `json:"advertise"`
+			CreatedAt time.Time  `json:"createdAt"`
+			ExpiresAt *time.Time `json:"expiresAt"`
 		} `json:"agent"`
 		InstallCommand string `json:"installCommand"`
 	}
@@ -95,6 +97,9 @@ func TestAddAgentReturnsUsableInstallCommand(t *testing.T) {
 	}
 	if result.Agent.Name != "new box" {
 		t.Fatalf("name = %q", result.Agent.Name)
+	}
+	if result.Agent.ExpiresAt == nil || result.Agent.ExpiresAt.Sub(result.Agent.CreatedAt) != 15*time.Minute {
+		t.Fatalf("enrollment deadline = %v, want 15 minutes after %v", result.Agent.ExpiresAt, result.Agent.CreatedAt)
 	}
 	if !strings.HasSuffix(result.Agent.Prefix, "/32") {
 		t.Fatalf("prefix = %q, want a /32 assignment", result.Agent.Prefix)
@@ -117,6 +122,62 @@ func TestAddAgentReturnsUsableInstallCommand(t *testing.T) {
 	}
 	if strings.ContainsAny(result.Agent.Name, "'\"") {
 		t.Fatal("test name should be unquoted-safe")
+	}
+	status, body, _ = h.api("POST", fmt.Sprintf("/api/agents/%d/rotate", result.Agent.ID), map[string]any{}, cookies)
+	if status != http.StatusOK {
+		t.Fatalf("rotate agent returned %d: %s", status, body)
+	}
+	var rotated struct {
+		Agent struct {
+			Token     string     `json:"token"`
+			ExpiresAt *time.Time `json:"expiresAt"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(body, &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.Agent.Token == result.Agent.Token || rotated.Agent.ExpiresAt == nil ||
+		rotated.Agent.ExpiresAt.Before(time.Now().Add(14*time.Minute)) ||
+		rotated.Agent.ExpiresAt.After(time.Now().Add(16*time.Minute)) {
+		t.Fatal("rotated enrollment command did not get a new token and fresh 15-minute deadline")
+	}
+}
+
+func TestOpenInstallCommandCanRenewItsDeadline(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	status, body, _ := h.api("POST", "/api/agents", map[string]any{"name": "installing"}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("add agent returned %d: %s", status, body)
+	}
+	var created struct {
+		Agent struct {
+			ID uint32 `json:"id"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	if err := h.server.Store().UpdateAgent(created.Agent.ID, func(a *store.Agent) error {
+		a.ExpiresAt = &old
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path := fmt.Sprintf("/api/agents/%d/keepalive", created.Agent.ID)
+	if status, body, _ := h.api("POST", path, nil, admin); status != http.StatusOK {
+		t.Fatalf("renewing an open command returned %d: %s", status, body)
+	}
+	agent, err := h.server.Store().Agent(created.Agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.ExpiresAt == nil || agent.ExpiresAt.Before(time.Now().Add(14*time.Minute)) {
+		t.Fatalf("renewed deadline = %v", agent.ExpiresAt)
+	}
+	if status, _, _ := h.api("POST", path, nil, nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated renewal returned %d", status)
 	}
 }
 
@@ -257,10 +318,8 @@ func TestUIAssetsAreServed(t *testing.T) {
 	}
 }
 
-// TestServedLogsTabsSitAtPageLevel checks the page the control node actually
-// serves: the Logs tab row belongs to the view itself, above the cards, exactly
-// the way the Settings tabs are laid out. A stale or restructured template that
-// buries the row inside a panel fails here.
+// TestServedLogsTabsSitAtPageLevel checks the served page's sidebar subtabs
+// and Logs panels stay connected.
 func TestServedLogsTabsSitAtPageLevel(t *testing.T) {
 	h := newHarness(t, true)
 	status, index, _ := h.api("GET", "/", nil, nil)
@@ -277,12 +336,14 @@ func TestServedLogsTabsSitAtPageLevel(t *testing.T) {
 		t.Fatal("the served Logs view is not closed")
 	}
 	section := page[start : start+end]
-	nav := strings.Index(section, `<nav class="tabs"`)
-	if nav < 0 {
-		t.Fatal("the served Logs view has no tab row")
+	nav := strings.Index(page, `data-subnav="activity"`)
+	if nav < 0 || nav > start {
+		t.Fatal("the served page has no Logs subnavigation in the sidebar")
 	}
-	if strings.Contains(section[:nav], `<div class="panel`) {
-		t.Fatal("the Logs tab row is nested inside a panel; it should sit on the view like Settings")
+	for _, tab := range []string{"requests", "statistics", "activity", "errors"} {
+		if !strings.Contains(page[nav:start], `data-tab="`+tab+`"`) {
+			t.Fatalf("the Logs subnavigation has no %q tab", tab)
+		}
 	}
 	for _, panel := range []string{"requests", "activity"} {
 		if !strings.Contains(section, `data-tab-panel="`+panel+`"`) {

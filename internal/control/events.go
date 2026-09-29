@@ -15,6 +15,7 @@ type Event struct {
 	Kind    string    `json:"kind"`
 	Message string    `json:"message"`
 	Time    time.Time `json:"time"`
+	OwnerID string    `json:"-"`
 }
 
 // eventHub fans state snapshots out to SSE subscribers and keeps a short log.
@@ -97,7 +98,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch := s.events.subscribe()
 	defer s.events.unsubscribe(ch)
 
-	if err := writeSSE(w, s.StateSnapshot()); err != nil {
+	who := principalFrom(r)
+	if err := writeSSE(w, s.StateSnapshotFor(who)); err != nil {
 		return
 	}
 	flusher.Flush()
@@ -113,11 +115,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case payload, ok := <-ch:
+		case _, ok := <-ch:
 			if !ok {
 				return
 			}
-			if _, err := w.Write(payload); err != nil {
+			if err := writeSSE(w, s.StateSnapshotFor(who)); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -135,7 +137,17 @@ func writeSSE(w io.Writer, v any) error {
 }
 
 func (s *Server) handleEventLog(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"events": s.events.recent()})
+	writeJSON(w, http.StatusOK, map[string]any{"events": s.eventsFor(principalFrom(r))})
+}
+
+func (s *Server) eventsFor(who principal) []Event {
+	visible := make([]Event, 0)
+	for _, event := range s.events.recent() {
+		if event.OwnerID != "" && event.OwnerID == who.UserID {
+			visible = append(visible, event)
+		}
+	}
+	return visible
 }
 
 // Checks returns the cached preflight results.

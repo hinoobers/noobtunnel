@@ -127,6 +127,7 @@ func TestControlDomainCannotBePublishedAsAResource(t *testing.T) {
 		t.Fatalf("error should explain the clash: %s", body)
 	}
 }
+
 // TestDockerInstallMethodMarksTheCommand covers the "Install with: Docker"
 // choice in the UI: the same command, plus --docker so the installer on the
 // target machine writes compose files instead of a systemd unit.

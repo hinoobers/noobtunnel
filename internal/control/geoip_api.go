@@ -25,23 +25,51 @@ func (s *Server) ErrorsForTest() []ErrorEntry {
 
 // GeoIPStatus describes the IP API for the settings panel.
 type GeoIPStatus struct {
-	Configured bool   `json:"configured"`
-	HasToken   bool   `json:"hasToken"`
-	Host       string `json:"host,omitempty"`
-	Ready      bool   `json:"ready"`
-	Cached     int    `json:"cached,omitempty"`
-	Lookups    int    `json:"lookups,omitempty"`
-	LastAt     string `json:"lastAt,omitempty"`
-	LastError  string `json:"lastError,omitempty"`
+	Provider           string  `json:"provider"`
+	Configured         bool    `json:"configured"`
+	HasToken           bool    `json:"hasToken"`
+	Host               string  `json:"host,omitempty"`
+	AgentID            uint32  `json:"agentId,omitempty"`
+	IPLogConfigured    bool    `json:"iplogConfigured"`
+	FallbackEnabled    bool    `json:"fallbackEnabled"`
+	FallbackHost       string  `json:"fallbackHost,omitempty"`
+	FallbackLookups    int     `json:"fallbackLookups,omitempty"`
+	LastFallbackReason string  `json:"lastFallbackReason,omitempty"`
+	Ready              bool    `json:"ready"`
+	Cached             int     `json:"cached,omitempty"`
+	AvgResponseMs      float64 `json:"avgResponseMs,omitempty"`
+	Lookups            int     `json:"lookups,omitempty"`
+	LastAt             string  `json:"lastAt,omitempty"`
+	LastError          string  `json:"lastError,omitempty"`
 }
 
 // geoIPStatus reports the current state of country lookups.
 func (s *Server) geoIPStatus() GeoIPStatus {
 	credentials := s.geoIPCredentials()
 	status := GeoIPStatus{
-		Configured: credentials.Host != "",
-		HasToken:   credentials.Token != "",
-		Host:       credentials.Host,
+		Provider:        credentials.Provider,
+		Configured:      credentials.Host != "",
+		HasToken:        credentials.Token != "",
+		Host:            credentials.Host,
+		AgentID:         credentials.AgentID,
+		IPLogConfigured: credentials.Host != "" && credentials.Host != "https://api.ipapi.is",
+		FallbackEnabled: false,
+	}
+	if status.IPLogConfigured && credentials.AgentID != 0 {
+		agent, err := s.store.Agent(credentials.AgentID)
+		status.IPLogConfigured = err == nil && agent.Enabled && agent.PublicKey != ""
+	}
+	if status.IPLogConfigured {
+		_, err := geoIPForwardTarget(credentials.Host)
+		status.IPLogConfigured = err == nil
+	}
+	status.FallbackEnabled = credentials.Provider == "ipapi" && credentials.FallbackEnabled && status.IPLogConfigured
+	if credentials.Provider == "ipapi" {
+		status.Configured = credentials.PublicToken != ""
+		status.HasToken = credentials.PublicToken != ""
+		if status.FallbackEnabled {
+			status.FallbackHost = credentials.Host
+		}
 	}
 	s.mu.Lock()
 	api := s.geoIP
@@ -52,8 +80,10 @@ func (s *Server) geoIPStatus() GeoIPStatus {
 	_, cached, lookups, lastAt, lastError := api.Stats()
 	status.Ready = api.Ready()
 	status.Cached = cached
+	status.AvgResponseMs = float64(api.AverageResponse().Microseconds()) / 1000
 	status.Lookups = lookups
 	status.LastError = lastError
+	status.FallbackLookups, status.LastFallbackReason = api.FallbackStats()
 	if !lastAt.IsZero() {
 		status.LastAt = lastAt.Format(timeLayout)
 	}
@@ -86,9 +116,13 @@ func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"geoip": s.geoIPStatus()})
 	case http.MethodPost:
 		var body struct {
-			Host  string `json:"host"`
-			Token string `json:"token"`
-			Clear bool   `json:"clear"`
+			Provider        string  `json:"provider"`
+			Host            string  `json:"host"`
+			Token           string  `json:"token"`
+			PublicToken     string  `json:"publicToken"`
+			FallbackEnabled *bool   `json:"fallbackEnabled"`
+			AgentID         *uint32 `json:"agentId"`
+			Clear           bool    `json:"clear"`
 			// Check looks up one address with the settings as they are saved, so
 			// the panel can say whether the host and token work.
 			Check bool `json:"check"`
@@ -97,26 +131,95 @@ func (s *Server) handleGeoIP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		cfg := store.GeoIPConfig{Host: body.Host, Token: body.Token}
+		previous := s.store.GeoIP()
+		cfg := previous
+		cfg.Provider = body.Provider
+		if cfg.Provider == "" {
+			cfg.Provider = "self"
+		}
+		if cfg.Provider != "self" && cfg.Provider != "ipapi" {
+			writeJSON(w, http.StatusBadRequest, errBody("select a valid IP API provider"))
+			return
+		}
+		if body.AgentID != nil {
+			cfg.AgentID = *body.AgentID
+		}
+		if body.FallbackEnabled != nil {
+			cfg.FallbackEnabled = *body.FallbackEnabled
+		}
 		switch {
 		case body.Clear:
 			cfg = store.GeoIPConfig{}
+		case cfg.Provider == "ipapi":
+			if body.Host != "" {
+				cfg.Host = strings.TrimSpace(body.Host)
+			}
+			if previous.Host == "https://api.ipapi.is" && body.Host == "" {
+				cfg.Host = ""
+			}
+			if body.Token != "" {
+				cfg.Token = body.Token
+			}
+			if previous.Host == "https://api.ipapi.is" {
+				cfg.Token = body.Token
+			}
+			if body.PublicToken != "" {
+				cfg.PublicToken = body.PublicToken
+			}
+			if cfg.PublicToken == "" && previous.Host == "https://api.ipapi.is" {
+				cfg.PublicToken = previous.Token
+			}
+			if cfg.PublicToken == "" {
+				writeJSON(w, http.StatusBadRequest, errBody("enter an ipapi.is API key"))
+				return
+			}
 		case strings.TrimSpace(body.Host) == "":
+			if previous.Provider == "ipapi" && (previous.Host == "" || previous.Host == "https://api.ipapi.is") {
+				writeJSON(w, http.StatusBadRequest, errBody("enter the self-hosted API address"))
+				return
+			}
 			// Leaving the field empty keeps what is stored; the token is kept
 			// unless a new one is typed.
-			cfg.Host = s.store.GeoIP().Host
-			if strings.TrimSpace(body.Token) == "" {
-				cfg.Token = s.store.GeoIP().Token
+			if body.Token != "" {
+				cfg.Token = body.Token
 			}
-		case strings.TrimSpace(body.Token) == "":
-			cfg.Token = s.store.GeoIP().Token
+		default:
+			cfg.Host = strings.TrimSpace(body.Host)
+			if body.Token != "" {
+				cfg.Token = body.Token
+			}
+		}
+		if cfg.Provider == "ipapi" && cfg.FallbackEnabled && (cfg.Host == "" || cfg.Host == "https://api.ipapi.is") {
+			writeJSON(w, http.StatusBadRequest, errBody("configure iplog before enabling fallback"))
+			return
+		}
+		if cfg.Provider == "ipapi" && cfg.FallbackEnabled {
+			if _, err := geoIPForwardTarget(cfg.Host); err != nil {
+				writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+				return
+			}
+		}
+		if cfg.AgentID != 0 && (cfg.Provider != "ipapi" || cfg.FallbackEnabled) {
+			if cfg.Host == "" {
+				writeJSON(w, http.StatusBadRequest, errBody("enter the iplog address for the selected agent"))
+				return
+			}
+			agent, err := s.store.Agent(cfg.AgentID)
+			if err != nil || !agent.Enabled || agent.PublicKey == "" {
+				writeJSON(w, http.StatusBadRequest, errBody("select an enrolled, enabled agent for the IP API"))
+				return
+			}
+			if _, err := geoIPForwardTarget(cfg.Host); err != nil {
+				writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+				return
+			}
 		}
 		if err := s.store.SetGeoIP(cfg); err != nil {
 			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
 			return
 		}
+		s.markDirty()
 		api := s.geoIPClient()
-		api.Clear()
 		s.useGeoIP(api)
 		if body.Clear {
 			s.recordEvent("geoip", "IP API removed")

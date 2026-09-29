@@ -9,26 +9,31 @@ package geoip
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// ErrNotConfigured means no API is set up, so country rules stay inert.
+// ErrNotConfigured means no API is set up; resources with country rules deny
+// requests whose countries cannot be determined.
 var ErrNotConfigured = errors.New("geoip: no IP API is configured")
 
 const (
-	// lookupTimeout bounds one lookup that a decision is waiting for: an access
-	// rule cannot be evaluated without an answer, and a request should not wait
-	// long for one.
-	lookupTimeout = 2 * time.Second
+	// DecisionTimeout bounds a country lookup that an access rule is waiting for.
+	// Cold IP API responses can take several seconds; unknown countries still deny.
+	DecisionTimeout = 5 * time.Second
 	// warmTimeout bounds a lookup nobody is waiting for. It is generous on purpose:
 	// the API may be a published service of this same control node, which makes a
 	// cold answer slow, and a country that arrives late is still useful.
@@ -69,11 +74,22 @@ type Lookup struct {
 
 // API is a client for the operator's IP API. It is safe for concurrent use.
 type API struct {
-	mu     sync.Mutex
-	host   string
-	token  string
-	client *http.Client
-	cache  map[netip.Addr]entry
+	mu                 sync.Mutex
+	host               string
+	token              string
+	provider           string
+	client             *http.Client
+	fallback           *API
+	publicRetryAt      time.Time
+	fallbackLookups    int
+	lastFallbackReason string
+	// dialAddress is the selected agent's mesh forward, when one is used.
+	dialAddress   string
+	cache         map[netip.Addr]entry
+	cacheFile     string
+	cacheTimer    *time.Timer
+	responseTotal time.Duration
+	responseCount int
 	// lookups counts answers fetched from the API, for the settings panel.
 	lookups   int
 	lastError string
@@ -81,6 +97,9 @@ type API struct {
 	// OnError is told about a failed lookup, so an API that stops answering or
 	// sends something unexpected shows up where every other failure does.
 	OnError func(error)
+	// OnCountry is told when a lookup resolves a country, including lookups
+	// started in the background for the request log.
+	OnCountry func(netip.Addr, string)
 	// warming tracks addresses with a lookup in flight, and warmingAt when the next
 	// retry is due for one the API has not answered for.
 	warming   map[netip.Addr]bool
@@ -111,6 +130,60 @@ func New(host, token string) *API {
 	return api
 }
 
+// NewPublic uses ipapi.is with a key. Its keyed response includes the country
+// and the abuse flag needed by resource security controls.
+func NewPublic(token string) *API {
+	api := New("https://api.ipapi.is", token)
+	api.provider = "ipapi"
+	return api
+}
+
+// SetFallback keeps a self-hosted API available when the public provider
+// fails, including quota and network failures.
+func (a *API) SetFallback(fallback *API) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.fallback = fallback
+}
+
+// FallbackStats reports whether iplog has answered in place of the public API.
+func (a *API) FallbackStats() (int, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.fallbackLookups, a.lastFallbackReason
+}
+
+// NewVia sends requests through a mesh forward while retaining the configured
+// URL for the HTTP Host header and TLS certificate verification.
+func NewVia(host, token, dialAddress string) *API {
+	api := New(host, token)
+	api.dialAddress = dialAddress
+	if dialAddress == "" {
+		api.dialAddress = "unavailable-agent"
+	}
+	api.client.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			if dialAddress == "" {
+				return nil, fmt.Errorf("selected IP API agent is unavailable")
+			}
+			// A newly selected agent receives its forward on the next peer push.
+			// Give that short setup window a chance to finish during Save and check.
+			for {
+				conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, network, dialAddress)
+				if err == nil {
+					return conn, nil
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
+		},
+	}
+	return api
+}
+
 // Configure points the client at an API, dropping anything cached from another.
 func (a *API) Configure(host, token string) {
 	host = normaliseHost(host)
@@ -123,6 +196,8 @@ func (a *API) Configure(host, token string) {
 		a.attempts = map[netip.Addr]int{}
 		a.lookups = 0
 		a.lastError = ""
+		a.responseTotal = 0
+		a.responseCount = 0
 	}
 	a.host, a.token = host, token
 }
@@ -159,7 +234,90 @@ func (a *API) Ready() bool {
 func (a *API) Stats() (host string, cached int, lookups int, lastAt time.Time, lastError string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.host, len(a.cache), a.lookups, a.lastAt, a.lastError
+	for addr, hit := range a.cache {
+		if time.Since(hit.at) > cacheTTL || (hit.err != "" && time.Since(hit.at) > failureTTL) {
+			delete(a.cache, addr)
+		} else if hit.err == "" {
+			cached++
+		}
+	}
+	return a.host, cached, a.lookups, a.lastAt, a.lastError
+}
+
+// AverageResponse reports the mean duration of successful HTTP lookups this run.
+func (a *API) AverageResponse() time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.responseCount == 0 {
+		return 0
+	}
+	return a.responseTotal / time.Duration(a.responseCount)
+}
+
+type diskCache struct {
+	Identity [32]byte             `json:"identity"`
+	Entries  map[string]diskEntry `json:"entries"`
+}
+type diskEntry struct {
+	Info Lookup    `json:"info"`
+	At   time.Time `json:"at"`
+}
+
+func (a *API) cacheIdentity() [32]byte {
+	identity := a.provider + "\x00" + a.host + "\x00" + a.token + "\x00" + a.dialAddress
+	if a.fallback != nil {
+		identity += "\x00" + a.fallback.host + "\x00" + a.fallback.token + "\x00" + a.fallback.dialAddress
+	}
+	return sha256.Sum256([]byte(identity))
+}
+
+// SetCacheFile restores valid answers so a control node restart does not cause
+// every known address to ask the IP API again. Credentials never enter the file.
+func (a *API) SetCacheFile(path string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cacheFile = path
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var saved diskCache
+	if json.Unmarshal(raw, &saved) != nil || saved.Identity != a.cacheIdentity() {
+		return
+	}
+	for rawAddr, hit := range saved.Entries {
+		addr, err := netip.ParseAddr(rawAddr)
+		if err == nil && time.Since(hit.At) < cacheTTL && !hit.At.After(time.Now()) {
+			a.cache[addr] = entry{info: hit.Info, at: hit.At}
+		}
+	}
+}
+
+func (a *API) persistCache() {
+	a.mu.Lock()
+	a.cacheTimer = nil
+	path := a.cacheFile
+	saved := diskCache{Identity: a.cacheIdentity(), Entries: map[string]diskEntry{}}
+	for addr, hit := range a.cache {
+		if hit.err == "" && time.Since(hit.at) < cacheTTL {
+			saved.Entries[addr.String()] = diskEntry{hit.info, hit.at}
+		}
+	}
+	a.mu.Unlock()
+	if path == "" {
+		return
+	}
+	raw, err := json.Marshal(saved)
+	if err != nil {
+		return
+	}
+	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, raw, 0600) == nil {
+		_ = os.Rename(tmp, path)
+	}
 }
 
 // Country is the ISO country code for an address, or "" when it is not known yet.
@@ -295,6 +453,7 @@ func (a *API) Lookup(ctx context.Context, addr netip.Addr) (Lookup, error) {
 	addr = addr.Unmap()
 	a.mu.Lock()
 	host, token := a.host, a.token
+	fallback, retryAt := a.fallback, a.publicRetryAt
 	a.mu.Unlock()
 	if host == "" {
 		return Lookup{}, ErrNotConfigured
@@ -304,18 +463,55 @@ func (a *API) Lookup(ctx context.Context, addr netip.Addr) (Lookup, error) {
 		// that is down should not be asked once per request.
 		return hit, cachedErr
 	}
-	info, err := a.fetch(ctx, host, token, addr)
-	a.remember(addr, info, err)
+	started := time.Now()
+	var info Lookup
+	var err error
+	if time.Now().Before(retryAt) {
+		err = fmt.Errorf("geoip: ipapi.is is temporarily unavailable")
+	} else {
+		primaryCtx := ctx
+		cancel := func() {}
+		if fallback != nil && fallback.Configured() {
+			primaryCtx, cancel = context.WithTimeout(ctx, 750*time.Millisecond)
+		}
+		info, err = a.fetch(primaryCtx, host, token, addr)
+		cancel()
+	}
+	if err != nil && fallback != nil && fallback.Configured() {
+		primaryErr := err
+		info, err = fallback.Lookup(ctx, addr)
+		if err == nil {
+			a.mu.Lock()
+			a.fallbackLookups++
+			a.lastFallbackReason = primaryErr.Error()
+			a.mu.Unlock()
+		} else {
+			err = fmt.Errorf("primary IP API: %v; iplog fallback: %w", primaryErr, err)
+		}
+	}
+	if err != nil && a.provider == "ipapi" && fallback != nil {
+		a.mu.Lock()
+		if a.publicRetryAt.Before(time.Now()) {
+			a.publicRetryAt = time.Now().Add(30 * time.Second)
+		}
+		a.mu.Unlock()
+	}
+	a.remember(addr, info, err, time.Since(started))
 	if err != nil {
 		a.report(err)
 		return Lookup{}, err
 	}
+	a.reportCountry(addr, info.Country)
 	return info, nil
 }
 
-// fetch performs the request: GET <host>/checkip?ip=<address>.
+// fetch requests the fields country and abuse decisions use. Optional port
+// scans, reverse DNS and registration lookups are skipped to keep this path fast.
 func (a *API) fetch(ctx context.Context, host, token string, addr netip.Addr) (Lookup, error) {
-	endpoint := host + "/checkip?ip=" + url.QueryEscape(addr.String())
+	if a.provider == "ipapi" {
+		return a.fetchPublic(ctx, host, token, addr)
+	}
+	endpoint := host + "/checkip?ip=" + url.QueryEscape(addr.String()) + "&ports=no&hostname=no&registration=no"
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return Lookup{}, err
@@ -343,8 +539,83 @@ func (a *API) fetch(ctx context.Context, host, token string, addr netip.Addr) (L
 	return parsed.lookup(), nil
 }
 
+func (a *API) fetchPublic(ctx context.Context, host, token string, addr netip.Addr) (Lookup, error) {
+	if token == "" {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is requires an API key")
+	}
+	// POST keeps the key out of URLs and proxy access logs.
+	data, err := json.Marshal(map[string]string{"q": addr.String(), "key": token})
+	if err != nil {
+		return Lookup{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, host, strings.NewReader(string(data)))
+	if err != nil {
+		return Lookup{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := a.client.Do(request)
+	if err != nil {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponse))
+	if err != nil {
+		return Lookup{}, err
+	}
+	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden {
+			delay := time.Hour
+			if seconds, parseErr := strconv.Atoi(response.Header.Get("Retry-After")); parseErr == nil && seconds > 0 {
+				delay = min(time.Duration(seconds)*time.Second, 24*time.Hour)
+			}
+			a.mu.Lock()
+			a.publicRetryAt = time.Now().Add(delay)
+			a.mu.Unlock()
+		}
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is answered %s: %s", response.Status, firstLine(string(body)))
+	}
+	var parsed struct {
+		IP       string `json:"ip"`
+		Error    string `json:"error"`
+		Country  string `json:"country"`
+		Location struct {
+			CountryCode string `json:"country_code"`
+		} `json:"location"`
+		ASN struct {
+			Org string `json:"org"`
+		} `json:"asn"`
+		IsTor        bool   `json:"is_tor"`
+		IsProxy      bool   `json:"is_proxy"`
+		IsDatacenter bool   `json:"is_datacenter"`
+		IsAbuser     bool   `json:"is_abuser"`
+		Docs         string `json:"docs"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is sent invalid JSON: %w", err)
+	}
+	if parsed.Error != "" {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is: %s", parsed.Error)
+	}
+	if parsed.Docs != "" {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is returned anonymous data; check the API key")
+	}
+	answeredIP, parseErr := netip.ParseAddr(parsed.IP)
+	if parseErr != nil || answeredIP.Unmap() != addr || len(parsed.Location.CountryCode) != 2 {
+		return Lookup{}, fmt.Errorf("geoip: ipapi.is returned no country for %s", addr)
+	}
+	info := Lookup{Country: strings.ToUpper(parsed.Location.CountryCode), CountryFrom: "ipapi.is", ASN: parsed.ASN.Org,
+		IsTor: parsed.IsTor, Proxy: parsed.IsProxy, Hosting: parsed.IsDatacenter}
+	// ipapi.is exposes an abuse verdict rather than iplog's 0-100 confidence.
+	// A positive verdict maps to the existing high-risk threshold of 80.
+	if parsed.IsAbuser {
+		info.AbuseScore = 100
+	}
+	return info, nil
+}
+
 // remember stores an answer, or the failure, for later requests.
-func (a *API) remember(addr netip.Addr, info Lookup, err error) {
+func (a *API) remember(addr netip.Addr, info Lookup, err error, elapsed time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -355,7 +626,12 @@ func (a *API) remember(addr netip.Addr, info Lookup, err error) {
 	a.lastError = ""
 	a.lastAt = time.Now()
 	a.lookups++
+	a.responseTotal += elapsed
+	a.responseCount++
 	a.cache[addr] = entry{info: info, at: time.Now()}
+	if a.cacheFile != "" && a.cacheTimer == nil {
+		a.cacheTimer = time.AfterFunc(2*time.Second, a.persistCache)
+	}
 }
 
 // report hands a failure to whoever is listening, without holding the lock: the
@@ -366,6 +642,18 @@ func (a *API) report(err error) {
 	a.mu.Unlock()
 	if callback != nil {
 		callback(err)
+	}
+}
+
+func (a *API) reportCountry(addr netip.Addr, country string) {
+	if country == "" {
+		return
+	}
+	a.mu.Lock()
+	callback := a.OnCountry
+	a.mu.Unlock()
+	if callback != nil {
+		callback(addr, country)
 	}
 }
 
@@ -399,6 +687,8 @@ func (a *API) Clear() {
 	a.cache = map[netip.Addr]entry{}
 	a.lastError = ""
 	a.lookups = 0
+	a.responseTotal = 0
+	a.responseCount = 0
 }
 
 // apiResponse is the documented answer from /checkip.

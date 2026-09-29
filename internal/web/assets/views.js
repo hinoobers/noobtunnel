@@ -98,7 +98,34 @@ async function refreshChecks() {
 
 /* ---------- topology ---------- */
 
+const topologyLayoutKey = 'noobtunnel.topology.layout.v1';
+let topologyLayout;
+let topologyDragging = false;
+
+function loadTopologyLayout() {
+  if (topologyLayout !== undefined) return topologyLayout;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(topologyLayoutKey));
+    topologyLayout = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+  } catch (_) {
+    topologyLayout = {};
+  }
+  if (!topologyLayout.agents || typeof topologyLayout.agents !== 'object') topologyLayout.agents = {};
+  return topologyLayout;
+}
+
+function saveTopologyLayout() {
+  try { window.localStorage.setItem(topologyLayoutKey, JSON.stringify(topologyLayout)); } catch (_) {}
+}
+
+function resetTopologyLayout() {
+  topologyLayout = undefined;
+  try { window.localStorage.removeItem(topologyLayoutKey); } catch (_) {}
+  renderShell();
+}
+
 function renderTopology(node, subNode, agents, summary) {
+  if (topologyDragging) return;
   clear(node);
   agents = agents || [];
   if (subNode) {
@@ -119,19 +146,24 @@ function renderTopology(node, subNode, agents, summary) {
   const count = agents.length;
   const radiusX = Math.min(400, 200 + count * 24);
   const radiusY = Math.min(190, 120 + count * 9);
-  const hub = hubAddress(state.data.settings.meshCidr);
+  const hub = state.data.server.hubAddress || hubAddress(state.data.settings.meshCidr);
+  const layout = loadTopologyLayout();
+  const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  const savedPosition = (saved, x, y) => ({
+    x: saved && Number.isFinite(saved.x) ? clamp(saved.x, 60, width - 60) : x,
+    y: saved && Number.isFinite(saved.y) ? clamp(saved.y, 48, height - 72) : y,
+  });
+  const hubPos = savedPosition(layout.hub, cx, cy);
   const positions = new Map();
 
   agents.forEach((agent, index) => {
     const angle = (-Math.PI / 2) + (index * 2 * Math.PI) / count;
-    positions.set(agent.id, {
-      x: cx + Math.cos(angle) * radiusX,
-      y: cy + Math.sin(angle) * radiusY,
-      agent,
-    });
+    positions.set(agent.id, savedPosition(layout.agents[agent.id],
+      cx + Math.cos(angle) * radiusX, cy + Math.sin(angle) * radiusY));
   });
 
-  const canvas = svg('svg', { viewBox: '0 0 ' + width + ' ' + height, role: 'img', 'aria-label': 'Mesh topology' });
+  const canvas = svg('svg', { viewBox: '0 0 ' + width + ' ' + height, role: 'img',
+    'aria-label': 'Mesh topology. Drag nodes to arrange them.' });
   canvas.append(svg('defs', null,
     svg('linearGradient', { id: 'linkDirect', x1: '0', y1: '0', x2: '1', y2: '1' },
       svg('stop', { offset: '0', 'stop-color': '#818cf8' }),
@@ -147,48 +179,118 @@ function renderTopology(node, subNode, agents, summary) {
       svg('stop', { offset: '1', 'stop-color': '#1e293b' }))));
 
   const links = svg('g', null);
-
-  const drawn = new Set();
-  agents.forEach((agent) => {
-    const from = positions.get(agent.id);
-    (agent.links || []).forEach((link) => {
-      if (link.peerId < agent.id) return;
-      const to = positions.get(link.peerId);
-      if (!to) return;
-      const pairKey = agent.id + '-' + link.peerId;
-      if (drawn.has(pairKey)) return;
-      drawn.add(pairKey);
-      const idle = !link.lastHandshake;
-      if (link.direct) {
-        links.append(svg('line', {
-          class: 'link direct' + (idle ? ' idle' : ''),
-          x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-        }));
-      } else {
-        links.append(svg('path', {
-          class: 'link relay' + (idle ? ' idle' : ''),
-          d: 'M' + from.x + ' ' + from.y + ' Q' + cx + ' ' + cy + ' ' + to.x + ' ' + to.y,
-        }));
-      }
-    });
+  const spokes = agents.map((agent) => {
+    const line = svg('line', { class: 'link hub-link' + (!agent.online ? ' idle' : '') },
+      svg('title', null, agent.name + ' ↔ control node'));
+    links.append(line);
+    return { id: agent.id, line };
   });
-
-  agents.forEach((agent) => {
-    const pos = positions.get(agent.id);
-    if (!pos) return;
-    const status = agentStatus(agent);
-    links.append(svg('line', {
-      class: 'link ' + (status.key === 'online' || status.key === 'reachable' ? 'direct' : 'relay idle'),
-      x1: cx, y1: cy, x2: pos.x, y2: pos.y,
-      opacity: status.key === 'offline' || status.key === 'disabled' ? '0.35' : '1',
-    }));
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  const pairs = new Map();
+  agents.forEach((agent) => (agent.links || []).forEach((link) => {
+    if (!agentById.has(link.peerId)) return;
+    const ids = [agent.id, link.peerId].sort((a, b) => a - b);
+    const key = ids.join('-');
+    if (!pairs.has(key)) pairs.set(key, { ids, reports: [] });
+    pairs.get(key).reports.push(link);
+  }));
+  const edges = [];
+  pairs.forEach(({ ids, reports }) => {
+    const from = agentById.get(ids[0]), to = agentById.get(ids[1]);
+    const direct = reports.every((link) => link.direct);
+    const mixed = reports.some((link) => link.direct) && !direct;
+    const idle = !from.online || !to.online;
+    const edge = svg(direct ? 'line' : 'path', {
+      class: 'link ' + (direct ? 'direct' : 'relay') + (idle ? ' idle' : ''),
+    }, svg('title', null, from.name + ' ↔ ' + to.name + ': ' +
+      (direct ? 'direct agent-to-agent path' : mixed ? 'one side direct, one side via control node' : 'via control node')));
+    links.append(edge);
+    edges.push({ ids, direct, edge });
   });
   canvas.append(links);
 
-  canvas.append(svg('circle', { class: 'hub-ring', cx, cy, r: 42 }));
-  canvas.append(svg('circle', { cx, cy, r: 28, fill: 'url(#hubFill)', stroke: 'rgba(255,255,255,.18)', 'stroke-width': '1' }));
-  canvas.append(svg('text', { class: 'node-label', x: cx, y: cy + 4 }, 'hub'));
-  canvas.append(svg('text', { class: 'node-sub', x: cx, y: cy + 58 }, hub));
+  const hubNode = svg('g', { class: 'hub-node', tabindex: '0', 'aria-label': 'Control node. Drag or use arrow keys to move.' },
+    svg('title', null, 'Control node ' + hub),
+    svg('circle', { class: 'hub-ring', cx: 0, cy: 0, r: 42 }),
+    svg('circle', { cx: 0, cy: 0, r: 28, fill: 'url(#hubFill)', stroke: 'rgba(255,255,255,.18)', 'stroke-width': '1' }),
+    svg('text', { class: 'node-label', x: 0, y: 4 }, 'hub'),
+    svg('text', { class: 'node-sub', x: 0, y: 58 }, hub));
+  canvas.append(hubNode);
+
+  function drawGeometry() {
+    hubNode.setAttribute('transform', 'translate(' + hubPos.x + ' ' + hubPos.y + ')');
+    spokes.forEach(({ id, line }) => {
+      const pos = positions.get(id);
+      line.setAttribute('x1', hubPos.x); line.setAttribute('y1', hubPos.y);
+      line.setAttribute('x2', pos.x); line.setAttribute('y2', pos.y);
+    });
+    edges.forEach(({ ids, direct, edge }) => {
+      const from = positions.get(ids[0]), to = positions.get(ids[1]);
+      if (direct) {
+        edge.setAttribute('x1', from.x); edge.setAttribute('y1', from.y);
+        edge.setAttribute('x2', to.x); edge.setAttribute('y2', to.y);
+      } else {
+        edge.setAttribute('d', 'M' + from.x + ' ' + from.y + ' L' + hubPos.x + ' ' + hubPos.y + ' L' + to.x + ' ' + to.y);
+      }
+    });
+  }
+
+  function makeDraggable(group, pos, id) {
+    let pointer = null, startX = 0, startY = 0, moved = false, suppressClickUntil = 0;
+    const moveTo = (x, y) => {
+      pos.x = clamp(x, 60, width - 60);
+      pos.y = clamp(y, 48, height - 72);
+      if (id === 'hub') layout.hub = { x: pos.x, y: pos.y };
+      else layout.agents[id] = { x: pos.x, y: pos.y };
+      if (id !== 'hub') group.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
+      drawGeometry();
+    };
+    const finish = (event) => {
+      if (pointer !== event.pointerId) return;
+      pointer = null;
+      topologyDragging = false;
+      group.classList.remove('dragging');
+      if (moved) { saveTopologyLayout(); suppressClickUntil = Date.now() + 350; }
+    };
+    group.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      pointer = event.pointerId;
+      startX = event.clientX; startY = event.clientY; moved = false;
+      topologyDragging = true;
+      group.classList.add('dragging');
+      group.setPointerCapture(pointer);
+    });
+    group.addEventListener('pointermove', (event) => {
+      if (pointer !== event.pointerId) return;
+      const rect = canvas.getBoundingClientRect();
+      const dx = (event.clientX - startX) * width / rect.width;
+      const dy = (event.clientY - startY) * height / rect.height;
+      if (Math.abs(dx) + Math.abs(dy) < 3 && !moved) return;
+      event.preventDefault();
+      moved = true;
+      moveTo(pos.x + dx, pos.y + dy);
+      startX = event.clientX; startY = event.clientY;
+    });
+    group.addEventListener('pointerup', finish);
+    group.addEventListener('pointercancel', finish);
+    group.addEventListener('lostpointercapture', finish);
+    group.addEventListener('keydown', (event) => {
+      const steps = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (steps[event.key]) {
+        event.preventDefault();
+        moveTo(pos.x + steps[event.key][0] * (event.shiftKey ? 30 : 12),
+          pos.y + steps[event.key][1] * (event.shiftKey ? 30 : 12));
+        saveTopologyLayout();
+      } else if (id !== 'hub' && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault(); state.drawer = id; renderShell();
+      }
+    });
+    if (id !== 'hub') group.addEventListener('click', (event) => {
+      if (Date.now() < suppressClickUntil) { event.preventDefault(); return; }
+      state.drawer = id; renderShell();
+    });
+  }
+  makeDraggable(hubNode, hubPos, 'hub');
 
   const nodes = svg('g', null);
   agents.forEach((agent) => {
@@ -196,21 +298,23 @@ function renderTopology(node, subNode, agents, summary) {
     if (!pos) return;
     const status = agentStatus(agent);
     const group = svg('g', { class: 'node', tabindex: '0', role: 'button',
-      onclick: () => { state.drawer = agent.id; renderShell(); },
-      onkeydown: (event) => { if (event.key === 'Enter') { state.drawer = agent.id; renderShell(); } } });
+      'aria-label': agent.name + ', ' + status.label + '. Drag or use arrow keys to move; Enter opens details.' });
     group.append(svg('title', null, agent.name + ' (' + agent.address + ') — ' + status.label));
     group.append(svg('circle', {
-      cx: pos.x, cy: pos.y, r: 22,
+      cx: 0, cy: 0, r: 22,
       fill: status.key === 'offline' || status.key === 'disabled' ? 'url(#nodeIdle)' : 'url(#nodeFill)',
       stroke: 'rgba(255,255,255,.16)', 'stroke-width': '1',
     }));
-    group.append(svg('text', { x: pos.x, y: pos.y + 4, 'text-anchor': 'middle', fill: 'rgba(6,12,20,.85)',
+    group.append(svg('text', { x: 0, y: 4, 'text-anchor': 'middle', fill: 'rgba(6,12,20,.85)',
       'font-size': '11', 'font-weight': '700' }, String(agent.id)));
-    group.append(svg('text', { class: 'node-label', x: pos.x, y: pos.y + 40 }, agent.name));
-    group.append(svg('text', { class: 'node-sub', x: pos.x, y: pos.y + 55 }, agent.address));
+    group.append(svg('text', { class: 'node-label', x: 0, y: 40 }, agent.name));
+    group.append(svg('text', { class: 'node-sub', x: 0, y: 55 }, agent.address));
+    group.setAttribute('transform', 'translate(' + pos.x + ' ' + pos.y + ')');
+    makeDraggable(group, pos, agent.id);
     nodes.append(group);
   });
   canvas.append(nodes);
+  drawGeometry();
   node.append(canvas);
 }
 
@@ -221,9 +325,15 @@ function agentChips(agent) {
   if (!agent.enabled) chips.push(h('span', { class: 'chip chip-off' }, 'disabled'));
   if (agent.directCount) chips.push(h('span', { class: 'chip chip-direct' }, agent.directCount + ' direct'));
   if (agent.relayCount) chips.push(h('span', { class: 'chip chip-relay' }, agent.relayCount + ' relayed'));
-  (agent.advertise || []).forEach((prefix) => chips.push(h('span', { class: 'chip chip-quiet' }, 'routes ' + prefix)));
-  if (agent.expiresAt) chips.push(h('span', { class: 'chip chip-warn' }, 'token expires ' + relTime(agent.expiresAt).replace(' ago', '')));
+  if (!agent.enrolledAt && agent.expiresAt) chips.push(h('span', { class: 'chip chip-warn' }, enrollmentStatus(agent)));
   return chips;
+}
+
+function enrollmentStatus(agent) {
+  if (agent.enrolledAt) return 'claimed';
+  if (!agent.expiresAt) return 'no deadline';
+  const remaining = Date.parse(agent.expiresAt) - Date.now();
+  return remaining <= 0 ? 'install command expired' : 'install command expires in ' + fmtDuration(Math.ceil(remaining / 1000));
 }
 
 function renderAgentGrid(node, agents, summary) {
@@ -363,7 +473,7 @@ function renderUsers(node, subNode, users) {
   const me = state.session.username;
   node.append(h('table', null,
     h('thead', null, h('tr', null,
-      h('th', null, 'User'), h('th', null, 'Role'), h('th', null, 'Created'),
+      h('th', null, 'User'), h('th', null, 'Email'), h('th', null, 'Role'), h('th', null, 'Created'),
       h('th', null, 'Last sign in'), h('th', null, 'Actions'))),
     h('tbody', null, users.map((user) => {
       const isMe = user.username === me;
@@ -373,24 +483,14 @@ function renderUsers(node, subNode, users) {
           h('span', null, user.username),
           isMe ? h('span', { class: 'chip chip-quiet' }, 'you') : null,
           user.disabled ? h('span', { class: 'chip chip-off' }, 'disabled') : null)),
+        h('td', { class: 'mono' }, user.email || '—'),
         h('td', null, h('span', { class: 'chip ' + (user.role === 'admin' ? 'chip-direct' : 'chip-relay') },
           user.role || 'admin')),
         h('td', { title: absTime(user.createdAt) }, relTime(user.createdAt)),
         h('td', { title: absTime(user.lastLogin) }, user.lastLogin ? relTime(user.lastLogin) : 'never'),
         h('td', null, h('div', { class: 'row', style: 'flex-wrap:wrap' },
-          h('button', { class: 'btn btn-sm', 'data-action': 'user-password', 'data-id': user.id, 'data-username': user.username }, 'Password'),
-          h('button', {
-            class: 'btn btn-sm',
-            'data-action': 'user-role',
-            'data-id': user.id,
-            'data-next': user.role === 'admin' ? 'viewer' : 'admin',
-          }, 'Change role'),
-          h('button', {
-            class: 'btn btn-sm',
-            'data-action': 'user-toggle',
-            'data-id': user.id,
-            'data-disabled': user.disabled ? 'false' : 'true',
-          }, user.disabled ? 'Enable' : 'Disable'),
+          h('button', { class: 'btn btn-sm', 'data-action': 'user-edit', 'data-id': user.id }, 'Edit'),
+          h('button', { class: 'btn btn-sm', 'data-action': 'user-resources', 'data-id': user.id, disabled: !user.email }, 'Resources'),
           isMe ? null : h('button', {
             class: 'btn btn-sm btn-danger',
             'data-action': 'user-delete',
@@ -453,11 +553,11 @@ function drawerBody(agent) {
     ['Last seen', agent.lastSeen ? relTime(agent.lastSeen) : 'never'],
     ['Enrolled', agent.enrolledAt ? absTime(agent.enrolledAt) : 'not yet'],
     ['Token created', absTime(agent.createdAt)],
-    ['Token expires', agent.expiresAt ? absTime(agent.expiresAt) : 'never'],
+    ['Enrollment command', agent.enrolledAt ? 'claimed' : (agent.expiresAt ? enrollmentStatus(agent) + ' (' + absTime(agent.expiresAt) + ')' : 'no deadline')],
     ['Version', [agent.version, agent.os, agent.arch].filter(Boolean).join(' ') || '—'],
     ['Hostname', agent.hostname || '—'],
     ['Traffic', fmtBytes(agent.rxBytes) + ' in / ' + fmtBytes(agent.txBytes) + ' out'],
-    ['Advertised routes', (agent.advertise || []).join(', ') || 'none'],
+    ['Shared networks', (agent.advertise || []).join(', ') || 'none'],
     ['Agent uptime', agent.uptimeSec ? fmtDuration(agent.uptimeSec) : '—'],
   ];
   rows.forEach(([label, value]) => {
@@ -486,12 +586,12 @@ function drawerBody(agent) {
   body.append(h('div', { class: 'agent-actions' },
     h('button', { class: 'btn btn-sm', 'data-action': 'agent-ping', 'data-id': agent.id }, 'Ping'),
     h('button', { class: 'btn btn-sm', 'data-action': 'agent-copy-config', 'data-id': agent.id }, 'Preview config'),
-    canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-copy-install', 'data-id': agent.id }, 'Install command') : null,
-    canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-command', 'data-id': agent.id, 'data-command': 'resync' }, 'Re-apply config') : null,
-    canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-command', 'data-id': agent.id, 'data-command': 'reconnect' }, 'Restart tunnel') : null,
-    canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-edit', 'data-id': agent.id }, 'Edit') : null,
-    canAdmin() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-rotate', 'data-id': agent.id }, 'Rotate token') : null,
-    canAdmin() ? h('button', { class: 'btn btn-sm btn-danger', 'data-action': 'agent-delete', 'data-id': agent.id, 'data-name': agent.name }, 'Delete') : null));
+    canManageMesh() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-copy-install', 'data-id': agent.id }, 'Install / update') : null,
+    canManageMesh() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-command', 'data-id': agent.id, 'data-command': 'reconnect' }, 'Restart tunnel') : null,
+    canManageMesh() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-edit', 'data-id': agent.id }, 'Edit') : null,
+    canManageMesh() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-networks', 'data-id': agent.id }, 'Networks') : null,
+    canManageMesh() ? h('button', { class: 'btn btn-sm', 'data-action': 'agent-rotate', 'data-id': agent.id }, 'Rotate token') : null,
+    canManageMesh() ? h('button', { class: 'btn btn-sm btn-danger', 'data-action': 'agent-delete', 'data-id': agent.id, 'data-name': agent.name }, 'Delete') : null));
 
   body.append(h('details', null,
     h('summary', { class: 'muted', text: 'Advanced' }),
@@ -534,9 +634,24 @@ async function sendCommand(id, command) {
 
 async function copyInstall(id) {
   try {
+    const agent = agentById(id);
+    if (agent && !agent.enrolledAt && agent.expiresAt && Date.parse(agent.expiresAt) <= Date.now()) {
+      throw new Error('Install command expired. Rotate the token to create a new command.');
+    }
     const result = await api('/api/agents/' + id + '/install');
-    await copyText(result.installCommand, 'Install command copied');
-    showInstallModal(agentById(id), result.installCommand);
+    const install = result.installCommand;
+    const update = agent?.installMethod === 'windows' || agent?.os === 'windows' ? install : updateCommand(install);
+    if (!update) throw new Error('Update command unavailable');
+    modal('Install / update ' + (agent?.name || 'agent'), 'Run these on the agent machine',
+      h('div', { class: 'stack' },
+        h('strong', null, 'Install'),
+        h('div', { class: 'cmd', text: install }),
+        h('div', { class: 'cmd-actions' }, copyButton(install, 'Copy command')),
+        h('strong', null, 'Update'),
+        agent?.installMethod === 'docker' ? h('p', { class: 'muted', text: 'Run from the Docker compose directory.' }) : null,
+        h('div', { class: 'cmd', text: update }),
+        h('div', { class: 'cmd-actions' }, copyButton(update, 'Copy command'))),
+      null, { preventPassiveDismiss: true });
   } catch (err) {
     toast(err.message, 'fail');
   }
@@ -546,37 +661,18 @@ async function copyInstall(id) {
 // later: the same script, --update instead of an enrollment. Only the binary is
 // replaced, so the token, the settings and the mesh address stay as they are.
 function updateCommand(command) {
-  const match = /https:\/\/[^\s'"]+\/install\.sh/.exec(String(command || ''));
-  if (!match) return '';
-  return 'curl -fsSLk ' + match[0] + ' | sudo sh -s -- --update';
-}
-
-// updateHint is the block shown under an install command.
-function updateHint(command) {
-  const update = updateCommand(command);
-  if (!update) return null;
-  return h('div', { class: 'callout' },
-    h('strong', null, 'Updating that machine later'),
-    h('span', { class: 'muted', text: 'Downloads the newest agent binary and restarts it there. The machine keeps its identity and address, and nothing needs to be re-enrolled.' }),
-    h('div', { class: 'cmd', text: update }),
-    h('div', { class: 'cmd-actions' }, copyButton(update, 'Copy update command')));
+  const source = String(command || '');
+  const pipe = source.indexOf(' | sudo sh -s --');
+  if (pipe < 0) return '';
+  return source.slice(0, pipe) + ' | sudo sh -s -- --update';
 }
 
 function showInstallModal(agent, command) {
-  const steps = h('ol', { class: 'steps' },
-    h('li', null, 'Run the command on the Linux machine that should join the mesh.'),
-    h('li', null, 'It installs wireguard-tools, drops the agent in /usr/local/bin and starts a systemd service.'),
-    h('li', null, 'The machine dials out to this control node only, so no inbound ports or port forwarding are needed.'),
-    h('li', null, 'It appears here with its mesh address as soon as the tunnel is up.'));
-  modal('Install ' + (agent ? agent.name : 'agent'), 'Paste this into the target machine', h('div', { class: 'stack' },
-    h('div', { class: 'cmd', text: command }),
-    h('div', { class: 'cmd-actions' },
-      copyButton(command, 'Copy command'),
-      copyButton(agent ? agent.token : '', 'Copy token only')),
-    h('div', { class: 'callout' },
-      h('strong', null, 'What happens on the target'),
-      steps),
-    updateHint(command)));
+  modal('Install ' + (agent ? agent.name : 'agent'), 'Run this command on the machine joining the mesh',
+    h('div', { class: 'stack' },
+      h('div', { class: 'cmd', text: command }),
+      h('div', { class: 'cmd-actions' }, copyButton(command, 'Copy command'))),
+    null, { preventPassiveDismiss: true });
 }
 
 async function copyAgentConfig(id) {
@@ -589,7 +685,8 @@ async function copyAgentConfig(id) {
     modal('WireGuard configuration', 'What this agent programs locally (secrets hidden)',
       h('div', { class: 'stack' },
         h('div', { class: 'cmd', text: result.config }),
-        h('div', { class: 'cmd-actions' }, copyButton(result.config, 'Copy config'))));
+        h('div', { class: 'cmd-actions' }, copyButton(result.config, 'Copy config'))),
+      null, { preventPassiveDismiss: true });
   } catch (err) {
     toast(err.message, 'fail');
   }
@@ -602,11 +699,9 @@ function openEditAgent(id) {
     h('div', { class: 'fields' },
       h('label', { class: 'field' }, h('span', null, 'Name'),
         h('input', { name: 'name', value: agent.name, required: true })),
-      h('label', { class: 'field' }, h('span', null, 'Advertised routes (comma separated CIDRs)'),
-        h('input', { name: 'advertise', value: (agent.advertise || []).join(', '), placeholder: '192.168.1.0/24' }),
-        h('em', null, 'Networks the control node reaches through this agent. Published targets do not need ' +
-          'to be listed here - they are reached through the agent you publish them with. If two agents offer ' +
-          'the same range, the Errors tab under Logs says which one won.')),
+      h('label', { class: 'field' }, h('span', null, 'Mesh DNS (optional)'),
+        h('input', { name: 'meshDns', value: agent.meshDns || '', placeholder: 'nas', maxlength: 63, pattern: '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', autocomplete: 'off' }),
+        h('em', null, 'Use this short name from other agents in your mesh. Leave blank to remove it.')),
       h('label', { class: 'switch' },
         h('input', { type: 'checkbox', name: 'enabled', checked: agent.enabled }),
         h('span', null, h('strong', null, 'Enabled'),
@@ -618,11 +713,10 @@ function openEditAgent(id) {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const data = new FormData(form);
-    const advertise = String(data.get('advertise') || '').split(',').map((s) => s.trim()).filter(Boolean);
     try {
       await api('/api/agents/' + id, {
         method: 'PATCH',
-        body: { name: String(data.get('name')), advertise, enabled: data.get('enabled') !== null },
+        body: { name: String(data.get('name')), meshDns: String(data.get('meshDns') || '').trim(), enabled: data.get('enabled') !== null },
       });
       closeModal();
       toast('Agent updated', 'ok');
@@ -634,6 +728,56 @@ function openEditAgent(id) {
     }
   });
   modal('Edit ' + agent.name, null, form);
+}
+
+function openAgentNetworks(id) {
+  const agent = agentById(id);
+  if (!agent) return;
+  const content = h('div', { class: 'stack' });
+  modal('Networks for ' + agent.name, 'Choose which networks other agents can reach through this machine', content);
+  showAgentNetworkSetup(agent, content);
+
+  // Status reports update automatically. Add newly detected interfaces without
+  // losing the checkboxes or manual address the operator is editing.
+  const signature = (current) => JSON.stringify([
+    current.networks || [], current.advertise || [],
+    (state.data.agents || []).filter((other) => other.id !== id)
+      .map((other) => [other.id, other.advertise || []]),
+  ]);
+  let shown = agent;
+  let lastSignature = signature(agent);
+  let checking = false;
+  const timer = setInterval(async () => {
+    if (!content.isConnected) { clearInterval(timer); return; }
+    if (checking) return;
+    checking = true;
+    try {
+      await refresh();
+      if (!content.isConnected) { clearInterval(timer); return; }
+      const current = agentById(id);
+      if (!current) { clearInterval(timer); return; }
+      const nextSignature = signature(current);
+      if (nextSignature !== lastSignature) {
+        const form = $('form', content);
+        const draft = form ? {
+          selectedRoutes: new FormData(form).getAll('network').map(String),
+          manual: form.elements.manual.value,
+          advertiseAll: form.elements.advertiseAll.checked,
+        } : null;
+        if (draft) {
+          (current.advertise || []).forEach((prefix) => {
+            if (!(shown.advertise || []).includes(prefix) && !draft.selectedRoutes.includes(prefix))
+              draft.selectedRoutes.push(prefix);
+          });
+        }
+        showAgentNetworkSetup(current, content, draft);
+        shown = current;
+        lastSignature = nextSignature;
+      }
+    } catch (err) {
+      // A later status report will retry; keep the current draft visible.
+    } finally { checking = false; }
+  }, 2500);
 }
 
 async function rotateToken(id) {
@@ -652,75 +796,94 @@ async function rotateToken(id) {
 }
 
 async function deleteAgent(id, name) {
-  confirmModal('Delete agent', 'This removes ' + (name || 'the agent') + ' from the mesh and revokes its token. ' +
-    'The machine keeps running but can no longer connect.', 'Delete agent', async () => {
-    try {
-      await api('/api/agents/' + id, { method: 'DELETE' });
-      state.drawer = null;
-      await refresh();
-      toast('Agent deleted', 'ok');
-    } catch (err) {
-      toast(err.message, 'fail');
-    }
-  });
+  try {
+    const removal = await api('/api/agents/' + id + '/uninstall');
+    const command = removal.command;
+    const instruction = removal.method === 'windows' ? 'Run in Command Prompt on the agent machine.' :
+      'Run on the agent machine. The installer finds its local service or Docker compose directory.';
+    const dialog = modal('Delete ' + (name || 'agent'), 'Remove the agent from its machine and the control node',
+      h('div', { class: 'stack' },
+        h('p', { class: 'muted', text: instruction + ' The command contacts the control node first, then removes the local installation and identity.' }),
+        h('div', { class: 'cmd', text: command }),
+        h('div', { class: 'cmd-actions' }, copyButton(command, 'Copy command')),
+        h('p', { class: 'muted', text: 'If the machine is lost or cannot reach the control node, remove only its control node record. The local installation will remain until removed on that machine.' })),
+      h('div', { class: 'modal-foot' },
+        h('button', { class: 'btn', type: 'button', 'data-action': 'modal-close' }, 'Cancel'),
+        h('button', { class: 'btn btn-danger', type: 'button', onclick: async () => {
+          if (!window.confirm('Remove this agent from the control node only?')) return;
+          try {
+            await api('/api/agents/' + id, { method: 'DELETE' });
+            closeModal();
+            state.drawer = null;
+            await refresh();
+            toast('Agent removed from control node', 'ok');
+          } catch (err) { toast(err.message, 'fail'); }
+        } }, 'Remove from control node only')),
+      { preventPassiveDismiss: true });
+    const checkRemoved = setInterval(async () => {
+      if (!dialog.isConnected) { clearInterval(checkRemoved); return; }
+      try {
+        const response = await fetch('/api/agents/' + id, { credentials: 'same-origin', cache: 'no-store' });
+        if (response.status !== 404 || !dialog.isConnected) return;
+        clearInterval(checkRemoved);
+        closeModal();
+        await refresh();
+        toast('Agent removed', 'ok');
+      } catch (_) { /* Keep the modal open while the control node is unreachable. */ }
+    }, 2500);
+  } catch (err) {
+    toast(err.message, 'fail');
+  }
 }
 
 /* ---------- add agent ---------- */
 
+function windowsAgentIcon() {
+  return svg('svg', { class: 'type-card-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    svg('path', { d: 'M2 4.7 10.7 3.5v7.8H2V4.7Zm10.2-1.4L22 2v9.3h-9.8v-8ZM2 12.7h8.7v7.8L2 19.3v-6.6Zm10.2 0H22V22l-9.8-1.3v-8Z' }));
+}
+
+function dockerAgentIcon() {
+  return svg('svg', { class: 'type-card-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    svg('path', { d: 'M3 9h2.5v2.4H3V9Zm3.1 0h2.5v2.4H6.1V9Zm3.1 0h2.5v2.4H9.2V9Zm3.1 0h2.5v2.4h-2.5V9ZM6.1 6h2.5v2.4H6.1V6Zm3.1 0h2.5v2.4H9.2V6Zm3.1 0h2.5v2.4h-2.5V6Zm0-3h2.5v2.4h-2.5V3Zm3.1 6h2.5v2.4h-2.5V9Zm6.5 1.5c-.9-.6-2-.7-3-.3-.1-.9-.7-1.7-1.5-2.1l-.4.9c.7.5.9 1.1.7 1.8l-.2.5c-1.5 3.5-4.2 5.1-8.2 5.1H2c.6 3.8 3.5 5.6 7.4 5.6 5.1 0 8.3-2.5 9.8-7.3 1.5.2 2.6-.4 3.4-1.7l.2-.5Z' }));
+}
+
+function linuxAgentIcon() {
+  return svg('svg', { class: 'type-card-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true' },
+    svg('ellipse', { cx: '12', cy: '12.5', rx: '6.2', ry: '9.4' }),
+    svg('ellipse', { cx: '12', cy: '15', rx: '3.8', ry: '5.8', fill: 'var(--panel-2)' }),
+    svg('ellipse', { cx: '10', cy: '7.7', rx: '.6', ry: '.8', fill: 'var(--panel-2)' }),
+    svg('ellipse', { cx: '14', cy: '7.7', rx: '.6', ry: '.8', fill: 'var(--panel-2)' }),
+    svg('path', { d: 'm10.1 9.5 1.9 1.7 1.9-1.7-1.9-.6-1.9.6ZM7.8 20.2 3 21.4l-.7 1.1h7.2l1-1.3-2.7-1Zm8.4 0 4.8 1.2.7 1.1h-7.2l-1-1.3 2.7-1Z' }));
+}
+
 function openAddAgent() {
+  const method = { value: 'service' };
+  const methods = cardPicker('method', [
+    { value: 'service', label: 'Linux', hint: 'systemd service', icon: linuxAgentIcon },
+    { value: 'windows', label: 'Windows', hint: 'paste into CMD', icon: windowsAgentIcon },
+    { value: 'docker', label: 'Docker', hint: 'container', icon: dockerAgentIcon },
+  ], method);
+  methods.classList.add('agent-install-grid');
   const form = h('form', { class: 'stack' },
     h('div', { class: 'fields' },
       h('label', { class: 'field' }, h('span', null, 'Agent name'),
         h('input', { name: 'name', required: true, placeholder: 'homelab-nas', autocomplete: 'off' })),
-      h('label', { class: 'switch' },
-        h('input', { type: 'checkbox', name: 'advertiseAll' }),
-        h('span', null, h('strong', null, 'Advertise everything'),
-          h('em', null, 'Let the control node reach every network this machine can reach, Docker bridges ' +
-            'included. The mesh itself only carries mesh addresses; this is about the control node reaching ' +
-            'a whole network through this machine.'))),
-      h('label', { class: 'field', 'data-advertise-field': '' },
-        h('span', null, 'Advertise networks (optional, comma separated)'),
-        h('input', { name: 'advertise', placeholder: '192.168.1.0/24, 10.10.0.0/16', autocomplete: 'off' }),
-        h('em', null, 'What the control node may reach through this agent, such as 192.168.1.0/24 for a ' +
-          'host on 192.168.1.5. A published target does not need to be listed: it is reached through the ' +
-          'agent you publish it with.')),
-      h('label', { class: 'field' }, h('span', null, 'Enrollment link expires after'),
-        h('select', { name: 'ttlHours' },
-          h('option', { value: '0' }, 'never'),
-          h('option', { value: '1' }, '1 hour'),
-          h('option', { value: '24' }, '24 hours'),
-          h('option', { value: '168' }, '7 days'))),
-      h('label', { class: 'field' }, h('span', null, 'Install with'),
-        h('select', { name: 'method' },
-          h('option', { value: 'service' }, 'a systemd service (recommended)'),
-          h('option', { value: 'docker' }, 'a Docker container')))),
-    h('div', { class: 'callout' },
-      h('strong', null, 'How agents connect'),
-      h('span', { class: 'muted', text: 'Agents dial out to this control node, so they need no open ports. ' +
-        'They reach each other directly when their NAT allows it and through the control node otherwise. ' +
-        'With Docker, run the command on the machine that should host the agent, in the directory the compose files should live in.' })),
+      h('label', { class: 'field' }, h('span', null, 'Mesh DNS (optional)'),
+        h('input', { name: 'meshDns', placeholder: 'nas', maxlength: 63, pattern: '[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', autocomplete: 'off' }),
+        h('em', null, 'Use a short name such as nas to reach this agent from your mesh. Leave blank for no name.'))),
+    h('div', { class: 'stack' }, h('span', { class: 'agent-install-label' }, 'Install with'), methods),
     h('div', { class: 'field-error', 'data-error': 'add', hidden: true }),
     h('div', { class: 'modal-foot' },
       h('button', { class: 'btn', type: 'button', 'data-action': 'modal-close' }, 'Cancel'),
       h('button', { class: 'btn btn-primary', type: 'submit' }, 'Create install command')));
 
-  const node = modal('Add agent', 'Generates a single command that installs and connects a new machine', form);
-  // "Advertise everything" replaces the explicit list.
-  const allBox = $('input[name=advertiseAll]', form);
-  const advertiseField = $('[data-advertise-field]', form);
-  const syncAdvertise = () => {
-    advertiseField.hidden = allBox.checked;
-    const input = $('input[name=advertise]', form);
-    if (allBox.checked) input.value = '';
-  };
-  allBox.addEventListener('change', syncAdvertise);
-  syncAdvertise();
+  const node = modal('Add agent', 'Create an install command. You can choose shared networks after it connects.', form);
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const data = new FormData(form);
-    const advertise = String(data.get('advertise') || '').split(',').map((s) => s.trim()).filter(Boolean);
     const name = String(data.get('name') || '').trim();
-    const method = String(data.get('method') || 'service');
+    const selectedMethod = String(data.get('method') || 'service');
     if (!name) {
       const box = $('[data-error=add]', form);
       box.hidden = false;
@@ -730,14 +893,9 @@ function openAddAgent() {
     try {
       // The method decides which install command comes back: a systemd service
       // or a Docker container (--docker).
-      const result = await api('/api/agents?method=' + encodeURIComponent(method), {
+      const result = await api('/api/agents?method=' + encodeURIComponent(selectedMethod), {
         method: 'POST',
-        body: {
-          name,
-          advertise,
-          advertiseAll: data.get('advertiseAll') !== null,
-          ttlHours: Number(data.get('ttlHours') || 0),
-        },
+        body: { name, meshDns: String(data.get('meshDns') || '').trim() },
       });
       closeModal();
       await refresh();
@@ -752,27 +910,129 @@ function openAddAgent() {
 }
 
 function showCreated(agent, command) {
-  const docker = String(command || '').includes('--docker');
+  const status = h('p', { class: 'muted', text: 'Waiting for the agent to connect…' });
   const body = h('div', { class: 'stack' },
-    h('div', { class: 'callout ok' },
-      h('strong', null, agent.name + ' is ready to enroll'),
-      h('span', { class: 'muted', text: 'Mesh address ' + agent.prefix + '. The command below only works while the token is valid.' +
-        (docker ? ' It writes a Dockerfile, a docker-compose.yml and a .env, then starts the container.' : '') })),
     h('div', { class: 'cmd', text: command }),
-    h('div', { class: 'cmd-actions' },
-      copyButton(command, 'Copy command'),
-      copyButton(agent.token, 'Copy token')),
+    h('div', { class: 'cmd-actions' }, copyButton(command, 'Copy command')),
+    status);
+  modal('Install ' + agent.name, 'Run this command on the machine joining the mesh', body, null,
+    { preventPassiveDismiss: true });
+
+  let checking = false;
+  let lastKeepalive = 0;
+  const timer = setInterval(async () => {
+    if (!body.isConnected) { clearInterval(timer); return; }
+    if (checking) return;
+    checking = true;
+    try {
+      await refresh();
+      const current = agentById(agent.id);
+      if (current && current.online && current.statsAt) {
+        clearInterval(timer);
+        if (body.isConnected) {
+          closeModal();
+          if (canManageMesh()) openAgentNetworks(agent.id);
+        }
+      } else if (current && !current.enrolledAt && Date.now() - lastKeepalive >= 60000) {
+        await api('/api/agents/' + agent.id + '/keepalive', { method: 'POST' });
+        lastKeepalive = Date.now();
+      }
+    } catch (err) {
+      status.textContent = 'Waiting for the agent to connect… ' + err.message;
+    } finally { checking = false; }
+  }, 2500);
+}
+
+function routesOverlap(left, right) {
+  const parse = (value) => {
+    const [address, length] = String(value).split('/');
+    const octets = address.split('.').map(Number);
+    const bits = Number(length);
+    if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255) ||
+      !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+    return { address: (((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0), bits };
+  };
+  const a = parse(left), b = parse(right);
+  if (!a || !b) return false;
+  const mask = Math.min(a.bits, b.bits);
+  if (mask === 0) return true;
+  return (a.address >>> (32 - mask)) === (b.address >>> (32 - mask));
+}
+
+function showAgentNetworkSetup(agent, node, draft = null) {
+  const selectedRoutes = draft ? draft.selectedRoutes : (agent.advertise || []);
+  const candidates = [...new Map((agent.networks || []).filter((item) => item.prefix && item.interface)
+    .map((item) => [item.prefix, item])).values()];
+  const known = new Set(candidates.map((item) => item.prefix));
+  selectedRoutes.forEach((prefix) => {
+    if (!known.has(prefix)) candidates.push({ prefix, interface: 'previously configured' });
+  });
+  const suggested = (item) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(item.prefix) &&
+    !/(docker|br-|veth)/i.test(item.interface);
+  const claimedBy = (prefix) => (state.data.agents || []).find((other) => other.id !== agent.id &&
+    (other.advertise || []).some((existing) => routesOverlap(prefix, existing)));
+  const form = h('form', { class: 'stack' },
     h('div', { class: 'callout' },
-      h('strong', null, 'On the target machine'),
-      h('ol', { class: 'steps' },
-        h('li', null, 'Paste the command into a terminal (root or sudo).'),
-        h('li', null, 'The installer verifies the control node certificate fingerprint before trusting it.'),
-        h('li', null, 'Watch it appear here as ' + agent.prefix + ' within a few seconds.'))),
-    updateHint(command),
-    h('div', { class: 'modal-foot' },
-      h('button', { class: 'btn btn-primary', 'data-action': 'modal-close' }, 'Done')));
-  modal('Install ' + agent.name, 'Copy and run this on the new machine', body);
-  copyText(command, 'Install command copied');
+      h('strong', null, 'Share a network with other agents?'),
+      h('span', { class: 'muted', text: 'Only select a network if other agents should reach devices on it. If you only want to tunnel or publish services through this agent, you can leave everything unselected.' })),
+    candidates.length ? h('div', { class: 'stack' },
+      h('strong', null, 'Networks found on ' + agent.name),
+      candidates.map((item) => {
+        const owner = claimedBy(item.prefix);
+        const description = owner ? 'Already shared by ' + owner.name + '. Remove it there first.' :
+          item.interface === 'previously configured' ? 'Previously configured network' :
+            'On ' + item.interface + (suggested(item) ? ' · suggested local network' :
+              /(docker|br-|veth)/i.test(item.interface) ? ' · container network' : ' · check before sharing');
+        return h('label', { class: 'switch' },
+          h('input', { type: 'checkbox', name: 'network', value: item.prefix,
+            checked: selectedRoutes.includes(item.prefix), disabled: !!owner && !selectedRoutes.includes(item.prefix) }),
+          h('span', null, h('strong', null, item.prefix), h('em', null, description)));
+      })) :
+      h('p', { class: 'muted', text: 'No local networks were reported. You can still enter a network below if this machine can reach it.' }),
+    h('label', { class: 'switch' },
+      h('input', { type: 'checkbox', name: 'advertiseAll', checked: draft ? draft.advertiseAll : !!agent.advertiseAll }),
+      h('span', null, h('strong', null, 'Advertise any future routes'),
+        h('em', null, 'Automatically share new local networks reported by this machine when no other agent has claimed them.'))),
+    h('label', { class: 'field' }, h('span', null, 'Another network this machine can reach (optional)'),
+      h('input', { name: 'manual', value: draft ? draft.manual : '', placeholder: '192.168.1.0/24', autocomplete: 'off' }),
+      h('em', null, 'Use a network prefix such as 192.168.1.0/24. Leave blank if you do not need one.')),
+    h('div', { class: 'field-error', hidden: true }),
+    h('div', { class: 'cmd-actions' },
+      h('button', { class: 'btn btn-primary', type: 'submit' }, 'Done')));
+  const values = () => {
+    const data = new FormData(form);
+    return {
+      advertise: [...new Set(data.getAll('network').map(String).concat(
+        String(data.get('manual') || '').split(',').map((value) => value.trim()).filter(Boolean)))].sort(),
+      advertiseAll: data.get('advertiseAll') !== null,
+    };
+  };
+  const changed = () => {
+    const current = values();
+    return current.advertiseAll !== !!agent.advertiseAll ||
+      JSON.stringify(current.advertise) !== JSON.stringify([...(agent.advertise || [])].sort());
+  };
+  const action = $('button[type=submit]', form);
+  const updateAction = () => { action.textContent = changed() ? 'Save and close' : 'Done'; };
+  form.addEventListener('input', updateAction);
+  form.addEventListener('change', updateAction);
+  updateAction();
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!changed()) { closeModal(); return; }
+    const { advertise, advertiseAll } = values();
+    try {
+      await api('/api/agents/' + agent.id, { method: 'PATCH', body: { advertise, advertiseAll } });
+      toast('Networks saved', 'ok');
+      closeModal();
+      await refresh();
+    } catch (err) {
+      const box = $('.field-error', form);
+      box.hidden = false;
+      box.textContent = err.message;
+    }
+  });
+  node.replaceChildren(form);
 }
 
 /* ---------- settings actions ---------- */
@@ -806,10 +1066,6 @@ async function createAPIToken() {
   const form = h('form', { class: 'stack' },
     h('label', { class: 'field' }, h('span', null, 'Token name'),
       h('input', { name: 'name', placeholder: 'ci-pipeline', required: true })),
-    h('label', { class: 'field' }, h('span', null, 'Role'),
-      h('select', { name: 'role' },
-        h('option', { value: 'viewer' }, 'Viewer — read only'),
-        h('option', { value: 'admin' }, 'Admin — full control'))),
     h('div', { class: 'modal-foot' },
       h('button', { class: 'btn', type: 'button', 'data-action': 'modal-close' }, 'Cancel'),
       h('button', { class: 'btn btn-primary', type: 'submit' }, 'Create token')));
@@ -817,7 +1073,7 @@ async function createAPIToken() {
     event.preventDefault();
     const data = new FormData(form);
     const name = String(data.get('name') || '');
-    const role = String(data.get('role') || 'viewer');
+    const role = 'admin';
     try {
       const result = await api('/api/tokens', { method: 'POST', body: { name, role } });
       closeModal();
@@ -825,7 +1081,8 @@ async function createAPIToken() {
       modal('API token created', 'Copy it now, it is only shown once', h('div', { class: 'stack' },
         h('div', { class: 'cmd', text: result.token }),
         h('div', { class: 'cmd-actions' }, copyButton(result.token, 'Copy token')),
-        h('p', { class: 'muted tiny' }, 'Use it as: curl -H "Authorization: Bearer TOKEN" https://' + state.data.server.publicEndpoint + '/api/state')));
+        h('p', { class: 'muted tiny' }, 'Use it as: curl -H "Authorization: Bearer TOKEN" https://' + state.data.server.publicEndpoint + '/api/state')),
+        null, { preventPassiveDismiss: true });
     } catch (err) {
       toast(err.message, 'fail');
     }

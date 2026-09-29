@@ -1,0 +1,118 @@
+# Mailu is an independent service. SMTP, submission, IMAP and the direct HTTPS
+# fallback bind on clarine; noobtunnel is only an optional web ingress.
+name: mailu
+
+x-mailu: &mailu
+  env_file: mailu.env
+  restart: unless-stopped
+  logging:
+    driver: journald
+
+x-dns: &dns
+  dns:
+    - 172.31.253.254
+
+services:
+  resolver:
+    <<: *mailu
+    image: ghcr.io/mailu/unbound:2024.06.58
+    networks:
+      default:
+        ipv4_address: 172.31.253.254
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - /srv/mailu/redis:/data
+    depends_on:
+      - resolver
+    <<: *dns
+
+  front:
+    <<: [*mailu, *dns]
+    image: ghcr.io/mailu/nginx:2024.06.58
+    ports:
+      - 89.144.8.232:25:25
+      - 89.144.8.232:465:465
+      - 89.144.8.232:587:587
+      - 89.144.8.232:993:993
+      - 127.0.0.1:8080:80
+      - 127.0.0.1:9443:443
+    volumes:
+      - /srv/mailu/certs:/certs:ro
+      - /srv/mailu/overrides/nginx:/overrides:ro
+    networks:
+      - default
+      - webmail
+    depends_on:
+      - resolver
+
+  admin:
+    <<: [*mailu, *dns]
+    image: ghcr.io/mailu/admin:2024.06.58
+    volumes:
+      - /srv/mailu/data:/data
+      - /srv/mailu/dkim:/dkim
+    depends_on:
+      - redis
+      - resolver
+
+  imap:
+    <<: [*mailu, *dns]
+    image: ghcr.io/mailu/dovecot:2024.06.58
+    volumes:
+      - /srv/mailu/mail:/mail
+      - /srv/mailu/overrides/dovecot:/overrides:ro
+    depends_on:
+      - front
+
+  smtp:
+    <<: [*mailu, *dns]
+    image: ghcr.io/mailu/postfix:2024.06.58
+    volumes:
+      - /srv/mailu/mailqueue:/queue
+      - /srv/mailu/overrides/postfix:/overrides:ro
+    depends_on:
+      - front
+
+  antispam:
+    <<: [*mailu, *dns]
+    image: ghcr.io/mailu/rspamd:2024.06.58
+    hostname: antispam
+    volumes:
+      - /srv/mailu/filter:/var/lib/rspamd
+      - /srv/mailu/overrides/rspamd:/overrides:ro
+    depends_on:
+      - front
+      - redis
+
+  webmail:
+    <<: *mailu
+    image: ghcr.io/mailu/webmail:2024.06.58
+    volumes:
+      - /srv/mailu/webmail:/data
+      - /srv/mailu/overrides/roundcube:/overrides:ro
+    networks:
+      - webmail
+    depends_on:
+      - front
+
+  # Converts noobtunnel's local HTTP backend into a verified TLS connection to
+  # Mailu. The mail stack and direct :9443 UI continue to run without it.
+  web-proxy:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:8081:80
+    volumes:
+      - /srv/mailu/web-proxy.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - front
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.253.0/24
+  webmail: {}

@@ -74,7 +74,7 @@ type Options struct {
 	// client pointed at a fake provider.
 	DNSFactory func(provider store.DNSProvider) (DNSClient, error)
 	// IPAPIHost is the hostname of the IP API that answers country lookups, for
-	// example iplog.example.com. Empty leaves country rules inert until it is set
+	// example iplog.example.com. Empty means country rules deny requests until set
 	// in the settings panel.
 	IPAPIHost string
 	// IPAPIToken is the token that API expects, sent as a bearer token.
@@ -106,11 +106,13 @@ type Server struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	listener  net.Listener
-	httpSrv   *http.Server
-	startedAt time.Time
-	pingSeq   atomic.Uint64
-	genSeq    atomic.Uint64
+	listener            net.Listener
+	httpSrv             *http.Server
+	startedAt           time.Time
+	pingSeq             atomic.Uint64
+	genSeq              atomic.Uint64
+	tenantFirewallReady atomic.Bool
+	tenantFirewallMu    sync.Mutex
 
 	mu sync.Mutex
 	// geoIP is the client for the operator's IP API, used by country rules.
@@ -358,14 +360,28 @@ func (s *Server) Run(ctx context.Context) error {
 	s.httpSrv = httpSrv
 	s.mu.Unlock()
 
+	if s.opts.SetupSystem {
+		if err := s.ApplySystemSetup(ctx); err != nil {
+			s.log.Warn("system setup incomplete", "error", err)
+		}
+		if err := s.syncTenantFirewall(ctx); err != nil {
+			if s.hasPrivateMeshes() {
+				return fmt.Errorf("private mesh firewall is required: %w", err)
+			}
+			s.log.Warn("private mesh sign-up unavailable", "error", err)
+		} else {
+			s.tenantFirewallReady.Store(true)
+		}
+	}
 	if err := s.syncHub(ctx); err != nil {
 		s.log.Warn("could not program the wireguard hub yet", "error", err)
 	}
+	s.cleanupExpiredUnverified(ctx)
 	s.checks = s.RunChecks(ctx)
 	s.startGeoIP(ctx)
 
 	s.reconcileResources()
-	s.wg.Add(8)
+	s.wg.Add(9)
 	go func() { defer s.wg.Done(); s.discoveryLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.peerPushLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.latencyLoop(ctx) }()
@@ -374,6 +390,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go func() { defer s.wg.Done(); s.checkLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.routeLoop(ctx) }()
 	go func() { defer s.wg.Done(); s.errorRecheckLoop(ctx) }()
+	go func() { defer s.wg.Done(); s.unverifiedAccountLoop(ctx) }()
 	// When the control node issues certificates it must answer the HTTP-01
 	// challenge on port 80, even if no HTTP resource is published there yet.
 	if s.proxies.ACMEChallenge != nil {
@@ -393,12 +410,6 @@ func (s *Server) Run(ctx context.Context) error {
 			s.log.Info("serving ACME challenges on port 80")
 		} else {
 			s.log.Debug("port 80 is busy; ACME challenges are served through HTTP resources", "error", err)
-		}
-	}
-
-	if s.opts.SetupSystem {
-		if err := s.ApplySystemSetup(ctx); err != nil {
-			s.log.Warn("system setup incomplete", "error", err)
 		}
 	}
 
@@ -556,20 +567,45 @@ func (s *Server) serveAgent(conn net.Conn) error {
 	}()
 
 	// Record the enrollment (public key, version, first seen).
-	err = s.store.UpdateAgent(agent.ID, func(a *store.Agent) error {
+	err = s.store.Update(func(st *store.State) error {
+		var a *store.Agent
+		for _, candidate := range st.Agents {
+			if candidate.ID == agent.ID {
+				a = candidate
+				break
+			}
+		}
+		if a == nil {
+			return store.ErrNotFound
+		}
 		a.PublicKey = hello.PublicKey
 		a.Version = hello.Version
 		a.OS = hello.OS
 		a.Arch = hello.Arch
 		a.Hostname = hello.Hostname
 		a.LastSeen = s.now().UTC()
+		firstEnrollment := a.EnrolledAt == nil
 		if a.EnrolledAt == nil {
 			now := s.now().UTC()
 			a.EnrolledAt = &now
+			a.ExpiresAt = nil
 		}
-		if len(hello.Advertise) > 0 {
+		// Dashboard route edits remain authoritative on reconnect. Legacy
+		// advertise-all agents keep following their changing local networks until
+		// the operator switches them to an explicit list in the dashboard.
+		if len(hello.Advertise) > 0 && (firstEnrollment || a.AdvertiseAll) {
 			if advertise, err := store.NormalisePrefixes(hello.Advertise); err == nil {
-				a.Advertise = advertise
+				if a.MeshSlot > 0 {
+					err = store.ValidateTenantAdvertise(advertise)
+				}
+				if err == nil {
+					err = store.ValidateAdvertise(st, a.ID, advertise)
+				}
+				if err == nil {
+					a.Advertise = advertise
+				} else {
+					s.log.Warn("agent network claim ignored", "agent", a.Name, "error", err)
+				}
 			}
 		}
 		return nil
@@ -578,7 +614,7 @@ func (s *Server) serveAgent(conn net.Conn) error {
 		return err
 	}
 
-	if err := s.syncHub(context.Background()); err != nil {
+	if err := s.Sync(context.Background()); err != nil {
 		s.log.Warn("failed to update hub peers", "error", err)
 	}
 	welcome, err := s.buildWelcome(agent.ID, hello, local)
@@ -593,7 +629,7 @@ func (s *Server) serveAgent(conn net.Conn) error {
 		"address", welcome.Address,
 		"remote", session.Remote,
 		"version", hello.Version)
-	s.recordEvent("agent-online", agent.Name+" connected from "+session.Remote)
+	s.recordEventFor(agent.OwnerID, "agent-online", agent.Name+" connected from "+session.Remote)
 	s.broadcastState()
 
 	go s.sessionWriter(session)
@@ -625,6 +661,17 @@ func (s *Server) serveAgent(conn net.Conn) error {
 			s.mu.Lock()
 			s.peerStats[agent.ID] = peerCopy
 			s.mu.Unlock()
+			var candidates []string
+			for _, network := range stats.Networks {
+				candidates = append(candidates, network.Prefix)
+			}
+			if changed, err := s.store.AutoAdvertise(agent.ID, candidates); err != nil {
+				s.log.Warn("failed to save automatic networks", "agent", agent.Name, "error", err)
+			} else if changed {
+				if err := s.Sync(context.Background()); err != nil {
+					s.log.Warn("failed to apply automatic networks", "agent", agent.Name, "error", err)
+				}
+			}
 			s.broadcastState()
 		case proto.TPong:
 			var pong proto.Pong
@@ -736,6 +783,7 @@ func (s *Server) buildWelcome(agentID uint32, hello proto.Hello, localAddr strin
 		T:                proto.TWelcome,
 		AgentID:          agentID,
 		Name:             agent.Name,
+		MeshDNS:          agent.MeshDNS,
 		Address:          prefix.Addr().String(),
 		Prefix:           prefix.Bits(),
 		MeshCIDR:         settings.MeshCIDR,
@@ -753,6 +801,14 @@ func (s *Server) buildWelcome(agentID uint32, hello proto.Hello, localAddr strin
 			Address:      pool.HubAddress().String(),
 			PresharedKey: agent.HubPresharedKey,
 		},
+	}
+	meshPrefix, err := store.TenantPrefix(settings.MeshCIDR, agent.MeshSlot)
+	if err != nil {
+		if agent.MeshSlot > 0 {
+			return proto.Welcome{}, err
+		}
+	} else {
+		welcome.MeshCIDR = meshPrefix.String()
 	}
 	peers, err := s.peersFor(agentID)
 	if err != nil {
@@ -772,6 +828,10 @@ func (s *Server) buildWelcome(agentID uint32, hello proto.Hello, localAddr strin
 // peersFor builds the peer list an agent should configure.
 func (s *Server) peersFor(selfID uint32) ([]proto.Peer, error) {
 	st := s.store.View()
+	self, err := s.store.Agent(selfID)
+	if err != nil {
+		return nil, err
+	}
 	settings := st.Settings
 	s.mu.Lock()
 	endpoints := make(map[uint32]string, len(s.endpoints))
@@ -786,7 +846,7 @@ func (s *Server) peersFor(selfID uint32) ([]proto.Peer, error) {
 
 	var out []proto.Peer
 	for _, agent := range st.Agents {
-		if agent.ID == selfID || !agent.Enabled || agent.PublicKey == "" {
+		if agent.ID == selfID || !agent.Enabled || agent.PublicKey == "" || agent.MeshSlot != self.MeshSlot || (self.MeshSlot > 0 && agent.OwnerID != self.OwnerID) {
 			continue
 		}
 		_, online := sessions[agent.ID]
@@ -801,6 +861,7 @@ func (s *Server) peersFor(selfID uint32) ([]proto.Peer, error) {
 		peer := proto.Peer{
 			ID:           agent.ID,
 			Name:         agent.Name,
+			MeshDNS:      agent.MeshDNS,
 			Address:      agent.Address,
 			PublicKey:    agent.PublicKey,
 			Advertise:    agent.Advertise,
@@ -957,9 +1018,6 @@ func (s *Server) hubConfig() (wg.Config, error) {
 			Address:   addr,
 			PublicKey: agent.PublicKey,
 			Enabled:   true,
-			// A published target names its agent, so the address goes to that
-			// machine no matter which agent advertised the range around it.
-			Pinned: s.store.PinnedHosts(agent.ID),
 		}
 		for _, raw := range agent.Advertise {
 			if prefix, err := netip.ParsePrefix(raw); err == nil {
@@ -1090,8 +1148,13 @@ func (s *Server) peerPushLoop(ctx context.Context) {
 				}
 				carry := s.store.CarriedPrefixes(sess.ID)
 				forwards := s.forwardsFor(sess.ID)
+				self, _ := s.store.Agent(sess.ID)
+				selfMeshDNS := ""
+				if self != nil {
+					selfMeshDNS = self.MeshDNS
+				}
 				if err := sess.send(proto.Peers{
-					T: proto.TPeers, Generation: generation, Peers: peers,
+					T: proto.TPeers, Generation: generation, Peers: peers, SelfMeshDNS: selfMeshDNS,
 					Carry: carry, Forwards: forwards,
 				}); err != nil {
 					s.log.Debug("failed to push peers", "agent", sess.Hello.Name, "error", err)
@@ -1321,14 +1384,18 @@ func (s *Server) Revoke(ctx context.Context, agentID uint32, reason string) {
 		_ = sess.send(proto.Revoked{T: proto.TRevoked, Reason: reason})
 		time.AfterFunc(200*time.Millisecond, sess.close)
 	}
-	if err := s.syncHub(ctx); err != nil {
+	if err := s.Sync(ctx); err != nil {
 		s.log.Warn("failed to update hub after revoke", "error", err)
 	}
-	s.markDirty()
 }
 
 // Sync pushes the current membership to agents and the hub.
 func (s *Server) Sync(ctx context.Context) error {
+	if s.opts.SetupSystem && s.tenantFirewallReady.Load() {
+		if err := s.syncTenantFirewall(ctx); err != nil {
+			return err
+		}
+	}
 	if err := s.syncHub(ctx); err != nil {
 		return err
 	}
@@ -1392,8 +1459,10 @@ func (s *Server) recordResourceErrors() {
 	}
 	stats := s.proxies.Stats()
 	agents := map[uint32]string{}
+	agentOwners := map[uint32]string{}
 	for _, agent := range s.store.Agents() {
 		agents[agent.ID] = agent.Name
+		agentOwners[agent.ID] = agent.OwnerID
 	}
 	s.mu.Lock()
 	previous := s.reportedErrors
@@ -1405,7 +1474,7 @@ func (s *Server) recordResourceErrors() {
 	s.mu.Unlock()
 
 	var fresh []ErrorEntry
-	note := func(key, source, message, detail, hint string) {
+	note := func(key, ownerID, source, message, detail, hint string) {
 		if detail == "" {
 			return
 		}
@@ -1415,6 +1484,7 @@ func (s *Server) recordResourceErrors() {
 		}
 		fresh = append(fresh, ErrorEntry{
 			Time:    time.Now().UTC(),
+			OwnerID: ownerID,
 			Source:  source,
 			Message: message,
 			Detail:  detail,
@@ -1427,7 +1497,7 @@ func (s *Server) recordResourceErrors() {
 		if !ok {
 			continue
 		}
-		note(fmt.Sprintf("resource/%d", resource.ID), "resource",
+		note(fmt.Sprintf("resource/%d", resource.ID), resource.OwnerID, "resource",
 			resource.Name+" is not listening", stat.LastError,
 			"the port may be taken by another service, or the exit node address may not be on this host")
 		for _, target := range resource.Targets {
@@ -1436,7 +1506,7 @@ func (s *Server) recordResourceErrors() {
 			// the store's explanation of which one wins. This is checked before
 			// the counters, because a target nobody has dialled yet has none.
 			if err := s.store.CheckTargetReachability(target.AgentID, target.Host); err != nil {
-				note(fmt.Sprintf("unreachable/%d/%d", resource.ID, target.ID), "target",
+				note(fmt.Sprintf("unreachable/%d/%d", resource.ID, target.ID), resource.OwnerID, "target",
 					resource.Name+": target "+target.Target()+" would not reach that agent",
 					err.Error(),
 					"fix the advertised networks of the agents involved, then publish again")
@@ -1512,7 +1582,7 @@ func (s *Server) recordResourceErrors() {
 					hint = "the agent is not connected right now, so the tunnel to it is down"
 				}
 			}
-			note(fmt.Sprintf("target/%d/%d", resource.ID, target.ID), "target",
+			note(fmt.Sprintf("target/%d/%d", resource.ID, target.ID), resource.OwnerID, "target",
 				resource.Name+": target "+target.Target()+" ("+who+") is not reachable",
 				detail, hint)
 		}
@@ -1525,7 +1595,7 @@ func (s *Server) recordResourceErrors() {
 		if who == "" {
 			who = "an agent"
 		}
-		note(fmt.Sprintf("agent/%d", id), "agent",
+		note(fmt.Sprintf("agent/%d", id), agentOwners[id], "agent",
 			who+" cannot program its WireGuard device", lastError,
 			"check wireguard-tools, the kernel module and NET_ADMIN on that machine")
 	}
@@ -1541,9 +1611,13 @@ func (s *Server) recordResourceErrors() {
 		if who == "" {
 			who = fmt.Sprintf("agent %d", entry.MemberID)
 		}
-		note(fmt.Sprintf("advertise/%d/%s", entry.MemberID, entry.Prefix), "agent",
+		reason := entry.Reason
+		if agentOwners[entry.MemberID] != "" && strings.Contains(reason, "advertised by member ") {
+			reason = "overlaps a network advertised by another agent"
+		}
+		note(fmt.Sprintf("advertise/%d/%s", entry.MemberID, entry.Prefix), agentOwners[entry.MemberID], "agent",
 			who+": advertised network "+entry.Prefix+" is not routed",
-			entry.Reason,
+			reason,
 			"a network is routed to one agent only: drop it from one of them, or advertise a range only that machine can reach")
 	}
 
@@ -1557,14 +1631,14 @@ func (s *Server) recordResourceErrors() {
 		// The demo backend simulates the mesh in memory: agents enroll, addresses
 		// are assigned, and nothing at all reaches the kernel, which is exactly
 		// what "no route to host" looks like from the proxy's point of view.
-		note("hub", "wireguard", "this control node runs with the simulated WireGuard backend",
+		note("hub", "", "wireguard", "this control node runs with the simulated WireGuard backend",
 			"the mesh is not real: no interface or route exists on this host",
 			"restart the control node without --backend fake (or the demo flags) to run a real mesh")
 	case hubErr != "":
-		note("hub", "wireguard", "the control node cannot program its WireGuard hub", hubErr,
+		note("hub", "", "wireguard", "the control node cannot program its WireGuard hub", hubErr,
 			"check that wg(8) and ip(8) are installed and that the service runs as root; if the module cannot be loaded (some OpenVZ and LXC VPSs), this host cannot run a real mesh")
 	case !hubUp && !s.opts.DisableWGHub:
-		note("hub", "wireguard", "the WireGuard hub interface is not up",
+		note("hub", "", "wireguard", "the WireGuard hub interface is not up",
 			s.store.Settings().Interface+" does not exist on this host",
 			"load the module (modprobe wireguard) and look at journalctl -u noobtunnel-server; the dashboard checklist names what is missing")
 	}
@@ -1573,7 +1647,7 @@ func (s *Server) recordResourceErrors() {
 	s.reportedErrors = current
 	s.mu.Unlock()
 	for _, entry := range fresh {
-		s.errors.record(entry.Source, entry.Message, entry.Detail, entry.Hint)
+		s.errors.recordOwned(entry.OwnerID, entry.Source, entry.Message, entry.Detail, entry.Hint)
 	}
 }
 
@@ -1655,26 +1729,35 @@ func (s *Server) ResourceSpecs() []proxy.Spec {
 			// the agent listens on for exactly that service.
 			targets = append(targets, proxy.TargetSpec{
 				ID: t.ID, Host: t.Host, Port: t.Port,
-				DialAddr: s.DialAddress(t), AgentID: t.AgentID,
+				DialAddr: s.DialAddress(r.ID, t), AgentID: t.AgentID,
 			})
 		}
 		specs = append(specs, proxy.Spec{
-			ID:               r.ID,
-			Name:             r.Name,
-			Protocol:         string(r.Protocol),
-			Targets:          targets,
-			Strategy:         string(r.Strategy),
-			BindAddr:         bind,
-			ListenPort:       r.EffectiveListenPort(),
-			Domain:           r.Domain,
-			Enabled:          r.Enabled && len(targets) > 0 && exitEnabled,
-			ProxyProtocol:    r.ProxyProtocol,
-			Identity:         r.Identity,
-			IdentityMode:     r.EffectiveIdentityMode(),
-			BlockExploits:    r.BlockExploits,
-			BlockHighRiskIPs: r.BlockHighRiskIPs,
-			WebSockets:       r.AllowsWebSockets(),
-			Rules:            r.Rules,
+			ID:                  r.ID,
+			OwnerID:             r.OwnerID,
+			Name:                r.Name,
+			Protocol:            string(r.Protocol),
+			Targets:             targets,
+			Strategy:            string(r.Strategy),
+			BindAddr:            bind,
+			ListenPort:          r.EffectiveListenPort(),
+			Domain:              r.Domain,
+			Enabled:             r.Enabled && len(targets) > 0 && exitEnabled,
+			ProxyProtocol:       r.ProxyProtocol,
+			Identity:            r.Identity,
+			IdentityMode:        r.EffectiveIdentityMode(),
+			IdentityEmails:      r.IdentityEmails,
+			Uncapped:            r.Uncapped,
+			MonthlyQuotaBytes:   r.MonthlyQuotaBytes,
+			MonthlyRequestQuota: r.MonthlyRequestQuota,
+			SustainedBps:        r.SustainedBps,
+			BurstBps:            r.BurstBps,
+			PeakBps:             r.PeakBps,
+			OverQuotaBps:        r.OverQuotaBps,
+			BlockExploits:       r.BlockExploits,
+			BlockHighRiskIPs:    r.BlockHighRiskIPs,
+			WebSockets:          r.AllowsWebSockets(),
+			Rules:               r.Rules,
 		})
 	}
 	return specs
@@ -1696,6 +1779,10 @@ func exitNodeFor(nodes map[string]store.ExitNode, id string) (store.ExitNode, bo
 
 func (s *Server) recordEvent(kind, message string) {
 	s.events.record(Event{Kind: kind, Message: message, Time: s.now().UTC()})
+}
+
+func (s *Server) recordEventFor(ownerID, kind, message string) {
+	s.events.record(Event{Kind: kind, Message: message, Time: s.now().UTC(), OwnerID: ownerID})
 }
 
 // bufferedConn exposes a hijacked connection whose buffered reader holds bytes

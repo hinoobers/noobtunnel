@@ -2,9 +2,48 @@ package store
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestUncappedResourcePersistsWithoutMigrationDefaults(t *testing.T) {
+	st, agent := resourceFixture(t)
+	input := ResourceInput{
+		Name: "unlimited", Protocol: ProtocolTCP, Targets: oneTarget(agent.ID, agent.Address, 8080),
+		ListenPort: 35555, Uncapped: true,
+	}
+	if _, err := st.AddResource(input); !errors.Is(err, ErrBadResource) {
+		t.Fatalf("regular caller enabled uncapped limits: %v", err)
+	}
+	input.AdminLimits = true
+	r, err := st.AddResource(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Uncapped || r.MonthlyQuotaBytes != 0 || r.SustainedBps != 0 || r.BurstBps != 0 {
+		t.Fatalf("uncapped resource has enforced limits: %+v", r)
+	}
+	web, err := st.AddResource(ResourceInput{
+		Name: "unlimited web", Protocol: ProtocolHTTP, Targets: oneTarget(agent.ID, agent.Address, 8081),
+		Domain: "uncapped.example.com", ListenPort: 8081, Uncapped: true, AdminLimits: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(filepath.Dir(st.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := reopened.Resource(r.ID)
+	if err != nil || !rp.Uncapped || rp.MonthlyQuotaBytes != 0 || rp.SustainedBps != 0 {
+		t.Fatalf("reload restored limits: %+v, %v", rp, err)
+	}
+	webReloaded, err := reopened.Resource(web.ID)
+	if err != nil || !webReloaded.Uncapped || webReloaded.MonthlyQuotaBytes != 0 || webReloaded.MonthlyRequestQuota != 0 || webReloaded.PeakBps != 0 {
+		t.Fatalf("HTTP reload restored limits: %+v, %v", webReloaded, err)
+	}
+}
 
 // resourceFixture creates a store with one enrolled agent.
 func resourceFixture(t *testing.T) (*Store, *Agent) {
@@ -69,6 +108,27 @@ func TestAddResourceDefaults(t *testing.T) {
 		Targets: oneTarget(agent.ID, "192.168.1.10", 5000), ListenPort: 5000,
 	}); err != nil {
 		t.Fatalf("advertised LAN targets should be allowed: %v", err)
+	}
+}
+
+func TestControlNodeLoopbackTarget(t *testing.T) {
+	st, _ := resourceFixture(t)
+	resource, err := st.AddResource(ResourceInput{
+		Name: "local webmail", Protocol: ProtocolHTTPS, Domain: "mail.example.com",
+		Targets: oneTarget(0, "127.0.0.1", 8081),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.Targets[0].AgentID != 0 || resource.Targets[0].Target() != "127.0.0.1:8081" {
+		t.Fatalf("control-node target = %+v", resource.Targets[0])
+	}
+	_, err = st.AddResource(ResourceInput{
+		Name: "unsafe local target", Protocol: ProtocolHTTPS, Domain: "other.example.com",
+		Targets: oneTarget(0, "192.168.1.1", 80),
+	})
+	if err == nil || !strings.Contains(err.Error(), "must use 127.0.0.1") {
+		t.Fatalf("control-node target outside loopback should be rejected, got %v", err)
 	}
 }
 
@@ -598,5 +658,27 @@ func TestLegacyResourceMigration(t *testing.T) {
 	}
 	if resource.Strategy != StrategyRoundRobin {
 		t.Fatalf("legacy resource strategy = %q", resource.Strategy)
+	}
+}
+
+func TestAutoAdvertiseAddsOnlyUnclaimedNetworks(t *testing.T) {
+	st, agent := resourceFixture(t)
+	if _, err := st.AddAgent(AddAgentParams{Name: "other", Advertise: []string{"172.20.0.0/16"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateAgent(agent.ID, func(a *Agent) error { a.AdvertiseAll = true; a.AutoSeen = []string{"192.168.5.0/24"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := st.AutoAdvertise(agent.ID, []string{"192.168.4.0/24", "192.168.5.0/24", "172.20.0.0/16", "10.77.0.0/16"})
+	if err != nil || !changed {
+		t.Fatalf("automatic claim: changed=%v, err=%v", changed, err)
+	}
+	agent, _ = st.Agent(agent.ID)
+	if len(agent.Advertise) != 2 || agent.Advertise[0] != "192.168.1.0/24" || agent.Advertise[1] != "192.168.4.0/24" {
+		t.Fatalf("automatic claims = %v", agent.Advertise)
+	}
+	changed, err = st.AutoAdvertise(agent.ID, []string{"192.168.4.0/24"})
+	if err != nil || changed {
+		t.Fatalf("repeated claim: changed=%v, err=%v", changed, err)
 	}
 }

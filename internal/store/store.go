@@ -127,7 +127,10 @@ type HubKeys struct {
 // Agent is one enrolled mesh member.
 type Agent struct {
 	ID        uint32   `json:"id"`
+	OwnerID   string   `json:"ownerId,omitempty"`
+	MeshSlot  uint16   `json:"meshSlot,omitempty"`
 	Name      string   `json:"name"`
+	MeshDNS   string   `json:"meshDns,omitempty"`
 	Token     string   `json:"token"`
 	PublicKey string   `json:"publicKey,omitempty"`
 	Address   string   `json:"address"`
@@ -135,23 +138,25 @@ type Agent struct {
 	// HubPresharedKey secures the agent <-> control node WireGuard session.
 	HubPresharedKey string `json:"hubPresharedKey"`
 	Enabled         bool   `json:"enabled"`
-	// AdvertiseAll tells the agent to route every network it can reach, instead
-	// of the explicit Advertise list.
-	AdvertiseAll bool       `json:"advertiseAll,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
-	EnrolledAt   *time.Time `json:"enrolledAt,omitempty"`
-	LastSeen     time.Time  `json:"lastSeen,omitempty"`
-	Version      string     `json:"version,omitempty"`
-	Hostname     string     `json:"hostname,omitempty"`
-	OS           string     `json:"os,omitempty"`
-	Arch         string     `json:"arch,omitempty"`
-	Notes        string     `json:"notes,omitempty"`
+	// AdvertiseAll adds newly observed local networks to the shared route list.
+	AdvertiseAll bool `json:"advertiseAll,omitempty"`
+	// AutoSeen records networks present when automatic sharing was enabled.
+	AutoSeen      []string   `json:"autoSeen,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
+	EnrolledAt    *time.Time `json:"enrolledAt,omitempty"`
+	LastSeen      time.Time  `json:"lastSeen,omitempty"`
+	Version       string     `json:"version,omitempty"`
+	Hostname      string     `json:"hostname,omitempty"`
+	OS            string     `json:"os,omitempty"`
+	InstallMethod string     `json:"installMethod,omitempty"`
+	Arch          string     `json:"arch,omitempty"`
+	Notes         string     `json:"notes,omitempty"`
 }
 
 // Expired reports whether the enrollment window has passed.
 func (a *Agent) Expired(now time.Time) bool {
-	return a.ExpiresAt != nil && now.After(*a.ExpiresAt)
+	return a.EnrolledAt == nil && a.ExpiresAt != nil && !now.Before(*a.ExpiresAt)
 }
 
 // AddressPrefix returns the overlay address as a /32 prefix.
@@ -312,6 +317,7 @@ func (s *Store) copyLocked() *State {
 	for _, a := range s.st.Agents {
 		dup := *a
 		dup.Advertise = append([]string(nil), a.Advertise...)
+		dup.AutoSeen = append([]string(nil), a.AutoSeen...)
 		cp.Agents = append(cp.Agents, &dup)
 	}
 	for _, r := range s.st.Resources {
@@ -341,6 +347,32 @@ func (s *Store) migrateResourcesLocked() error {
 		if r.Strategy == "" {
 			r.Strategy = StrategyRoundRobin
 			changed = true
+		}
+		if !r.Uncapped && (r.Protocol == ProtocolHTTP || r.Protocol == ProtocolHTTPS) {
+			if r.MonthlyQuotaBytes == 0 {
+				r.MonthlyQuotaBytes = 100_000_000_000
+				changed = true
+			}
+			if r.MonthlyRequestQuota == 0 {
+				r.MonthlyRequestQuota = 3_000_000
+				changed = true
+			}
+			if r.SustainedBps == 0 {
+				r.SustainedBps = 15_000_000
+				changed = true
+			}
+			if r.BurstBps == 0 {
+				r.BurstBps = 30_000_000
+				changed = true
+			}
+			if r.PeakBps == 0 {
+				r.PeakBps = 100_000_000
+				changed = true
+			}
+			if r.OverQuotaBps == 0 {
+				r.OverQuotaBps = 512_000
+				changed = true
+			}
 		}
 	}
 	if !changed {
@@ -425,18 +457,37 @@ func (s *Store) AgentByToken(token string) (*Agent, error) {
 
 // AddAgentParams describes a new enrollment.
 type AddAgentParams struct {
-	Name      string
-	Advertise []string
-	TTL       time.Duration
+	Name          string
+	MeshDNS       string
+	OwnerID       string
+	MeshSlot      uint16
+	InstallMethod string
+	Advertise     []string
+	TTL           time.Duration
 	// AdvertiseAll routes everything the agent can reach.
 	AdvertiseAll bool
 }
 
 // AddAgent creates a new enrollment slot with a fresh token and overlay address.
 func (s *Store) AddAgent(p AddAgentParams) (*Agent, error) {
+	meshDNS, err := NormaliseMeshDNS(p.MeshDNS)
+	if err != nil {
+		return nil, err
+	}
+	if p.InstallMethod != "" && p.InstallMethod != "service" && p.InstallMethod != "docker" && p.InstallMethod != "windows" {
+		return nil, errors.New("invalid agent install method")
+	}
+	if p.MeshSlot > 0 && p.OwnerID == "" {
+		return nil, errors.New("private mesh agents need an owner")
+	}
 	advertise, err := NormalisePrefixes(p.Advertise)
 	if err != nil {
 		return nil, err
+	}
+	if p.MeshSlot > 0 {
+		if err := ValidateTenantAdvertise(advertise); err != nil {
+			return nil, err
+		}
 	}
 	token, err := NewToken()
 	if err != nil {
@@ -448,7 +499,20 @@ func (s *Store) AddAgent(p AddAgentParams) (*Agent, error) {
 	}
 	var created *Agent
 	err = s.Update(func(st *State) error {
+		if err := ValidateMeshDNSUnique(st, 0, p.OwnerID, p.MeshSlot, meshDNS); err != nil {
+			return err
+		}
+		if err := ValidateAdvertise(st, 0, advertise); err != nil {
+			return err
+		}
 		pool, err := ipam.New(st.Settings.MeshCIDR)
+		if p.MeshSlot > 0 {
+			subnet, subnetErr := TenantPrefix(st.Settings.MeshCIDR, p.MeshSlot)
+			if subnetErr != nil {
+				return subnetErr
+			}
+			pool, err = ipam.New(subnet.String())
+		}
 		if err != nil {
 			return err
 		}
@@ -468,7 +532,11 @@ func (s *Store) AddAgent(p AddAgentParams) (*Agent, error) {
 		}
 		agent := &Agent{
 			ID:              st.NextAgentID,
+			OwnerID:         p.OwnerID,
+			MeshSlot:        p.MeshSlot,
 			Name:            uniqueName(st.Agents, p.Name, st.NextAgentID),
+			MeshDNS:         meshDNS,
+			InstallMethod:   p.InstallMethod,
 			Token:           token,
 			Address:         addr.String(),
 			Advertise:       advertise,
@@ -531,6 +599,34 @@ func (s *Store) RemoveAgent(id uint32) error {
 		found := false
 		for _, a := range st.Agents {
 			if a.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, a)
+		}
+		if !found {
+			return ErrNotFound
+		}
+		st.Agents = out
+		for k := range st.PairKeys {
+			if keyHasMember(k, id) {
+				delete(st.PairKeys, k)
+			}
+		}
+		return nil
+	})
+}
+
+// RemoveAgentWithToken atomically checks the current enrollment token before removal.
+func (s *Store) RemoveAgentWithToken(id uint32, token string) error {
+	return s.Update(func(st *State) error {
+		out := st.Agents[:0]
+		found := false
+		for _, a := range st.Agents {
+			if a.ID == id {
+				if !EqualToken(a.Token, token) {
+					return ErrNotFound
+				}
 				found = true
 				continue
 			}
@@ -612,12 +708,23 @@ func (s *Store) repairAddressesLocked() (bool, error) {
 	seen := map[netip.Addr]bool{pool.HubAddress(): true}
 	changed := false
 	for _, a := range s.st.Agents {
+		agentPool := pool
+		if a.MeshSlot > 0 {
+			subnet, err := TenantPrefix(s.st.Settings.MeshCIDR, a.MeshSlot)
+			if err != nil {
+				return changed, err
+			}
+			agentPool, err = ipam.New(subnet.String())
+			if err != nil {
+				return changed, err
+			}
+		}
 		addr, err := netip.ParseAddr(a.Address)
-		if err == nil && pool.Contains(addr) && !seen[addr] {
+		if err == nil && agentPool.Contains(addr) && !seen[addr] {
 			seen[addr] = true
 			continue
 		}
-		addr, err = pool.Allocate(seen)
+		addr, err = agentPool.Allocate(seen)
 		if err != nil {
 			return changed, err
 		}
@@ -660,4 +767,142 @@ func NormalisePrefixes(in []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// AutoAdvertise adds newly observed local networks while the automatic option is
+// enabled. Conflicting or unsafe candidates are skipped individually, leaving
+// previously chosen routes in place.
+func (s *Store) AutoAdvertise(agentID uint32, candidates []string) (bool, error) {
+	normalised, err := NormalisePrefixes(candidates)
+	if err != nil {
+		return false, err
+	}
+	sort.Slice(normalised, func(i, j int) bool {
+		a, _ := netip.ParsePrefix(normalised[i])
+		b, _ := netip.ParsePrefix(normalised[j])
+		return a.Bits() > b.Bits()
+	})
+	routesChanged := false
+	err = s.Update(func(st *State) error {
+		var agent *Agent
+		for _, a := range st.Agents {
+			if a.ID == agentID {
+				agent = a
+				break
+			}
+		}
+		if agent == nil || !agent.AdvertiseAll {
+			return errNoAutoAdvertiseChange
+		}
+		seen := make(map[string]bool, len(agent.AutoSeen))
+		for _, prefix := range agent.AutoSeen {
+			seen[prefix] = true
+		}
+		changed := false
+		for _, prefix := range normalised {
+			if seen[prefix] {
+				continue
+			}
+			alreadyShared := false
+			for _, existing := range agent.Advertise {
+				if existing == prefix {
+					alreadyShared = true
+					break
+				}
+			}
+			if !alreadyShared {
+				proposed := append(append([]string(nil), agent.Advertise...), prefix)
+				if agent.MeshSlot > 0 && ValidateTenantAdvertise(proposed) != nil {
+					continue
+				}
+				if err := ValidateAdvertise(st, agentID, proposed); err != nil {
+					continue
+				}
+				agent.Advertise = proposed
+				routesChanged = true
+			}
+			agent.AutoSeen = append(agent.AutoSeen, prefix)
+			seen[prefix] = true
+			changed = true
+		}
+		if !changed {
+			return errNoAutoAdvertiseChange
+		}
+		sort.Strings(agent.Advertise)
+		sort.Strings(agent.AutoSeen)
+		return nil
+	})
+	if errors.Is(err, errNoAutoAdvertiseChange) {
+		return false, nil
+	}
+	return routesChanged, err
+}
+
+var errNoAutoAdvertiseChange = errors.New("no automatic routes to add")
+
+// ValidateTenantAdvertise prevents public accounts from installing routes to
+// arbitrary internet hosts on the shared control node. Local LAN and CGNAT
+// networks remain available inside the account's mesh.
+func ValidateTenantAdvertise(advertised []string) error {
+	allowed := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+		netip.MustParsePrefix("100.64.0.0/10"),
+	}
+	for _, raw := range advertised {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("%q is not a network prefix", raw)
+		}
+		permitted := false
+		for _, region := range allowed {
+			if prefix.Bits() >= 16 && prefix.Bits() >= region.Bits() && region.Contains(prefix.Masked().Addr()) {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf("%s cannot be shared from a private account; use a private or CGNAT prefix of /16 or narrower", prefix)
+		}
+	}
+	return nil
+}
+
+// ValidateAdvertise rejects a route that would silently lose to another claim.
+// Call it inside Store.Update so concurrent route edits cannot pass separately.
+func ValidateAdvertise(st *State, currentID uint32, advertised []string) error {
+	mesh, err := netip.ParsePrefix(st.Settings.MeshCIDR)
+	if err != nil {
+		return err
+	}
+	var checked []netip.Prefix
+	for _, raw := range advertised {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return fmt.Errorf("%q is not a network prefix", raw)
+		}
+		prefix = prefix.Masked()
+		if prefix.Bits() == 0 || !prefix.Addr().Is4() || !prefix.Addr().IsGlobalUnicast() || prefix.Overlaps(mesh) {
+			return fmt.Errorf("%s cannot be shared as an agent network", prefix)
+		}
+		for _, prior := range checked {
+			if prefix.Overlaps(prior) {
+				return fmt.Errorf("%s overlaps %s in this agent's network list", prefix, prior)
+			}
+		}
+		for _, other := range st.Agents {
+			if other.ID == currentID {
+				continue
+			}
+			for _, existing := range other.Advertise {
+				claim, err := netip.ParsePrefix(existing)
+				if err == nil && prefix.Overlaps(claim) {
+					return fmt.Errorf("%s overlaps a network already shared by another agent; remove the conflicting route first", prefix)
+				}
+			}
+		}
+		checked = append(checked, prefix)
+	}
+	return nil
 }

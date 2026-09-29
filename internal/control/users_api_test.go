@@ -2,7 +2,6 @@ package control_test
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,11 +18,11 @@ func (h *harness) loginAs(t *testing.T, username, password string) []*http.Cooki
 	return cookies
 }
 
-// createViewer adds a read-only account through the API.
+// createViewer adds a regular account through the API.
 func (h *harness) createViewer(t *testing.T, cookies []*http.Cookie, username string) {
 	t.Helper()
 	status, body, _ := h.api("POST", "/api/users", map[string]any{
-		"username": username, "password": "viewer-password-1", "role": "viewer",
+		"username": username, "password": "viewer-password-1", "role": "regular",
 	}, cookies)
 	if status != http.StatusOK {
 		t.Fatalf("creating a viewer returned %d: %s", status, body)
@@ -76,7 +75,7 @@ func TestSessionReportsTheSignedInAccount(t *testing.T) {
 	}
 }
 
-func TestViewerAccountsAreReadOnly(t *testing.T) {
+func TestRegularAccountsCannotManageGlobalSettings(t *testing.T) {
 	h := newHarness(t, true)
 	admin := h.login(t)
 	h.createViewer(t, admin, "reader")
@@ -86,14 +85,12 @@ func TestViewerAccountsAreReadOnly(t *testing.T) {
 	if status, _, _ := h.api("GET", "/api/state", nil, viewer); status != http.StatusOK {
 		t.Fatalf("a viewer should be able to read state, got %d", status)
 	}
-	// Everything that changes state is refused.
+	// Global configuration and user management stay with admins.
 	cases := []struct {
 		method string
 		path   string
 		body   any
 	}{
-		{"POST", "/api/agents", map[string]any{"name": "sneaky"}},
-		{"DELETE", "/api/agents/1", nil},
 		{"POST", "/api/settings", map[string]any{"meshCidr": "10.0.0.0/24"}},
 		{"POST", "/api/users", map[string]any{"username": "sneaky", "password": "sneaky-password", "role": "admin"}},
 		{"DELETE", "/api/users/1", nil},
@@ -105,7 +102,7 @@ func TestViewerAccountsAreReadOnly(t *testing.T) {
 			t.Errorf("%s %s as a viewer returned %d (%s), want 403", tc.method, tc.path, status, strings.TrimSpace(string(body)))
 		}
 	}
-	// The mesh must be untouched.
+	// Global settings remain untouched.
 	if agents := h.server.Store().Agents(); len(agents) != 0 {
 		t.Fatalf("a viewer managed to enroll an agent: %+v", agents)
 	}
@@ -156,7 +153,7 @@ func TestAdminsCanManageUsers(t *testing.T) {
 
 	// Change the role, then the password.
 	if status, body, _ := h.api("PATCH", "/api/users/"+created.User.ID,
-		map[string]any{"role": "viewer"}, admin); status != http.StatusOK {
+		map[string]any{"role": "regular"}, admin); status != http.StatusOK {
 		t.Fatalf("role change returned %d: %s", status, body)
 	}
 	if _, err := h.client().Post("", "", nil); err != nil {
@@ -166,10 +163,13 @@ func TestAdminsCanManageUsers(t *testing.T) {
 		map[string]any{"password": "rotated-password-1"}, admin); status != http.StatusOK {
 		t.Fatalf("password reset returned %d: %s", status, body)
 	}
-	h.loginAs(t, "ops", "rotated-password-1")
+	viewerCookies := h.loginAs(t, "ops", "rotated-password-1")
 
-	// Now a viewer, that session is refused for changes.
-	if status, _, _ := h.api("POST", "/api/agents", map[string]any{"name": "nope"}, opsCookies); status != http.StatusForbidden {
+	// Password rotation revokes old sessions; the fresh regular account cannot manage users.
+	if status, _, _ := h.api("POST", "/api/agents", map[string]any{"name": "nope"}, opsCookies); status != http.StatusUnauthorized {
+		t.Fatalf("the old session was not revoked: %d", status)
+	}
+	if status, _, _ := h.api("POST", "/api/users", map[string]any{"username": "nope", "password": "nope-password-1", "role": "admin"}, viewerCookies); status != http.StatusForbidden {
 		t.Fatalf("the demoted user still had admin rights: %d", status)
 	}
 
@@ -230,39 +230,7 @@ func TestAPITokenRoleIsHonoured(t *testing.T) {
 	h := newHarness(t, true)
 	admin := h.login(t)
 	status, body, _ := h.api("POST", "/api/tokens", map[string]any{"name": "readonly", "role": "viewer"}, admin)
-	if status != http.StatusOK {
-		t.Fatalf("creating a viewer token returned %d: %s", status, body)
-	}
-	var created struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(body, &created); err != nil {
-		t.Fatal(err)
-	}
-	// Read with the token: fine. Write: refused.
-	request, _ := http.NewRequest("GET", "https://"+h.address+"/api/state", nil)
-	request.Header.Set("Authorization", "Bearer "+created.Token)
-	response, err := h.client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("viewer token read returned %d", response.StatusCode)
-	}
-	write, _ := http.NewRequest("POST", "https://"+h.address+"/api/agents", strings.NewReader(`{"name":"via-token"}`))
-	write.Header.Set("Authorization", "Bearer "+created.Token)
-	write.Header.Set("Content-Type", "application/json")
-	write.Header.Set("X-Noobtunnel", "1")
-	writeResponse, err := h.client().Do(write)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writeResponse.Body.Close()
-	if writeResponse.StatusCode != http.StatusForbidden {
-		t.Fatalf("a viewer token could write: %d", writeResponse.StatusCode)
-	}
-	if agents := h.server.Store().Agents(); len(agents) != 0 {
-		t.Fatalf("a viewer token created an agent: %v", fmt.Sprint(agents))
+	if status != http.StatusBadRequest {
+		t.Fatalf("regular token returned %d: %s", status, body)
 	}
 }

@@ -17,6 +17,7 @@ func runAgent(args []string) error {
 	var (
 		serverAddr   = fs.String("server", env("NOOBTUNNEL_SERVER", ""), "control node address, host:port")
 		token        = fs.String("token", env("NOOBTUNNEL_TOKEN", ""), "enrollment token from the control node")
+		tokenFile    = fs.String("token-file", "", "path to a file holding the enrollment token")
 		fingerprint  = fs.String("fingerprint", env("NOOBTUNNEL_FINGERPRINT", ""), "control node certificate fingerprint (sha256, hex)")
 		insecure     = fs.Bool("insecure", envBool("NOOBTUNNEL_INSECURE", false), "skip certificate verification (testing only)")
 		iface        = fs.String("interface", env("NOOBTUNNEL_INTERFACE", "noobtun"), "WireGuard interface name")
@@ -36,6 +37,13 @@ func runAgent(args []string) error {
 	}
 	if *serverAddr == "" {
 		return fmt.Errorf("--server is required (for example --server 203.0.113.9:8443)")
+	}
+	if *tokenFile != "" {
+		raw, err := os.ReadFile(*tokenFile)
+		if err != nil {
+			return fmt.Errorf("read token file: %w", err)
+		}
+		*token = strings.TrimSpace(string(raw))
 	}
 	if *token == "" {
 		return fmt.Errorf("--token is required, create one with the control node's Add agent button")
@@ -76,6 +84,9 @@ func runAgent(args []string) error {
 		logger.Info("direct paths disabled, all mesh traffic will be relayed by the control node")
 	}
 
+	if handled, err := runAgentAsWindowsService(instance); handled {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return instance.Run(ctx)

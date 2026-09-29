@@ -445,7 +445,7 @@ func TestPeerSessionsAreEstablishedOverTheTunnel(t *testing.T) {
 		t.Fatal("the second agent should have a session with the hub")
 	}
 	// Both agents must see the other's address as a route through the tunnel.
-	if !containsString(a.device.Routes(), "10.77.0.0/16") {
+	if !containsString(a.device.Routes(), "10.77.0.0/24") {
 		t.Fatalf("mesh route missing: %v", a.device.Routes())
 	}
 }

@@ -18,6 +18,15 @@
 </div>
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
+<template id="tpl-home">
+  <main class="simple-page">
+    <div class="brand brand-lg"><img class="brand-logo" src="/logo" alt=""><span class="brand-text">noobtunnel</span></div>
+    <h1>Your private mesh</h1>
+    <p class="muted">Connect your devices and reach them securely.</p>
+    <div class="row"><a class="btn btn-primary" href="/login">Sign in</a><a class="btn" href="/signup" data-signup-link hidden>Create account</a></div>
+  </main>
+</template>
+
 <template id="tpl-login">
   <div class="login-wrap">
     <form class="card login" data-form="login">
@@ -27,8 +36,8 @@
       </div>
       <p class="muted login-sub">Sign in to the control node to manage your mesh.</p>
       <label class="field">
-        <span>Username</span>
-        <input name="username" value="admin" autocomplete="username" required autofocus>
+        <span>Username or email</span>
+        <input name="username" autocomplete="username" required autofocus>
       </label>
       <label class="field">
         <span>Password</span>
@@ -36,27 +45,92 @@
       </label>
       <p class="form-error" data-error hidden></p>
       <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+      <div class="row" style="justify-content:space-between"><a href="/">Home</a><a href="/forgot-password">Forgot password?</a></div>
       <p class="muted tiny" data-login-note hidden></p>
     </form>
   </div>
 </template>
 
+<template id="tpl-forgot">
+  <main class="simple-page"><h1>Reset password</h1>
+    <p class="muted">Enter the email linked to your account.</p>
+    <form class="stack" data-form="forgot"><label class="field"><span>Email</span><input type="email" name="email" required autocomplete="email"></label>
+      <p class="form-error" data-error hidden></p><p class="muted" data-success hidden></p>
+      <button class="btn btn-primary" type="submit">Send reset link</button></form><a href="/login">Back to sign in</a>
+  </main>
+</template>
+
+<template id="tpl-reset">
+  <main class="simple-page"><h1>Choose a new password</h1>
+    <form class="stack" data-form="reset"><label class="field"><span>New password</span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+      <label class="field"><span>Confirm password</span><input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label>
+      <p class="form-error" data-error hidden></p><p class="muted" data-success hidden></p>
+      <button class="btn btn-primary" type="submit">Reset password</button></form><a href="/login">Back to sign in</a>
+  </main>
+</template>
+
+<template id="tpl-verify">
+  <main class="simple-page"><h1>Confirm email</h1><p class="muted">Confirm this address to activate your account.</p>
+    <p class="form-error" data-error hidden></p><p class="muted" data-success hidden></p>
+    <button class="btn btn-primary" data-confirm-email>Confirm email</button><a href="/login">Sign in</a>
+  </main>
+</template>
+
+<template id="tpl-signup">
+  <div class="login-wrap"><div class="card login">
+    <div class="brand brand-lg"><img class="brand-logo" src="/logo" alt=""><span class="brand-text">noobtunnel</span></div>
+    <h1>Create account</h1><p class="muted login-sub">Your account will have its own private mesh.</p>
+    <form class="stack" data-form="signup">
+      <label class="field"><span>Username</span><input name="username" required minlength="3" maxlength="32" autocomplete="username"></label>
+      <label class="field"><span>Email</span><input type="email" name="email" required autocomplete="email"></label>
+      <label class="field"><span>Password</span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+      <label class="field"><span>Confirm password</span><input type="password" name="confirm" required minlength="8" autocomplete="new-password"></label>
+      <p class="form-error" data-error hidden></p>
+      <button class="btn btn-primary btn-block" type="submit">Create account</button>
+    </form>
+    <p class="muted" data-success hidden></p><a href="/login">Sign in</a>
+  </div></div>
+</template>
+
 <template id="tpl-shell">
-  <header class="topbar">
-    <div class="brand">
+  <div class="app-shell" data-app-shell>
+  <aside class="sidebar" aria-label="Primary navigation">
+    <div class="sidebar-brand brand">
       <img class="brand-logo" src="/logo" alt="">
       <span class="brand-text">noobtunnel</span>
     </div>
-    <nav class="tabs" data-tabs>
-      <button class="tab is-active" data-view="overview">Overview</button>
-      <button class="tab" data-view="agents">Agents</button>
-      <button class="tab" data-view="resources">Resources</button>
-      <button class="tab" data-view="domains">Domains</button>
-      <button class="tab" data-view="exitnodes">Exit nodes</button>
-      <button class="tab" data-view="users" data-admin-only hidden>Users</button>
-      <button class="tab" data-view="activity">Logs</button>
-      <button class="tab" data-view="settings">Settings</button>
+    <nav class="sidebar-nav" aria-label="Main">
+      <button class="sidebar-link is-active" data-view="overview">Overview</button>
+      <button class="sidebar-link" data-view="agents">Agents</button>
+      <button class="sidebar-link" data-view="resources">Resources</button>
+      <button class="sidebar-link" data-view="domains">Domains</button>
+      <button class="sidebar-link" data-view="exitnodes">Exit nodes</button>
+      <button class="sidebar-link" data-view="users" data-admin-only hidden>Users</button>
+      <button class="sidebar-link has-children" data-view="activity" aria-expanded="false">Logs</button>
+      <nav class="sidebar-subnav" data-subnav="activity" aria-label="Logs" hidden>
+        <button class="sidebar-sublink is-active" data-tab="requests">Requests</button>
+        <button class="sidebar-sublink" data-tab="statistics" data-admin-only>Statistics</button>
+        <button class="sidebar-sublink" data-tab="activity" data-admin-only>Activity</button>
+        <button class="sidebar-sublink" data-tab="errors">Errors</button>
+      </nav>
+      <button class="sidebar-link has-children" data-view="settings" data-admin-only aria-expanded="false">Settings</button>
+      <nav class="sidebar-subnav" data-subnav="settings" aria-label="Settings" hidden>
+        <button class="sidebar-sublink is-active" data-tab="mesh">Mesh &amp; control node</button>
+        <button class="sidebar-sublink" data-tab="users">Users</button>
+        <button class="sidebar-sublink" data-tab="smtp">SMTP email</button>
+        <button class="sidebar-sublink" data-tab="geoip">IP API</button>
+        <button class="sidebar-sublink" data-tab="branding">Branding</button>
+        <button class="sidebar-sublink" data-tab="tokens">API tokens</button>
+      </nav>
     </nav>
+  </aside>
+  <button class="sidebar-scrim" type="button" data-action="toggle-sidebar" aria-label="Close navigation" hidden></button>
+  <div class="main-column">
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="btn btn-icon sidebar-toggle" type="button" data-action="toggle-sidebar" aria-label="Open navigation">☰</button>
+      <div class="page-heading"><span>Control node</span><strong data-current-view>Overview</strong></div>
+    </div>
     <div class="topbar-right">
       <div class="menu" data-menu>
         <button class="btn btn-icon" data-action="menu" aria-label="Account menu">⋯</button>
@@ -87,9 +161,11 @@
           <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
             <span class="chip chip-quiet mono" data-mesh-range></span>
             <div class="legend">
-              <span><i class="line line-direct"></i>direct</span>
-              <span><i class="line line-relay"></i>relayed via hub</span>
+              <span><i class="line line-direct"></i>agent to agent</span>
+              <span><i class="line line-relay"></i>via control node</span>
+              <span><i class="line line-hub"></i>agent to control node</span>
             </div>
+            <button class="btn btn-sm" type="button" data-action="topology-reset">Reset layout</button>
           </div>
         </div>
         <div class="topo" data-topology></div>
@@ -105,7 +181,7 @@
           </div>
           <div class="row">
             <input class="input" type="search" placeholder="Filter by name, address or key" data-agent-filter>
-            <button class="btn btn-primary" data-action="add-agent" data-admin-only>Add agent</button>
+            <button class="btn btn-primary" data-action="add-agent" data-mesh-manage>Add agent</button>
           </div>
         </div>
         <div class="agent-grid" data-agent-grid></div>
@@ -132,7 +208,10 @@
             <h2>Resources</h2>
             <p class="muted" data-resources-sub></p>
           </div>
-          <button class="btn btn-primary" data-action="add-resource" data-resources-add data-admin-only>Add resource</button>
+          <div class="resource-header-actions">
+            <input type="email" data-resource-email-filter aria-label="Filter resources by account email" placeholder="Account email" autocomplete="off" hidden>
+            <button class="btn btn-primary" data-action="add-resource" data-resources-add>Add resource</button>
+          </div>
         </div>
         <div class="table-wrap" data-resources-table></div>
       </div>
@@ -148,7 +227,7 @@
           </div>
           <div class="row">
             <button class="btn" data-action="manage-dns" data-admin-only>Automation</button>
-            <button class="btn btn-primary" data-action="add-domain" data-domains-add data-admin-only>Add domain</button>
+            <button class="btn btn-primary" data-action="add-domain" data-domains-add>Add domain</button>
           </div>
         </div>
         <div class="table-wrap" data-domains-table></div>
@@ -169,17 +248,14 @@
     </section>
 
     <section class="view" data-view-panel="activity" hidden>
-      <nav class="tabs" data-tabs>
-        <button class="tab is-active" data-tab="requests">Requests</button>
-        <button class="tab" data-tab="statistics">Statistics</button>
-        <button class="tab" data-tab="activity">Activity</button>
-        <button class="tab" data-tab="errors">Errors</button>
-      </nav>
       <div class="panel" data-tab-panel="requests">
         <div class="panel-head">
           <div>
             <h2>Requests</h2>
             <p class="muted" data-requests-sub></p>
+          </div>
+          <div class="row">
+            <button class="btn btn-sm" type="button" data-action="requests-clear-filters" data-requests-clear hidden>Clear filters</button>
           </div>
         </div>
         <div class="table-wrap" data-request-table></div>
@@ -188,7 +264,7 @@
         <div class="panel-head">
           <div>
             <h2>Statistics</h2>
-            <p class="muted">Where the traffic came from and which services it used, since this control node started.</p>
+            <p class="muted">Where the stored traffic came from and which services it used.</p>
           </div>
         </div>
         <div class="charts" data-request-charts></div>
@@ -215,13 +291,33 @@
     </section>
 
 <section class="view" data-view-panel="settings" hidden>
-  <nav class="tabs" data-tabs>
-    <button class="tab is-active" data-tab="mesh">Mesh &amp; control node</button>
-    <button class="tab" data-tab="geoip">IP API</button>
-    <button class="tab" data-tab="branding">Branding</button>
-    <button class="tab" data-tab="tokens">API tokens</button>
-  </nav>
-
+  <div class="stack" data-tab-panel="users" hidden>
+    <form class="panel" data-form="signup-settings">
+      <div class="panel-head"><div><h2>Public sign-up</h2><p class="muted">New accounts receive a private mesh after email confirmation. Unverified accounts are removed after 24 hours.</p></div></div>
+      <label class="switch"><input type="checkbox" name="enabled"><span><strong>Allow public signup</strong><em>Turn this off whenever new registrations should stop.</em></span></label>
+      <div class="fields">
+        <label class="field"><span>Maximum regular users</span><input type="number" name="maxUsers" min="1" max="255" step="1" required></label>
+      </div>
+      <p class="muted tiny" data-signup-count></p>
+      <p class="field-error" data-error hidden></p><div class="panel-foot"><button class="btn btn-primary" type="submit">Save signup settings</button></div>
+    </form>
+  </div>
+  <div class="stack" data-tab-panel="smtp" hidden>
+    <form class="panel" data-form="smtp" data-admin-only>
+      <div class="panel-head"><div><h2>SMTP email</h2><p class="muted">Send mail through an authenticated TLS connection. Link recipients on the Users page.</p></div><span class="chip" data-smtp-status>not configured</span></div>
+      <div class="fields">
+        <label class="field"><span>SMTP host</span><input name="host" required placeholder="mail.byenoob.com"></label>
+        <label class="field"><span>Port</span><input name="port" type="number" min="1" max="65535" required value="465"></label>
+        <label class="field"><span>Security</span><select name="security"><option value="tls">TLS (465)</option><option value="starttls">STARTTLS (587)</option></select></label>
+        <label class="field"><span>SMTP username</span><input name="username" required autocomplete="username"></label>
+        <label class="field"><span>Password</span><input type="password" name="password" placeholder="Leave blank to keep saved password" autocomplete="new-password"></label>
+        <label class="field"><span>From address</span><input type="email" name="from" required></label>
+        <label class="field"><span>Test recipient (optional)</span><input type="email" name="testRecipient" placeholder="Send a test when saving"></label>
+      </div>
+      <div class="field-error" data-smtp-error hidden></div>
+      <div class="panel-foot"><button class="btn btn-primary" type="submit">Save SMTP settings</button></div>
+    </form>
+  </div>
   <div class="grid-2" data-tab-panel="mesh">
   <form class="panel" data-form="settings">
           <div class="panel-head"><h2>Mesh settings</h2></div>
@@ -317,18 +413,31 @@
             <div class="panel-head">
               <div>
                 <h2>Country data</h2>
-                <p class="muted">An IP API that answers country lookups, used by country rules on resources.
-                The control node asks <code>/checkip?ip=ADDRESS</code> on the host below.</p>
+                <p class="muted">Choose where the control node gets country and IP risk data for resources.</p>
               </div>
               <span class="chip" data-geoip-status>not configured</span>
             </div>
             <div class="fields">
-              <label class="field"><span>API hostname</span>
-                <input name="host" placeholder="iplog.example.com" spellcheck="false" autocomplete="off"></label>
-              <label class="field"><span>API token</span>
-                <input type="password" name="token" placeholder="leave empty to keep the stored token" autocomplete="new-password"></label>
-              <p class="muted tiny">The token is sent as <code>Authorization: Bearer …</code>. No path is needed:
-              the lookup path is added for you.</p>
+              <div class="geoip-providers" role="radiogroup" aria-label="IP API provider">
+                <label class="geoip-provider"><input type="radio" name="provider" value="self" checked><span><strong>Self-hosted iplog</strong><em>Use your own /checkip API through the control node or an agent.</em></span></label>
+                <label class="geoip-provider"><input type="radio" name="provider" value="ipapi"><span><strong>Public ipapi.is</strong><em>Fast hosted lookup. Requires an API key; the free account includes 1,000 lookups per day.</em></span></label>
+              </div>
+              <div data-geoip-self>
+                <div class="geoip-endpoint-row">
+                  <label class="field"><span>Agent</span><select name="agentId"><option value="0">Control node (direct)</option></select></label>
+                  <label class="field"><span>API address</span><input name="host" placeholder="iplog.example.com or http://172.18.0.1:4702" spellcheck="false" autocomplete="off"></label>
+                </div>
+                <label class="field"><span>iplog API token</span>
+                  <input type="password" name="token" placeholder="leave empty to keep the stored token" autocomplete="new-password"></label>
+              </div>
+              <label class="field" data-geoip-public-token hidden><span>ipapi.is API key</span>
+                <input type="password" name="publicToken" placeholder="leave empty to keep the stored key" autocomplete="new-password"></label>
+              <label class="switch" data-geoip-fallback hidden>
+                <input type="checkbox" name="fallbackEnabled">
+                <span><strong>Fall back to iplog</strong>
+                  <em data-geoip-fallback-note>Use the saved self-hosted iplog API when ipapi.is cannot answer.</em></span>
+              </label>
+              <p class="muted tiny" data-geoip-provider-note></p>
               <p class="muted tiny" data-geoip-detail></p>
               <div class="field-error" data-geoip-error hidden></div>
             </div>
@@ -340,7 +449,8 @@
 </div>
 </section>
   </main>
-</div>
+  </div>
+  </div>
 </template>
 
 <div id="modal-root"></div>
@@ -352,6 +462,7 @@
 <script src="/assets/dns_api.js"></script>
 <script src="/assets/branding_api.js"></script>
 <script src="/assets/geoip_api.js"></script>
+<script src="/assets/smtp_api.js"></script>
 <script src="/assets/logs_api.js"></script>
 <script src="/assets/diagnose_ui.js"></script>
 </body>

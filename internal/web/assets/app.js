@@ -133,7 +133,8 @@ async function copyText(value, label = 'Copied to clipboard') {
 }
 
 function copyButton(value, label = 'Copy') {
-  return h('button', { class: 'btn btn-sm', type: 'button', onclick: () => copyText(value, 'Copied') }, label);
+  return h('button', { class: 'btn btn-sm', type: 'button', 'data-no-dirty': true,
+    onclick: () => copyText(value, 'Copied') }, label);
 }
 
 /* ---------- api ---------- */
@@ -157,6 +158,7 @@ async function api(path, options = {}) {
   }
   if (response.status === 401) {
     state.authenticated = false;
+    state.requestPageData = null;
     render();
     throw new Error('your session expired, please sign in again');
   }
@@ -188,6 +190,16 @@ const state = {
   settingsSignature: '',
   users: null,
   usersAt: 0,
+  resourceFilterEmail: '',
+  resourceFilterData: null,
+  resourceFilterRequest: 0,
+  requestPageData: null,
+  requestPageLoading: false,
+  requestPage: 1,
+  logTab: 'requests',
+  settingsTab: 'mesh',
+  expandedSidebarGroup: null,
+  sidebarOpen: false,
   // resourceForm is null, or {id} when the publish page is open.
   resourceForm: null,
   resourceEditorKey: '',
@@ -215,12 +227,37 @@ function routeFromPath(pathname) {
   const name = String(pathname || '').replace(/^\/+|\/+$/g, '').toLowerCase();
   const resource = name.match(/^resources\/(\d+)$/);
   if (resource) return { view: 'resources', resourceId: Number(resource[1]) };
+  const subtab = name.match(/^(activity|settings)\/([a-z]+)$/);
+  if (subtab) {
+    const allowed = subtab[1] === 'activity'
+      ? ['requests', 'statistics', 'activity', 'errors'] : ['mesh', 'users', 'smtp', 'geoip', 'branding', 'tokens'];
+    if (allowed.includes(subtab[2])) return { view: subtab[1], tab: subtab[2], resourceId: null };
+  }
   return VIEW_PATHS.includes(name) ? { view: name, resourceId: null } : null;
 }
 
 function applyRoute(route) {
   if (!route) return;
   state.view = route.view;
+  state.expandedSidebarGroup = route.view === 'activity' || route.view === 'settings' ? route.view : null;
+  if (route.view === 'activity') {
+    state.logTab = route.tab || 'requests';
+    const params = new URLSearchParams(window.location.search);
+    const rawPage = params.get('page');
+    const page = Number(rawPage);
+    state.requestPage = Number.isSafeInteger(page) && page > 0 ? page : 1;
+    const validSort = ['time', 'durationMs', 'host', 'path', 'client', 'country', 'resource', 'decision'];
+    requestSort = {
+      key: validSort.includes(params.get('sort')) ? params.get('sort') : 'time',
+      direction: params.get('dir') === 'asc' ? 'asc' : 'desc',
+    };
+    for (const field of Object.keys(requestFilters)) {
+      requestFilters[field] = new Set(params.getAll(field));
+      requestSearch[field] = params.get('search_' + field) || '';
+    }
+    state.requestPageData = null;
+  }
+  if (route.view === 'settings') state.settingsTab = route.tab || 'mesh';
   state.resourceForm = route.view === 'resources' && route.resourceId !== null
     ? { id: route.resourceId }
     : null;
@@ -232,15 +269,37 @@ function applyRoute(route) {
 function setView(view, push = true) {
   if (!VIEW_PATHS.includes(view)) return;
   state.view = view;
+  state.expandedSidebarGroup = view === 'activity' || view === 'settings' ? view : null;
   state.resourceForm = null;
   state.resourceEditorKey = '';
   // A highlight belongs to the visit that asked for it: leaving Logs drops it.
-  if (view !== 'logs') state.errorMatch = '';
+  if (view !== 'activity') state.errorMatch = '';
   if (push && typeof window !== 'undefined' && window.history && window.history.pushState) {
-    const target = view === 'overview' ? '/' : '/' + view;
-    if (window.location.pathname !== target) window.history.pushState({ view }, '', target);
+    const target = view === 'activity' ? (state.logTab === 'requests' ? requestPageURL() : '/activity/' + state.logTab)
+      : view === 'settings' ? '/settings/' + state.settingsTab
+      : view === 'overview' ? '/' : '/' + view;
+    if (window.location.pathname + window.location.search !== target) window.history.pushState({ view }, '', target);
   }
   renderShell();
+  if (view === 'activity' && state.logTab === 'requests') loadRequestPage();
+}
+
+async function filterResourcesByEmail(email) {
+  const value = String(email || '').trim();
+  state.resourceFilterEmail = value;
+  state.resourceFilterData = null;
+  const request = ++state.resourceFilterRequest;
+  renderShell();
+  if (!value || !canAdmin()) return;
+  try {
+    const result = await api('/api/resources?email=' + encodeURIComponent(value));
+    if (request !== state.resourceFilterRequest) return;
+    state.resourceFilterData = result;
+    renderShell();
+  } catch (err) {
+    if (request !== state.resourceFilterRequest) return;
+    toast(err.message, 'fail');
+  }
 }
 
 /* ---------- boot ---------- */
@@ -258,7 +317,18 @@ async function boot() {
   }
   const deepLink = routeFromPath(window.location.pathname);
   if (deepLink) applyRoute(deepLink);
+  if (deepLink?.view === 'resources' && deepLink.resourceId !== null && canAdmin()) {
+    const email = new URLSearchParams(window.location.search).get('email');
+    if (email) {
+      state.resourceFilterEmail = email;
+      try { state.resourceFilterData = await api('/api/resources?email=' + encodeURIComponent(email)); }
+      catch (err) { toast(err.message, 'fail'); }
+    }
+  }
   await refresh(true);
+  if (state.view === 'users' && canAdmin()) loadUsers(true);
+  if (state.view === 'settings' && state.settingsTab === 'users' && canAdmin()) loadSignupSettings();
+  if (state.view === 'settings' && state.settingsTab === 'smtp' && canAdmin()) loadSMTP();
   startStream();
 }
 
@@ -276,6 +346,7 @@ function applySession(session) {
 }
 
 function canAdmin() { return state.session.canAdmin; }
+function canManageMesh() { return canAdmin() || state.session.role === 'regular'; }
 
 async function refresh(showSpinner = false) {
   try {
@@ -324,13 +395,27 @@ function setStreamLabel() {
 
 setInterval(() => { if (shell) setStreamLabel(); }, 5000);
 
+// Keep the visible Requests page current without resetting the table between fetches.
+setInterval(() => {
+  if (state.authenticated && state.view === 'activity' && state.logTab === 'requests' &&
+      document.visibilityState !== 'hidden' && state.requestPageData && !state.requestPageLoading) {
+    loadRequestPage(true);
+  }
+}, 2000);
+
 /* ---------- render entry point ---------- */
 
 function render() {
   const root = appRoot();
   root.classList.remove('is-loading');
   if (!state.authenticated) {
-    mountLogin();
+    const path = window.location.pathname;
+    if (path === '/') mountLanding();
+    else if (path === '/forgot-password') mountForgotPassword();
+    else if (path === '/reset-password') mountResetPassword();
+    else if (path === '/verify-email') mountVerifyEmail();
+    else if (path === '/signup') mountSignup();
+    else mountLogin();
     applyBranding();
     return;
   }
@@ -338,8 +423,95 @@ function render() {
     mountBoot();
     return;
   }
-  if (!shell) mountShell();
+  const firstMount = !shell;
+  if (firstMount) mountShell();
   renderShell();
+  if (firstMount && state.view === 'activity' && state.logTab === 'requests') loadRequestPage();
+}
+
+function mountSignup() {
+  const node = $('#tpl-signup').content.firstElementChild.cloneNode(true);
+  const form = $('[data-form=signup]', node);
+  fetch('/api/signup/status').then((r) => r.json()).then((status) => {
+    if (!status.enabled) { const error = $('[data-error]', node); error.textContent = status.limitReached ? 'Registration limit reached. Try again later.' : 'Sign-ups are disabled right now.'; error.hidden = false; form.querySelector('button[type=submit]').disabled = true; }
+  }).catch(() => {});
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = $('[data-error]', node); error.hidden = true;
+    if (form.elements.password.value !== form.elements.confirm.value) { error.textContent = 'Passwords do not match'; error.hidden = false; return; }
+    try {
+      const result = await api('/api/signup', { method: 'POST', body: { username: form.elements.username.value.trim(), email: form.elements.email.value.trim(), password: form.elements.password.value } });
+      const success = $('[data-success]', node); success.textContent = result.message; success.hidden = false; form.hidden = true;
+    } catch (err) { error.textContent = err.message; error.hidden = false; }
+  });
+  clear(appRoot()).append(node);
+}
+
+function mountLanding() {
+  const node = $('#tpl-home').content.firstElementChild.cloneNode(true);
+  clear(appRoot()).append(node);
+  fetch('/api/signup/status').then((r) => r.json()).then((status) => {
+    const link = $('[data-signup-link]', node);
+    if (link) link.hidden = !status.enabled;
+  }).catch(() => {});
+}
+
+function mountForgotPassword() {
+  const node = $('#tpl-forgot').content.firstElementChild.cloneNode(true);
+  const form = $('[data-form=forgot]', node);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = $('[data-error]', node);
+    error.hidden = true;
+    try {
+      const result = await api('/api/password/forgot', { method: 'POST', body: { email: form.elements.email.value.trim() } });
+      const success = $('[data-success]', node);
+      success.textContent = result.message;
+      success.hidden = false;
+    } catch (err) { error.textContent = err.message; error.hidden = false; }
+  });
+  clear(appRoot()).append(node);
+}
+
+function mountResetPassword() {
+  const node = $('#tpl-reset').content.firstElementChild.cloneNode(true);
+  const token = new URLSearchParams(window.location.search).get('token') || '';
+  const form = $('[data-form=reset]', node);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const error = $('[data-error]', node);
+    error.hidden = true;
+    if (form.elements.password.value !== form.elements.confirm.value) {
+      error.textContent = 'Passwords do not match'; error.hidden = false; return;
+    }
+    try {
+      await api('/api/password/reset', { method: 'POST', body: { token, password: form.elements.password.value } });
+      window.history.replaceState({}, '', '/login');
+      const success = $('[data-success]', node);
+      success.textContent = 'Password updated. You can sign in now.';
+      success.hidden = false;
+      form.hidden = true;
+    } catch (err) { error.textContent = err.message; error.hidden = false; }
+  });
+  clear(appRoot()).append(node);
+}
+
+function mountVerifyEmail() {
+  const node = $('#tpl-verify').content.firstElementChild.cloneNode(true);
+  const token = new URLSearchParams(window.location.search).get('token') || '';
+  $('[data-confirm-email]', node).addEventListener('click', async () => {
+    const error = $('[data-error]', node);
+    error.hidden = true;
+    try {
+      await api('/api/email/confirm', { method: 'POST', body: { token } });
+      window.history.replaceState({}, '', '/login');
+      const success = $('[data-success]', node);
+      success.textContent = 'Email confirmed. You can sign in now.';
+      success.hidden = false;
+      $('[data-confirm-email]', node).hidden = true;
+    } catch (err) { error.textContent = err.message; error.hidden = false; }
+  });
+  clear(appRoot()).append(node);
 }
 
 function mountBoot() {
@@ -376,6 +548,7 @@ function mountLogin() {
         canAdmin: result.role === 'admin',
       });
       state.authenticated = true;
+      if (window.location.pathname === '/login') window.history.replaceState({}, '', '/');
       shell = null;
       await refresh(true);
       startStream();
@@ -388,10 +561,7 @@ function mountLogin() {
 }
 
 function mountShell() {
-  // The template holds several top level elements (header + main), so clone the
-  // whole fragment. Cloning only the first child silently dropped the whole UI.
-  // The template holds several top level elements (header + main), so clone the
-  // whole fragment. Cloning only the first child silently dropped the whole UI.
+  // Clone the complete shell, including its sidebar and main column.
   const fragment = $('#tpl-shell').content.cloneNode(true);
   clear(appRoot()).append(fragment);
   const node = appRoot();
@@ -413,6 +583,7 @@ function mountShell() {
     resourceList: $('[data-resource-list]', node),
     resourceEditor: $('[data-resource-editor]', node),
     resourcesAdd: $('[data-resources-add]', node),
+    resourcesEmailFilter: $('[data-resource-email-filter]', node),
     domainsTable: $('[data-domains-table]', node),
     domainsSub: $('[data-domains-sub]', node),
     domainList: $('[data-domain-list]', node),
@@ -448,11 +619,36 @@ function mountShell() {
 }
 
 function wireShell(node) {
+  if (shell.resourcesEmailFilter) {
+    let filterTimer;
+    shell.resourcesEmailFilter.addEventListener('input', (event) => {
+      clearTimeout(filterTimer);
+      const value = event.target.value;
+      state.resourceFilterEmail = value;
+      state.resourceFilterData = null;
+      ++state.resourceFilterRequest;
+      filterTimer = setTimeout(() => filterResourcesByEmail(value), 350);
+    });
+  }
   shell.settingsForm.addEventListener('submit', saveSettings);
+  const signupForm = $('form[data-form=signup-settings]', node);
+  if (signupForm) signupForm.addEventListener('submit', saveSignupSettings);
+  const smtpForm = $('form[data-form=smtp]', node);
+  if (smtpForm) smtpForm.addEventListener('submit', saveSMTP);
   if (shell.brandingForm) shell.brandingForm.addEventListener('submit', uploadLogo);
   if (shell.brandNameForm) shell.brandNameForm.addEventListener('submit', saveBrandName);
   if (shell.brandCSSForm) shell.brandCSSForm.addEventListener('submit', saveBrandCSS);
-  if (shell.geoipForm) shell.geoipForm.addEventListener('submit', saveGeoIP);
+  if (shell.geoipForm) {
+    shell.geoipForm.addEventListener('submit', saveGeoIP);
+    shell.geoipForm.addEventListener('change', (event) => {
+      if (event.target.name === 'provider') {
+        shell.geoipForm.dataset.providerSelection = event.target.value;
+        renderGeoIPProvider();
+      } else if (event.target.name === 'fallbackEnabled') {
+        shell.geoipForm.dataset.fallbackSelection = String(event.target.checked);
+      }
+    });
+  }
   shell.filter.addEventListener('input', () => {
     state.filter = shell.filter.value.trim().toLowerCase();
     renderShell();
@@ -470,6 +666,7 @@ function installGlobalActions() {
   document.addEventListener('click', handleGlobalAction);
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
+      if (state.sidebarOpen) { state.sidebarOpen = false; renderShell(); }
       if (dismissModalPassively()) renderShell();
     }
     if (event.key === '/' && document.activeElement === document.body) {
@@ -477,11 +674,25 @@ function installGlobalActions() {
       if (shell && shell.filter) { setView('agents'); shell.filter.focus(); }
     }
   });
-  window.addEventListener('popstate', () => {
+  window.addEventListener('popstate', async () => {
     const route = routeFromPath(window.location.pathname);
     if (route) {
+      if (route.view === 'resources' && route.resourceId !== null && canAdmin()) {
+        const email = new URLSearchParams(window.location.search).get('email') || '';
+        if (email !== state.resourceFilterEmail) {
+          state.resourceFilterEmail = email;
+          state.resourceFilterData = null;
+          if (email) {
+            try { state.resourceFilterData = await api('/api/resources?email=' + encodeURIComponent(email)); }
+            catch (err) { toast(err.message, 'fail'); }
+          }
+        }
+      }
       applyRoute(route);
       renderShell();
+      if (state.view === 'users' && canAdmin()) loadUsers(true);
+      if (state.view === 'settings' && state.settingsTab === 'users' && canAdmin()) loadSignupSettings();
+      if (state.view === 'activity' && state.logTab === 'requests') loadRequestPage();
     }
   });
 }
@@ -496,10 +707,18 @@ function closeMenu() {
 }
 
 async function handleGlobalAction(event) {
-    const tab = event.target.closest('[data-view]');
+  const tab = event.target.closest('[data-view]');
   if (tab) {
-    setView(tab.dataset.view);
+    const view = tab.dataset.view;
+    if ((view === 'activity' || view === 'settings') && state.view === view) {
+      state.expandedSidebarGroup = state.expandedSidebarGroup === view ? null : view;
+      renderShell();
+      return;
+    }
+    if (view !== 'activity' && view !== 'settings') state.sidebarOpen = false;
+    setView(view);
     if (state.view === 'users' && canAdmin()) loadUsers(true);
+    if (state.view === 'settings' && state.settingsTab === 'smtp' && canAdmin()) loadSMTP();
     return;
   }
   const actionEl = event.target.closest('[data-action]');
@@ -510,6 +729,10 @@ async function handleGlobalAction(event) {
   const action = actionEl.dataset.action;
   const id = actionEl.dataset.id ? Number(actionEl.dataset.id) : null;
   switch (action) {
+    case 'toggle-sidebar':
+      state.sidebarOpen = !state.sidebarOpen;
+      renderShell();
+      break;
     case 'menu':
       toggleMenu();
       break;
@@ -521,8 +744,10 @@ async function handleGlobalAction(event) {
     case 'refresh':
       closeMenu();
       await refresh();
+      if (state.view === 'activity' && state.logTab === 'requests') await loadRequestPage();
       toast('State refreshed', 'ok');
       break;
+    case 'requests-clear-filters': clearRequestFilters(); break;
     case 'copy-fingerprint':
       closeMenu();
       await copyText(state.data.server.fingerprint, 'Certificate fingerprint copied');
@@ -532,6 +757,7 @@ async function handleGlobalAction(event) {
       if (state.stream) state.stream.close();
       closeModal();
       state.authenticated = false; state.data = null; shell = null;
+      state.requestPageData = null;
       render();
       break;
     case 'add-agent': openAddAgent(); break;
@@ -540,11 +766,10 @@ async function handleGlobalAction(event) {
     case 'show-error': await showError(actionEl.dataset.match); break;
     case 'requests-page': setRequestPage(Number(actionEl.dataset.page)); break;
     case 'add-user': openAddUser(); break;
-    case 'user-password': openUserPassword(actionEl.dataset.username, actionEl.dataset.id); break;
-    case 'user-role': openRoleModal(actionEl.dataset.id); break;
-    case 'user-toggle': await toggleUser(actionEl.dataset.id, actionEl.dataset.disabled === 'true'); break;
+    case 'user-edit': openEditUser(actionEl.dataset.id); break;
+    case 'user-resources': openUserResources(actionEl.dataset.id); break;
     case 'user-delete': await deleteUser(actionEl.dataset.id, actionEl.dataset.username); break;
-    case 'add-resource': openResourceEditor(null); break;
+    case 'add-resource': filterResourcesByEmail(''); openResourceEditor(null); break;
     case 'resource-edit': openResourceEditor(Number(actionEl.dataset.id)); break;
     case 'resource-cancel': closeResourceEditor(); break;
     case 'resource-toggle': await toggleResource(actionEl.dataset.id, actionEl.dataset.enabled === 'true'); break;
@@ -552,6 +777,7 @@ async function handleGlobalAction(event) {
     case 'add-domain': openDomainModal(); break;
     case 'domain-edit': openDomainModal(actionEl.dataset.hostname); break;
     case 'domain-delete': await deleteDomain(actionEl.dataset.hostname); break;
+    case 'domain-verify': await verifyDomain(actionEl.dataset.hostname); break;
     case 'add-exitnode': openExitNodeModal(null); break;
     case 'exitnode-edit': openExitNodeModal(actionEl.dataset.id); break;
     case 'exitnode-apply': await applyExitNode(actionEl.dataset.id); break;
@@ -559,6 +785,7 @@ async function handleGlobalAction(event) {
       await toggleExitNode(actionEl.dataset.id, actionEl.dataset.name, actionEl.dataset.enabled === 'true');
       break;
     case 'exitnode-delete': await deleteExitNode(actionEl.dataset.id, actionEl.dataset.name); break;
+    case 'exitnode-pool': await toggleExitNodePool(actionEl.dataset.id, actionEl.dataset.enabled === 'true'); break;
     case 'manage-dns': openDNSAutomation(); break;
     case 'domain-sync': await syncDomain(actionEl.dataset.hostname); break;
     case 'dns-provider-delete': await deleteDNSProvider(actionEl.dataset.id, actionEl.dataset.name); break;
@@ -569,6 +796,7 @@ async function handleGlobalAction(event) {
     case 'reload-css': await loadCSSEditor(); break;
     case 'reset-css': await resetBrandCSS(); break;
     case 'geoip-clear': await clearGeoIP(); break;
+    case 'topology-reset': resetTopologyLayout(); break;
     case 'health-refresh': await refreshChecks(); break;
     case 'agent-open': state.drawer = id; renderShell(); break;
     case 'agent-ping': await pingAgent(id); break;
@@ -576,6 +804,7 @@ async function handleGlobalAction(event) {
     case 'agent-copy-install': await copyInstall(id); break;
     case 'agent-copy-config': await copyAgentConfig(id); break;
     case 'agent-edit': openEditAgent(id); break;
+    case 'agent-networks': openAgentNetworks(id); break;
     case 'agent-rotate': await rotateToken(id); break;
     case 'agent-delete': await deleteAgent(id, actionEl.dataset.name); break;
     case 'change-password':
@@ -598,23 +827,41 @@ function renderShell() {
   const { summary, settings, server } = state.data;
   shell.sessionUser.textContent = state.session.username || 'control node';
   shell.sessionRole.textContent = state.session.role
-    ? state.session.role + (state.session.canAdmin ? '' : ' · read only')
+    ? state.session.role
     : server.publicEndpoint;
-  shell.meshRange.textContent = settings.meshCidr + ' · hub ' + hubAddress(settings.meshCidr);
+  shell.meshRange.textContent = summary.meshCidr + ' · hub ' + (server.hubAddress || hubAddress(settings.meshCidr));
 
   // Read-only accounts see the mesh but no controls that would be rejected.
   $$('[data-admin-only]', shell.root).forEach((el) => { el.hidden = !canAdmin(); });
-  if (!canAdmin() && state.view === 'users') state.view = 'overview';
-  if (shell.readonlyNote) shell.readonlyNote.hidden = canAdmin();
+  $$('[data-mesh-manage]', shell.root).forEach((el) => { el.hidden = !canManageMesh(); });
+  if (!canAdmin() && !['overview', 'agents', 'resources', 'domains', 'exitnodes', 'activity'].includes(state.view)) state.view = 'overview';
+  if (!canAdmin() && !['requests', 'errors'].includes(state.logTab)) state.logTab = 'requests';
+  if (shell.readonlyNote) shell.readonlyNote.hidden = true;
 
-  // Only the top level navigation carries data-view; the Logs and Settings tab
-  // rows own their active state and must not be cleared on every re-render.
-  $$('.tab[data-view]', shell.root).forEach((tab) => tab.classList.toggle('is-active', tab.dataset.view === state.view));
+  const appShell = $('[data-app-shell]', shell.root);
+  if (appShell) appShell.classList.toggle('sidebar-open', state.sidebarOpen);
+  const scrim = $('.sidebar-scrim', shell.root);
+  if (scrim) scrim.hidden = !state.sidebarOpen;
+  $$('.sidebar-link[data-view]', shell.root).forEach((tab) => {
+    const active = tab.dataset.view === state.view;
+    tab.classList.toggle('is-active', active);
+    if (tab.classList.contains('has-children')) tab.setAttribute('aria-expanded', String(state.expandedSidebarGroup === tab.dataset.view));
+  });
+  $$('[data-subnav]', shell.root).forEach((nav) => { nav.hidden = nav.dataset.subnav !== state.expandedSidebarGroup; });
+  $$('[data-subnav] [data-tab]', shell.root).forEach((tab) => {
+    const group = tab.closest('[data-subnav]').dataset.subnav;
+    tab.classList.toggle('is-active', tab.dataset.tab === (group === 'activity' ? state.logTab : state.settingsTab));
+  });
+  const currentView = $('[data-current-view]', shell.root);
+  const activeLink = $('.sidebar-link.is-active', shell.root);
+  if (currentView && activeLink) currentView.textContent = activeLink.textContent.trim();
   $$('[data-view-panel]', shell.root).forEach((panel) => {
     const active = panel.dataset.viewPanel === state.view;
     panel.classList.toggle('is-active', active);
     panel.hidden = !active;
   });
+  $$('[data-view-panel="activity"] [data-tab-panel]', shell.root).forEach((panel) => { panel.hidden = panel.dataset.tabPanel !== state.logTab; });
+  $$('[data-view-panel="settings"] [data-tab-panel]', shell.root).forEach((panel) => { panel.hidden = panel.dataset.tabPanel !== state.settingsTab; });
 
   // The server sends empty lists, but never trust that: a missing or null list
   // must not take the whole page down. Delete an agent and the next snapshot is
@@ -630,17 +877,21 @@ function renderShell() {
   renderErrors(shell.errorsTable, shell.errorsSub, state.data.errors || []);
   const requestLog = requestData();
   renderCharts(shell.requestCharts, requestLog.summary);
-  renderRequests(shell.requestTable, requestLog.recent);
-  if (shell.requestsSub) {
-    shell.requestsSub.textContent = requestLog.summary.total === 0
-      ? 'Traffic through your published services'
-      : requestLog.summary.total + ' requests · ' + requestLog.summary.allowed + ' allowed · ' +
-        requestLog.summary.blocked + ' blocked' +
-        (requestLog.summary.avgMs ? ' · ' + requestLog.summary.avgMs + ' ms average inside the control node' : '');
+  const requestsPanel = $('[data-tab-panel="requests"]', shell.root);
+  if (state.view === 'activity' && requestsPanel && !requestsPanel.hidden) {
+    renderRequests(shell.requestTable, state.requestPageData);
   }
+  const clearRequestFiltersButton = $('[data-requests-clear]', shell.root);
+  if (clearRequestFiltersButton) clearRequestFiltersButton.hidden = !hasRequestFilters();
+  renderRequestSubtitle();
   renderServerInfo(shell.serverInfo, server, settings);
   renderUsers(shell.usersTable, shell.usersSub, state.users || []);
-  renderResources(shell.resourcesTable, shell.resourcesSub, state.data.resources || []);
+  if (shell.resourcesEmailFilter) {
+    shell.resourcesEmailFilter.hidden = !canAdmin();
+    if (shell.resourcesEmailFilter.value !== state.resourceFilterEmail) shell.resourcesEmailFilter.value = state.resourceFilterEmail;
+  }
+  renderResources(shell.resourcesTable, shell.resourcesSub,
+    state.resourceFilterEmail ? (state.resourceFilterData?.resources || []) : (state.data.resources || []));
   renderDomains(shell.domainsTable, shell.domainsSub, state.data.domains || []);
   renderExitNodes(shell.exitNodesTable, shell.exitNodesSub, state.data.exitNodes || []);
   renderResourceEditor();
@@ -681,6 +932,7 @@ function describeAgents(summary) {
 /* ---------- modal plumbing ---------- */
 
 let modalSession = null;
+let drawerCloseTimer = null;
 
 function shakeModal(node) {
   if (!node) return;
@@ -695,7 +947,7 @@ function shakeModal(node) {
 // been touched they refuse to discard it; an explicit close/cancel control is
 // still allowed to call closeModal directly.
 function dismissModalPassively() {
-  if (modalSession && modalSession.dirty) {
+  if (modalSession && (modalSession.dirty || modalSession.preventPassiveDismiss)) {
     shakeModal(modalSession.node);
     return false;
   }
@@ -703,8 +955,8 @@ function dismissModalPassively() {
   return true;
 }
 
-function openModal(node, { drawer = false } = {}) {
-  closeModal();
+function openModal(node, { drawer = false, preventPassiveDismiss = false } = {}) {
+  closeModal({ immediate: true });
   const overlay = h('div', { class: 'overlay' + (drawer ? ' drawer-overlay' : '') }, node);
   // Close on click, not mousedown: closing on mousedown removed the modal and
   // then let the same click land on whatever sat behind it (usually the button
@@ -713,7 +965,8 @@ function openModal(node, { drawer = false } = {}) {
     if (event.target !== overlay) {
       // Buttons that add/remove dynamic form rows may not emit input or change.
       const button = event.target.closest && event.target.closest('button');
-      if (button && button.dataset.action !== 'modal-close' && button.type !== 'submit' &&
+      if (button && !button.hasAttribute('data-no-dirty') &&
+          button.dataset.action !== 'modal-close' && button.type !== 'submit' &&
           modalSession && modalSession.node === node) {
         modalSession.dirty = true;
       }
@@ -724,7 +977,7 @@ function openModal(node, { drawer = false } = {}) {
     dismissModalPassively();
   });
   $('#modal-root').append(overlay);
-  modalSession = { node, dirty: false };
+  modalSession = { node, dirty: false, preventPassiveDismiss };
   const markDirty = () => {
     if (modalSession && modalSession.node === node) modalSession.dirty = true;
   };
@@ -735,15 +988,25 @@ function openModal(node, { drawer = false } = {}) {
   return overlay;
 }
 
-function closeModal() {
-  modalSession = null;
+function closeModal({ immediate = false } = {}) {
   const root = $('#modal-root');
-  if (root) root.replaceChildren();
-  // Also clear the drawer state, otherwise dismissing the drawer by clicking
-  // outside leaves stale state that re-opens it and wipes the next modal.
+  const drawerOverlay = state.drawerEl && state.drawerEl.parentElement;
+  modalSession = null;
+  // Clear state at once so live updates cannot reopen a dismissed drawer.
   state.drawer = null;
   state.drawerEl = null;
   state.drawerBody = null;
+  if (drawerCloseTimer) { clearTimeout(drawerCloseTimer); drawerCloseTimer = null; }
+  if (!immediate && root && drawerOverlay && root.firstChild === drawerOverlay) {
+    drawerOverlay.classList.add('is-closing');
+    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    drawerCloseTimer = setTimeout(() => {
+      if (root.firstChild === drawerOverlay) root.replaceChildren();
+      drawerCloseTimer = null;
+    }, reduceMotion ? 0 : 220);
+    return;
+  }
+  if (root) root.replaceChildren();
 }
 
 // openDrawer mounts the agent drawer with its slide-in animation.
@@ -751,24 +1014,28 @@ function openDrawer(agent) {
   const body = h('div', { class: 'stack' }, drawerBody(agent));
   const node = h('div', { class: 'card modal drawer' }, body);
   const overlay = h('div', { class: 'overlay drawer-overlay' }, node);
-  overlay.addEventListener('mousedown', (event) => {
-    if (event.target === overlay) closeModal();
+  overlay.addEventListener('click', (event) => {
+    if (event.target !== overlay || overlay.classList.contains('is-closing')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeModal();
   });
   const root = $('#modal-root');
+  if (drawerCloseTimer) { clearTimeout(drawerCloseTimer); drawerCloseTimer = null; }
   if (root) root.replaceChildren(overlay);
   state.drawerEl = node;
   state.drawerBody = body;
   return node;
 }
 
-function modal(title, subtitle, body, footer) {
+function modal(title, subtitle, body, footer, options = {}) {
   const node = h('div', { class: 'card modal' },
     h('div', { class: 'modal-head' },
       h('div', null, h('h2', { text: title }), subtitle ? h('p', { class: 'muted', text: subtitle }) : null),
       h('button', { class: 'btn btn-icon', type: 'button', 'data-action': 'modal-close', 'aria-label': 'Close' }, '✕')),
     body,
     footer);
-  openModal(node);
+  openModal(node, options);
   return node;
 }
 

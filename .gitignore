@@ -1,15 +1,23 @@
-# Go build cache and scratch directories used by the build/self-test scripts.
+# Go build cache and scratch directories used by build/self-test scripts.
 .gocache/
 .gotmp/
 
-# Build leftovers (a binary that was still running when the build replaced it).
+# Build leftovers.
 *~
 
 # Editor and OS noise.
 .DS_Store
 Thumbs.db
 *.swp
+
+# Local build output.
 noobtunnel.exe
 
-# Operator SSH credentials are local-only and must never enter the repository.
+# Operator SSH credentials — never commit these.
 sshkeys/
+node_modules/
+
+# Local/internal documentation.
+AGENTS.md
+DOCS.md
+docs/

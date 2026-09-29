@@ -1,0 +1,147 @@
+diff --git a/app.js b/app.js
+index bf6522c..8c64bf5 100644
+--- a/app.js
++++ b/app.js
+@@ -10,7 +10,6 @@ const { createRateLimiter } = require("./util/rate-limit");
+ 
+ const {
+     classifyNetwork,
+-    getStoredEnrichment,
+     getStoredPortState,
+     isPublicIp
+ } = require("./util/enrichment");
+@@ -722,6 +721,33 @@ function createApp({
+                 resolution
+             } = target;
+ 
++            const options = {};
++            for (const name of ["ports", "hostname", "registration"]) {
++                const value = String(req.query[name] ?? "yes").toLowerCase();
++                if (value !== "yes" && value !== "no") {
++                    return res.status(400).json({ error: name + " must be yes or no" });
++                }
++                options[name] = value === "yes";
++            }
++
++            // Overlap independent enrichment with the local dataset read.
++            const hostnamePromise = options.hostname
++                ? Promise.resolve(resolver.reverse?.(parsed.address)).catch(() => null)
++                : Promise.resolve(null);
++            const registrationPromise = options.registration
++                ? rdapIpCoalescer.run(
++                    parsed.address,
++                    () => settleWithin(rdapClient.lookupIp(parsed.address), 1200)
++                )
++                : Promise.resolve(null);
++            const abusePromise = abuseIpCoalescer.run(
++                parsed.address,
++                () => settleWithin(abuseClient.lookupIp(parsed.address), 900)
++            );
++            const portsPromise = options.ports
++                ? getStoredPortState(database, parsed, Boolean(config.portScan?.enabled))
++                : Promise.resolve(null);
++
+             const version = await getDataVersion();
+ 
+             const cacheKey =
+@@ -787,7 +813,7 @@ function createApp({
+              *
+              * The scan itself is still performed for authorized requests.
+              */
+-            if (req.enrichmentAuthorized) {
++            if (options.ports && req.enrichmentAuthorized) {
+                 /*
+                  * Do not await it.
+                  *
+@@ -809,40 +835,13 @@ function createApp({
+              * same public IP simultaneously.
+              */
+ 
+-            const securityPromise = getStoredEnrichment(
+-                database,
+-                parsed,
+-                coreData,
+-                Boolean(config.portScan?.enabled)
+-            );
+-
+-            const hostnamePromise = Promise.resolve(
+-                resolver.reverse?.(parsed.address)
+-            ).catch(() => null);
+-
+-            const registrationPromise = rdapIpCoalescer.run(
+-                parsed.address,
+-                () => settleWithin(
+-                    rdapClient.lookupIp(parsed.address),
+-                    1200
+-                )
+-            );
+-
+-            const abusePromise = abuseIpCoalescer.run(
+-                parsed.address,
+-                () => settleWithin(
+-                    abuseClient.lookupIp(parsed.address),
+-                    900
+-                )
+-            );
+-
+             const [
+-                security,
++                ports,
+                 hostname,
+                 registrationResult,
+                 abuse
+             ] = await Promise.all([
+-                securityPromise,
++                portsPromise,
+                 hostnamePromise,
+                 registrationPromise,
+                 abusePromise
+@@ -861,32 +860,34 @@ function createApp({
+ 
+                     resolution,
+ 
+-                    hostname: hostname || null,
++                    ...(options.hostname ? { hostname: hostname || null } : {}),
+ 
+-                    abuse_contact:
+-                        registration?.abuse_contact || null,
++                    ...(options.registration
++                        ? { abuse_contact: registration?.abuse_contact || null }
++                        : {}),
+ 
+                     abuse:
+                         abuse === OPTIONAL_LOOKUP_TIMEOUT
+                             ? null
+                             : abuse,
+ 
+-                    registration: registration
+-                        ? {
+-                            name: registration.name,
+-                            allocated_at: registration.allocated_at,
+-                            updated_at: registration.updated_at
+-                        }
+-                        : null,
++                    ...(options.registration ? {
++                        registration: registration
++                            ? {
++                                name: registration.name,
++                                allocated_at: registration.allocated_at,
++                                updated_at: registration.updated_at
++                            }
++                            : null
++                    } : {}),
+ 
+                     security: {
+-                        ...security,
+-
+                         ...classifyNetwork({
+                             ...coreData,
+                             hostname: hostname || null,
+-                            serviceSignals: security?.ports?.signals
+-                        })
++                            serviceSignals: ports?.signals
++                        }),
++                        ...(options.ports ? { ports } : {})
+                     }
+                 }
+             });

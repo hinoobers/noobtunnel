@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"github.com/noobtunnel/noobtunnel/internal/proto"
 	"net"
 	"sort"
 )
@@ -32,6 +33,14 @@ func advertiseList(opts Options) []string {
 // localNetworks lists the IPv4 subnets of every usable interface.
 func localNetworks(wireGuardInterface string) []string {
 	var out []string
+	for _, candidate := range localNetworkCandidates(wireGuardInterface) {
+		out = append(out, candidate.Prefix)
+	}
+	return out
+}
+
+func localNetworkCandidates(wireGuardInterface string) []proto.NetworkCandidate {
+	var out []proto.NetworkCandidate
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		return out
@@ -60,7 +69,7 @@ func localNetworks(wireGuardInterface string) []string {
 			if bits != 32 || ones == 0 {
 				continue
 			}
-			out = append(out, (&net.IPNet{IP: ip4.Mask(ipNet.Mask), Mask: ipNet.Mask}).String())
+			out = append(out, proto.NetworkCandidate{Interface: iface.Name, Prefix: (&net.IPNet{IP: ip4.Mask(ipNet.Mask), Mask: ipNet.Mask}).String()})
 		}
 	}
 	return out

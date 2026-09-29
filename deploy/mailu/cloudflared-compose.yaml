@@ -1,0 +1,17 @@
+name: mailu-cloudflare
+
+services:
+  connector:
+    image: cloudflare/cloudflared@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    command: tunnel --config /etc/cloudflared/config.yml --no-autoupdate run
+    restart: unless-stopped
+    network_mode: host
+    user: "0:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /srv/mailu/cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
+      - /srv/mailu/cloudflared/config.yml:/etc/cloudflared/config.yml:ro

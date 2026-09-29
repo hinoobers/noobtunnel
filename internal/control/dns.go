@@ -122,7 +122,7 @@ func (s *Server) syncDomains(ctx context.Context) {
 		if address == "" {
 			err := errors.New("no IPv4 address to point the record at")
 			_ = s.store.RecordDomainSync(domain.Hostname, "", err)
-			s.recordError("dns", "no address for "+domain.Hostname, err.Error(),
+			s.recordErrorFor(domain.OwnerID, "dns", "no address for "+domain.Hostname, err.Error(),
 				"set the WireGuard endpoint to an address, or publish the domain on an exit node with one")
 			continue
 		}
@@ -139,14 +139,14 @@ func (s *Server) syncDomains(ctx context.Context) {
 		client, err := factory(provider)
 		if err != nil {
 			_ = s.store.RecordDomainSync(domain.Hostname, address, err)
-			s.recordError("dns", "could not update "+domain.Hostname, err.Error(), "")
+			s.recordErrorFor(domain.OwnerID, "dns", "could not update "+domain.Hostname, err.Error(), "")
 			continue
 		}
 		recordName := domain.RecordName()
 		if err := client.EnsureA(ctx, recordName, address); err != nil {
 			s.log.Warn("could not update DNS", "domain", domain.Hostname, "provider", provider.Name, "error", err)
 			_ = s.store.RecordDomainSync(domain.Hostname, address, err)
-			s.recordError("dns", "could not update "+domain.Hostname, err.Error(),
+			s.recordErrorFor(domain.OwnerID, "dns", "could not update "+domain.Hostname, err.Error(),
 				"check the provider token's DNS edit permission and that the zone is in this account")
 			continue
 		}
@@ -160,7 +160,7 @@ func (s *Server) syncDomains(ctx context.Context) {
 				if err := serviceClient.EnsureSRV(ctx, resource.SRV.RecordName(resource.Domain), resource.Domain,
 					resource.EffectiveListenPort(), resource.SRV.Priority, resource.SRV.Weight); err != nil {
 					_ = s.store.RecordDomainSync(domain.Hostname, address, err)
-					s.recordError("dns", "could not update "+resource.SRV.RecordName(resource.Domain), err.Error(),
+					s.recordErrorFor(resource.OwnerID, "dns", "could not update "+resource.SRV.RecordName(resource.Domain), err.Error(),
 						"check the provider token's DNS edit permission and the SRV values")
 					failed = true
 					break
@@ -323,18 +323,28 @@ func (s *Server) handleDNSProviderItem(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDomainPatch(w http.ResponseWriter, r *http.Request, hostname string) {
 	var body struct {
 		ProviderID *string `json:"providerId"`
+		PublicPool *bool   `json:"publicPool"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return
 	}
-	if body.ProviderID == nil {
-		writeJSON(w, http.StatusBadRequest, errBody("providerId is required"))
+	if body.ProviderID == nil && body.PublicPool == nil {
+		writeJSON(w, http.StatusBadRequest, errBody("choose a DNS provider or public pool setting"))
 		return
 	}
-	if _, err := s.store.SetDomainProvider(hostname, *body.ProviderID); err != nil {
-		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
-		return
+	if body.ProviderID != nil {
+		if _, err := s.store.SetDomainProvider(hostname, *body.ProviderID); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+	}
+	if body.PublicPool != nil {
+		if _, err := s.store.SetDomainPublicPool(hostname, *body.PublicPool); err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+			return
+		}
+		s.reconcileResources()
 	}
 	s.recordEvent("dns", "updated automation for "+hostname)
 	s.syncDomains(r.Context())

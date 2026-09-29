@@ -2,14 +2,17 @@ package control
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
+	"unicode/utf16"
 
 	"github.com/noobtunnel/noobtunnel/internal/install"
 	"github.com/noobtunnel/noobtunnel/internal/store"
@@ -25,7 +28,8 @@ type InstallOptions struct {
 	Interface       string
 	// Docker asks for the command that runs the agent as a container instead of
 	// installing it as a systemd service, which is what --docker does.
-	Docker bool
+	Docker  bool
+	Windows bool
 }
 
 // installOptions derives the enrollment parameters from the request the admin
@@ -49,8 +53,10 @@ func (s *Server) installOptions(r *http.Request) InstallOptions {
 	}
 	// The UI passes ?method=docker when the operator picked the Docker install.
 	docker := false
+	windows := false
 	if r != nil {
 		docker = strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("method")), "docker")
+		windows = strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("method")), "windows")
 	}
 	return InstallOptions{
 		ControlEndpoint: host,
@@ -59,11 +65,27 @@ func (s *Server) installOptions(r *http.Request) InstallOptions {
 		Direct:          settings.DirectPaths,
 		Interface:       settings.Interface,
 		Docker:          docker,
+		Windows:         windows,
 	}
+}
+
+func (s *Server) installOptionsForAgent(r *http.Request, agent *store.Agent) InstallOptions {
+	opts := s.installOptions(r)
+	if agent.InstallMethod != "" {
+		opts.Docker = agent.InstallMethod == "docker"
+		opts.Windows = agent.InstallMethod == "windows"
+	} else if agent.OS == "windows" {
+		opts.Docker = false
+		opts.Windows = true
+	}
+	return opts
 }
 
 // InstallCommand renders the copy and paste command for an agent.
 func (s *Server) InstallCommand(agent *store.Agent, opts InstallOptions) string {
+	if opts.Windows {
+		return windowsInstallCommand(agent, opts)
+	}
 	var b strings.Builder
 	b.WriteString("curl -fsSLk --retry 3")
 	if opts.Pin != "" {
@@ -98,6 +120,56 @@ func (s *Server) InstallCommand(agent *store.Agent, opts InstallOptions) string 
 	return b.String()
 }
 
+func windowsInstallCommand(agent *store.Agent, opts InstallOptions) string {
+	// The PowerShell invocation is UTF-16LE/base64 encoded so an agent name
+	// cannot turn into CMD or PowerShell syntax when this line is pasted.
+	psQuote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+	invocation := "& (Join-Path $env:TEMP 'noobtunnel-install.ps1')" +
+		" -Server " + psQuote(opts.ControlEndpoint) +
+		" -Token " + psQuote(agent.Token) +
+		" -Fingerprint " + psQuote(opts.Fingerprint) +
+		" -Pin " + psQuote(opts.Pin) +
+		" -Name " + psQuote(agent.Name)
+	units := utf16.Encode([]rune(invocation))
+	encoded := make([]byte, len(units)*2)
+	for i, unit := range units {
+		binary.LittleEndian.PutUint16(encoded[i*2:], unit)
+	}
+	url := "https://" + opts.ControlEndpoint + "/install.ps1"
+	return "curl.exe --fail --silent --show-error --location --insecure --pinnedpubkey \"sha256//" + opts.Pin +
+		"\" \"" + url + "\" --output \"%TEMP%\\noobtunnel-install.ps1\" && powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + base64.StdEncoding.EncodeToString(encoded)
+}
+
+// UninstallCommand downloads a pinned script. The script reads the token from
+// this machine, asks the control node to revoke that same agent, then removes it.
+func (s *Server) UninstallCommand(id uint32, opts InstallOptions, method string) string {
+	if method == "windows" {
+		psQuote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "''") + "'" }
+		invocation := "& (Join-Path $env:TEMP 'noobtunnel-install.ps1')" +
+			" -Uninstall -Server " + psQuote(opts.ControlEndpoint) +
+			" -Pin " + psQuote(opts.Pin) +
+			" -AgentId " + strconv.FormatUint(uint64(id), 10)
+		units := utf16.Encode([]rune(invocation))
+		encoded := make([]byte, len(units)*2)
+		for i, unit := range units {
+			binary.LittleEndian.PutUint16(encoded[i*2:], unit)
+		}
+		return "curl.exe --fail --silent --show-error --location --insecure --pinnedpubkey \"sha256//" + opts.Pin +
+			"\" \"https://" + opts.ControlEndpoint + "/install.ps1\" --output \"%TEMP%\\noobtunnel-install.ps1\" && powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand " + base64.StdEncoding.EncodeToString(encoded)
+	}
+	command := "curl -fsSLk --retry 3 --pinnedpubkey " + shellQuote("sha256//"+opts.Pin) +
+		" https://" + opts.ControlEndpoint + "/install.sh | sudo sh -s -- --uninstall --purge" +
+		" --server " + shellQuote(opts.ControlEndpoint) +
+		" --pin " + shellQuote(opts.Pin) +
+		" --remove-remote " + strconv.FormatUint(uint64(id), 10)
+	if method == "docker" {
+		command += " --docker"
+	} else if method == "service" {
+		command += " --service"
+	}
+	return command
+}
+
 // shellQuote wraps a value in single quotes when it contains anything that is
 // not obviously safe.
 func shellQuote(s string) string {
@@ -125,6 +197,12 @@ func (s *Server) handleInstallScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(script)
+}
+
+func (s *Server) handleWindowsInstallScript(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(install.WindowsScript())
 }
 
 func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
@@ -184,33 +262,14 @@ type ManifestEntry struct {
 	URL    string `json:"url"`
 }
 
-var (
-	manifestMu    sync.Mutex
-	manifestCache map[string]string
-)
-
 func (s *Server) writeManifest(w http.ResponseWriter) {
 	binaries := s.AvailableBinaries()
-	manifestMu.Lock()
-	if manifestCache == nil {
-		manifestCache = map[string]string{}
-	}
-	cache := manifestCache
-	manifestMu.Unlock()
-
 	entries := make([]ManifestEntry, 0, len(binaries))
 	for _, b := range binaries {
 		path := filepath.Join(s.opts.BinaryDir, b.Name)
-		sum := cache[path]
-		if sum == "" {
-			computed, err := fileSHA256(path)
-			if err != nil {
-				continue
-			}
-			sum = computed
-			manifestMu.Lock()
-			manifestCache[path] = sum
-			manifestMu.Unlock()
+		sum, err := fileSHA256(path)
+		if err != nil {
+			continue
 		}
 		entries = append(entries, ManifestEntry{
 			Name: b.Name, OS: b.OS, Arch: b.Arch, Size: b.Size,

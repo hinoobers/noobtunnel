@@ -247,12 +247,23 @@ func buildDNSProvider(in DNSProviderInput) (DNSProvider, error) {
 
 // GeoIPConfig holds the IP API country lookups use.
 type GeoIPConfig struct {
-	// Host is the API's hostname, for example iplog.example.com. The country
-	// lookup is GET https://<host>/checkip?ip=<address>.
+	// Provider is "ipapi" for the public service; empty means the existing
+	// self-hosted /checkip endpoint.
+	Provider string `json:"provider,omitempty"`
+	// Host is an API hostname or URL. A bare hostname uses HTTPS; an explicit
+	// http:// URL can reach an API over the private mesh.
 	Host string `json:"host,omitempty"`
+	// AgentID identifies the agent that can reach this address. Zero keeps the
+	// control node's existing direct connection behavior.
+	AgentID uint32 `json:"agentId,omitempty"`
 	// Token is a secret: it lives in the state file (0600) and is never returned
 	// by the API.
 	Token string `json:"token,omitempty"`
+	// PublicToken is the ipapi.is key. The other fields keep the iplog
+	// connection available as a fallback while the public provider is selected.
+	PublicToken string `json:"publicToken,omitempty"`
+	// FallbackEnabled allows saved iplog settings to answer public API failures.
+	FallbackEnabled bool `json:"fallbackEnabled,omitempty"`
 }
 
 // GeoIP returns the stored IP API settings.
@@ -266,8 +277,12 @@ func (s *Store) GeoIP() GeoIPConfig {
 func (s *Store) SetGeoIP(cfg GeoIPConfig) error {
 	return s.Update(func(st *State) error {
 		st.GeoIP = GeoIPConfig{
-			Host:  strings.TrimSpace(cfg.Host),
-			Token: strings.TrimSpace(cfg.Token),
+			Provider:        cfg.Provider,
+			Host:            strings.TrimSpace(cfg.Host),
+			AgentID:         cfg.AgentID,
+			Token:           strings.TrimSpace(cfg.Token),
+			PublicToken:     strings.TrimSpace(cfg.PublicToken),
+			FallbackEnabled: cfg.FallbackEnabled,
 		}
 		return nil
 	})

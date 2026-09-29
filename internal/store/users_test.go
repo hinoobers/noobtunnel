@@ -177,15 +177,11 @@ func TestAPITokenRoles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	viewerToken, _, err := auth.AddAPITokenWithRole("readonly", RoleViewer)
-	if err != nil {
-		t.Fatal(err)
+	if _, _, err := auth.AddAPITokenWithRole("readonly", RoleRegular); err == nil {
+		t.Fatal("a token without an account identity cannot have regular-user permissions")
 	}
 	if role, ok := auth.VerifyAPIToken(adminToken); !ok || role != RoleAdmin {
 		t.Fatalf("admin token resolved to %v %v", role, ok)
-	}
-	if role, ok := auth.VerifyAPIToken(viewerToken); !ok || role != RoleViewer {
-		t.Fatalf("viewer token resolved to %v %v", role, ok)
 	}
 	if _, ok := auth.VerifyAPIToken("ntapi_nope"); ok {
 		t.Fatal("a bogus token must not verify")

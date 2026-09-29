@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
@@ -16,22 +17,29 @@ type Role string
 const (
 	// RoleAdmin can change the mesh, enroll and revoke agents, and manage users.
 	RoleAdmin Role = "admin"
-	// RoleViewer can see everything but change nothing.
-	RoleViewer Role = "viewer"
+	// RoleRegular manages resources and agents in its own private mesh.
+	RoleRegular Role = "regular"
+	// Older callers used these names for the regular role.
+	RoleViewer Role = RoleRegular
+	RoleOwner  Role = RoleRegular
 )
 
 // ValidRole reports whether r is a known role.
-func ValidRole(r Role) bool { return r == RoleAdmin || r == RoleViewer }
+func ValidRole(r Role) bool { return r == RoleAdmin || r == RoleRegular }
 
 // User is a control node account.
 type User struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	PasswordHash string     `json:"passwordHash,omitempty"`
-	Role         Role       `json:"role"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	LastLogin    *time.Time `json:"lastLogin,omitempty"`
-	Disabled     bool       `json:"disabled,omitempty"`
+	ID             string     `json:"id"`
+	Username       string     `json:"username"`
+	Email          string     `json:"email,omitempty"`
+	EmailVerified  bool       `json:"emailVerified,omitempty"`
+	SessionVersion uint64     `json:"sessionVersion,omitempty"`
+	MeshSlot       uint16     `json:"meshSlot,omitempty"`
+	PasswordHash   string     `json:"passwordHash,omitempty"`
+	Role           Role       `json:"role"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	LastLogin      *time.Time `json:"lastLogin,omitempty"`
+	Disabled       bool       `json:"disabled,omitempty"`
 }
 
 // CanAdmin reports whether the account may perform changes.
@@ -45,7 +53,11 @@ var (
 	// ErrUserDisabled means the account exists but is switched off.
 	ErrUserDisabled = errors.New("store: that account is disabled")
 	// ErrBadUsername means the username is not acceptable.
-	ErrBadUsername = errors.New("store: usernames must be 3-32 characters of letters, digits, dot, dash or underscore")
+	ErrBadUsername     = errors.New("store: usernames must be 3-32 characters of letters, digits, dot, dash or underscore")
+	ErrBadEmail        = errors.New("store: enter a valid email address")
+	ErrEmailExists     = errors.New("store: that email address is already linked to a user")
+	ErrEmailUnverified = errors.New("store: confirm your email address before signing in")
+	ErrUserLimit       = errors.New("store: maximum number of regular users reached")
 )
 
 // HasUsers reports whether any account exists yet.
@@ -107,7 +119,7 @@ func (a *Auth) findLocked(id string) (User, bool) {
 
 func (a *Auth) findByUsernameLocked(username string) (User, bool) {
 	for _, u := range a.st.Users {
-		if strings.EqualFold(u.Username, username) {
+		if strings.EqualFold(u.Username, username) || (u.Email != "" && strings.EqualFold(u.Email, username)) {
 			return u, true
 		}
 	}
@@ -131,6 +143,9 @@ func (a *Auth) Authenticate(username, password string) (User, error) {
 	if user.Disabled {
 		return User{}, ErrUserDisabled
 	}
+	if user.Email != "" && !user.EmailVerified {
+		return User{}, ErrEmailUnverified
+	}
 	user.PasswordHash = ""
 	return user, nil
 }
@@ -146,8 +161,17 @@ var dummyHash = func() string {
 
 // AddUser creates an account.
 func (a *Auth) AddUser(username, password string, role Role) (User, error) {
+	return a.AddUserWithEmail(username, "", password, role)
+}
+
+// AddUserWithEmail creates an account with an optional linked email address.
+func (a *Auth) AddUserWithEmail(username, email, password string, role Role) (User, error) {
 	username = strings.TrimSpace(username)
+	email = strings.ToLower(strings.TrimSpace(email))
 	if err := validateUsername(username); err != nil {
+		return User{}, err
+	}
+	if err := validateEmail(email); err != nil {
 		return User{}, err
 	}
 	if !ValidRole(role) {
@@ -165,16 +189,44 @@ func (a *Auth) AddUser(username, password string, role Role) (User, error) {
 		return User{}, err
 	}
 	user := User{
-		ID:           id,
-		Username:     username,
-		PasswordHash: hash,
-		Role:         role,
-		CreatedAt:    time.Now().UTC(),
+		ID:            id,
+		Username:      username,
+		Email:         email,
+		EmailVerified: email == "",
+		PasswordHash:  hash,
+		Role:          role,
+		CreatedAt:     time.Now().UTC(),
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, exists := a.findByUsernameLocked(username); exists {
 		return User{}, ErrUserExists
+	}
+	if email != "" {
+		if _, exists := a.findByUsernameLocked(email); exists {
+			return User{}, ErrEmailExists
+		}
+	}
+	if role == RoleRegular && a.regularUserCountLocked() >= a.signupMaxUsersLocked() {
+		return User{}, ErrUserLimit
+	}
+	if len(a.st.Users) > 0 {
+		used := make(map[uint16]bool, len(a.st.Users))
+		for _, existing := range a.st.Users {
+			used[existing.MeshSlot] = true
+		}
+		for slot := uint16(1); slot <= 255; slot++ {
+			if !used[slot] {
+				user.MeshSlot = slot
+				break
+			}
+		}
+		if user.MeshSlot == 0 {
+			return User{}, errors.New("store: no private mesh slots available")
+		}
+		if user.MeshSlot >= a.st.NextMeshSlot {
+			a.st.NextMeshSlot = user.MeshSlot + 1
+		}
 	}
 	a.st.Users = append(a.st.Users, user)
 	if err := a.saveLocked(); err != nil {
@@ -214,6 +266,15 @@ func (a *Auth) UpdateUser(id string, mutate func(*User) error) (User, error) {
 	if !ValidRole(candidate.Role) {
 		return User{}, fmt.Errorf("store: unknown role %q", candidate.Role)
 	}
+	candidate.Email = strings.ToLower(strings.TrimSpace(candidate.Email))
+	if err := validateEmail(candidate.Email); err != nil {
+		return User{}, err
+	}
+	if candidate.Email != "" {
+		if other, exists := a.findByUsernameLocked(candidate.Email); exists && other.ID != id {
+			return User{}, ErrEmailExists
+		}
+	}
 	losingAdmin := original.CanAdmin() && !(candidate.Role == RoleAdmin && !candidate.Disabled)
 	if losingAdmin && a.adminCountLocked() <= 1 {
 		return User{}, ErrLastAdmin
@@ -238,6 +299,13 @@ func (a *Auth) RemoveUser(id string) error {
 			return ErrLastAdmin
 		}
 		a.st.Users = append(a.st.Users[:i], a.st.Users[i+1:]...)
+		remaining := a.st.EmailTokens[:0]
+		for _, token := range a.st.EmailTokens {
+			if token.UserID != id {
+				remaining = append(remaining, token)
+			}
+		}
+		a.st.EmailTokens = remaining
 		return a.saveLocked()
 	}
 	return ErrNotFound
@@ -254,6 +322,7 @@ func (a *Auth) SetUserPassword(id, password string) error {
 	}
 	_, err = a.UpdateUser(id, func(u *User) error {
 		u.PasswordHash = hash
+		u.SessionVersion++
 		return nil
 	})
 	return err
@@ -340,6 +409,72 @@ func (a *Auth) migrateLegacyPassword() error {
 	return a.saveLocked()
 }
 
+// migrateMeshSlots keeps the original admin on the live mesh and gives every
+// pre-existing secondary account a separate address range.
+func (a *Auth) migrateRoles() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	changed := false
+	for i := range a.st.Users {
+		if a.st.Users[i].Role == "viewer" || a.st.Users[i].Role == "owner" {
+			a.st.Users[i].Role = RoleRegular
+			changed = true
+		}
+	}
+	if changed {
+		return a.saveLocked()
+	}
+	return nil
+}
+
+func (a *Auth) migrateMeshSlots() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.st.Users) < 2 {
+		return nil
+	}
+	root := 0
+	for i, user := range a.st.Users {
+		if user.Username == "admin" && user.Role == RoleAdmin {
+			root = i
+			break
+		}
+	}
+	used := map[uint16]bool{0: true}
+	for i, user := range a.st.Users {
+		if i != root && user.MeshSlot > 0 {
+			used[user.MeshSlot] = true
+		}
+	}
+	changed := false
+	for i := range a.st.Users {
+		if i == root || a.st.Users[i].MeshSlot > 0 {
+			continue
+		}
+		for slot := uint16(1); slot <= 255; slot++ {
+			if !used[slot] {
+				a.st.Users[i].MeshSlot = slot
+				used[slot] = true
+				changed = true
+				break
+			}
+		}
+		if a.st.Users[i].MeshSlot == 0 {
+			return errors.New("store: no private mesh slots available")
+		}
+	}
+	for _, user := range a.st.Users {
+		if user.MeshSlot >= a.st.NextMeshSlot {
+			a.st.NextMeshSlot = user.MeshSlot + 1
+			changed = true
+		}
+	}
+	if changed {
+		return a.saveLocked()
+	}
+	return nil
+}
+
 func validateUsername(username string) error {
 	if len(username) < 3 || len(username) > 32 {
 		return ErrBadUsername
@@ -353,6 +488,28 @@ func validateUsername(username string) error {
 		}
 	}
 	return nil
+}
+
+func validateEmail(email string) error {
+	if email == "" {
+		return nil
+	}
+	if len(email) > 254 || strings.ContainsAny(email, "\r\n\t ") {
+		return ErrBadEmail
+	}
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email || !strings.Contains(strings.SplitN(email, "@", 2)[1], ".") {
+		return ErrBadEmail
+	}
+	return nil
+}
+
+// ValidateEmailForSMTP checks addresses used as message recipients.
+func ValidateEmailForSMTP(email string) error {
+	if strings.TrimSpace(email) == "" {
+		return ErrBadEmail
+	}
+	return validateEmail(email)
 }
 
 func randomToken(bytes int) (string, error) {

@@ -13,7 +13,7 @@ import (
 // TestConflictingAdvertisementsDoNotBreakAPublishedTarget is the model in one
 // test: two machines both have 172.18.0.0/16, one of them ends up advertising it
 // mesh-wide, and a target published through the other one still works, because
-// the address is pinned to the machine the resource names.
+// the selected agent dials the target through its mesh-side forward.
 //
 // The mesh-wide claim that lost is still reported, so the operator knows the
 // range itself is not shared - but the published service is not collateral.
@@ -80,10 +80,9 @@ func setAdvertise(t *testing.T, h *harness, id uint32, prefixes ...string) {
 	}
 }
 
-// TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget is the regression guard
+// TestDiagnoseDoesNotBlameTheRangeAroundASelectedTarget is the regression guard
 // for the case that sent an operator hunting through captures: the range around a
-// target belongs to another agent, and the target itself is fine because it is
-// pinned to its own machine. The diagnosis must not report it as a routing
+// target belongs to another agent, and the selected agent still dials the target. The diagnosis must not report it as a routing
 // problem.
 func TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget(t *testing.T) {
 	h := newHarness(t, true)
@@ -140,7 +139,7 @@ func TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget(t *testing.T) {
 		}
 		sawRouting = true
 		if step.Status != "ok" {
-			t.Fatalf("the target is pinned to its own agent, so the range around it is not a routing problem: %+v", step)
+			t.Fatalf("the selected agent carries the target, so the range around it is not a routing problem: %+v", step)
 		}
 		if !strings.Contains(step.Detail, "cassandra") {
 			t.Fatalf("the step should say which machine carries the address: %+v", step)
@@ -149,10 +148,8 @@ func TestDiagnoseDoesNotBlameTheRangeAroundAPinnedTarget(t *testing.T) {
 	if !sawRouting {
 		t.Fatalf("the diagnosis should say where the address is delivered: %+v", result.Steps)
 	}
-	// The address is delivered to the agent the resource names, whatever the
-	// range around it resolves to.
-	pinned := h.server.Store().PinnedHosts(cassandra.id)
-	if len(pinned) != 1 || pinned[0].String() != "172.18.0.3/32" {
-		t.Fatalf("the target should be pinned to cassandra, got %v", pinned)
+	forwards := h.server.Forwards(cassandra.id)
+	if len(forwards) != 1 || forwards[0].Target != "172.18.0.3:4700" {
+		t.Fatalf("the selected agent should carry the target, got %+v", forwards)
 	}
 }

@@ -26,7 +26,8 @@ type RequestEvent struct {
 	Target string `json:"target,omitempty"`
 	// DurationMs is how long the request took inside the control node: the
 	// dial through the tunnel, the service's answer and the copy back. It is the
-	// number to look at when a published service feels slow.
+	// number to look at when a published service feels slow. For raw TCP, UDP
+	// and TLS passthrough it measures setup, before the long-lived session.
 	DurationMs int64 `json:"durationMs,omitempty"`
 	// DialMs is how long connecting to the backend took. Comparing it with
 	// DurationMs is what separates a slow tunnel from a slow service: a fresh
@@ -60,4 +61,9 @@ func (m *Manager) observe(event RequestEvent) {
 	}
 	event.IPText = event.IP.String()
 	m.OnRequest(event)
+}
+
+// elapsedMilliseconds rounds measured durations up so sub-millisecond work is visible.
+func elapsedMilliseconds(started time.Time) int64 {
+	return max(1, int64((time.Since(started)+time.Millisecond-1)/time.Millisecond))
 }

@@ -35,11 +35,15 @@ type principal struct {
 	UserID   string
 	Username string
 	Role     store.Role
+	MeshSlot uint16
 	// ViaToken marks requests authenticated with a bearer token.
 	ViaToken bool
 }
 
 func (p principal) canAdmin() bool { return p.Role == store.RoleAdmin }
+func (p principal) canManageMesh() bool {
+	return p.Role == store.RoleAdmin || p.Role == store.RoleOwner
+}
 
 type principalKey struct{}
 
@@ -58,14 +62,24 @@ func (s *Server) Handler() http.Handler {
 	// new machine, so these must work unauthenticated.
 	mux.HandleFunc(proto.AgentPath, s.handleAgentConnect)
 	mux.HandleFunc("/install.sh", s.handleInstallScript)
+	mux.HandleFunc("/install.ps1", s.handleWindowsInstallScript)
 	mux.HandleFunc("/cert.pem", s.handleCert)
 	mux.HandleFunc("/download/", s.handleDownload)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/agent-uninstall/", s.handleAgentUninstall)
 	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/email/confirm", s.handleEmailConfirm)
+	mux.HandleFunc("/api/password/forgot", s.handlePasswordForgot)
+	mux.HandleFunc("/api/password/reset", s.handlePasswordReset)
+	mux.HandleFunc("/api/signup", s.handleSignup)
+	mux.HandleFunc("/api/signup/status", s.handleSignupStatus)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/session", s.handleSession)
 
-	mux.Handle("/assets/", http.FileServer(http.FS(web.Assets())))
+	mux.Handle("/assets/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		http.FileServer(http.FS(web.Assets())).ServeHTTP(w, r)
+	}))
 	mux.HandleFunc("/favicon.svg", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		_, _ = io.WriteString(w, web.Favicon())
@@ -87,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("/api/log", s.handleEventLog)
 	authed.HandleFunc("/api/users", s.handleUsers)
 	authed.HandleFunc("/api/users/", s.handleUserItem)
+	authed.HandleFunc("/api/signup/settings", s.handleSignupSettings)
+	authed.HandleFunc("/api/smtp", s.handleSMTP)
 	authed.HandleFunc("/api/resources", s.handleResources)
 	authed.HandleFunc("/api/resources/", s.handleResourceItem)
 	authed.HandleFunc("/api/domains", s.handleDomains)
@@ -167,11 +183,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write(page)
 }
 
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.StateSnapshot())
+	writeJSON(w, http.StatusOK, s.StateSnapshotFor(principalFrom(r)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -198,8 +215,8 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		if who.Role == "" {
 			if cookie, err := r.Cookie(sessionCookie); err == nil {
 				if userID, ok := s.validSession(cookie.Value); ok {
-					if user, err := s.auth.UserByID(userID); err == nil && !user.Disabled {
-						who = principal{UserID: user.ID, Username: user.Username, Role: user.Role}
+					if user, err := s.auth.UserByID(userID); err == nil && !user.Disabled && (user.Email == "" || user.EmailVerified) {
+						who = principal{UserID: user.ID, Username: user.Username, Role: user.Role, MeshSlot: user.MeshSlot}
 					}
 				}
 			}
@@ -208,10 +225,19 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusUnauthorized, errBody("authentication required"))
 			return
 		}
+		if !who.canAdmin() {
+			path := r.URL.Path
+			allowed := path == "/api/state" || path == "/api/events" || path == "/api/agents" || strings.HasPrefix(path, "/api/agents/") || path == "/api/resources" || strings.HasPrefix(path, "/api/resources/") || path == "/api/domains" || strings.HasPrefix(path, "/api/domains/") || path == "/api/exitnodes" || strings.HasPrefix(path, "/api/exitnodes/") || path == "/api/requests" || path == "/api/errors" || path == "/api/password" || path == "/api/logout"
+			if !allowed {
+				writeJSON(w, http.StatusForbidden, errBody("this account cannot access global settings"))
+				return
+			}
+		}
 		mutating := r.Method != http.MethodGet && r.Method != http.MethodHead
 		// Everyone may change their own password; everything else that changes
 		// state needs an admin.
-		if mutating && r.URL.Path != "/api/password" && r.URL.Path != "/api/logout" && !who.canAdmin() {
+		meshChange := who.canManageMesh() && (r.URL.Path == "/api/agents" || strings.HasPrefix(r.URL.Path, "/api/agents/") || r.URL.Path == "/api/resources" || strings.HasPrefix(r.URL.Path, "/api/resources/") || r.URL.Path == "/api/domains" || strings.HasPrefix(r.URL.Path, "/api/domains/"))
+		if mutating && r.URL.Path != "/api/password" && r.URL.Path != "/api/logout" && !who.canAdmin() && !meshChange {
 			writeJSON(w, http.StatusForbidden, errBody("this account is read-only"))
 			return
 		}
@@ -226,7 +252,11 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 }
 
 func (s *Server) signSession(userID string, expiry time.Time) string {
-	payload := userID + "|" + strconv.FormatInt(expiry.Unix(), 10)
+	version := uint64(0)
+	if user, err := s.auth.UserByID(userID); err == nil {
+		version = user.SessionVersion
+	}
+	payload := userID + "|" + strconv.FormatInt(expiry.Unix(), 10) + "|" + strconv.FormatUint(version, 10)
 	mac := hmac.New(sha256.New, s.auth.SessionKey())
 	mac.Write([]byte(payload))
 	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." +
@@ -253,11 +283,22 @@ func (s *Server) validSession(value string) (string, bool) {
 		return "", false
 	}
 	fields := strings.Split(string(payload), "|")
-	if len(fields) != 2 {
+	if len(fields) != 2 && len(fields) != 3 {
 		return "", false
 	}
 	expiry, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil || !s.now().Before(time.Unix(expiry, 0)) {
+		return "", false
+	}
+	version := uint64(0)
+	if len(fields) == 3 {
+		version, err = strconv.ParseUint(fields[2], 10, 64)
+		if err != nil {
+			return "", false
+		}
+	}
+	user, err := s.auth.UserByID(fields[0])
+	if err != nil || user.SessionVersion != version {
 		return "", false
 	}
 	return fields[0], true
@@ -276,7 +317,7 @@ func (s *Server) resourceIdentitySession(r *http.Request) (string, bool) {
 		return "", false
 	}
 	user, err := s.auth.UserByID(userID)
-	if err != nil || user.Disabled {
+	if err != nil || user.Disabled || (user.Email != "" && !user.EmailVerified) {
 		return "", false
 	}
 	return user.Username, true
@@ -306,14 +347,15 @@ func (s *Server) resourceIdentityLogin(w http.ResponseWriter, r *http.Request, u
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
 	s.auth.MarkLogin(user.ID)
-	s.recordEvent("login", user.Username+" signed in to "+r.Host+" from "+ip)
+	s.recordEventFor(user.ID, "login", user.Username+" signed in to "+r.Host+" from "+ip)
 	return user.Username, nil
 }
 
 // loginLimiter throttles password guessing.
 type loginLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
+	mu        sync.Mutex
+	attempts  map[string][]time.Time
+	lastSweep time.Time
 }
 
 var limiter = &loginLimiter{attempts: map[string][]time.Time{}}
@@ -322,13 +364,33 @@ func (l *loginLimiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	window := now.Add(-5 * time.Minute)
+	if l.lastSweep.IsZero() || now.Before(l.lastSweep) || now.Sub(l.lastSweep) >= time.Minute {
+		for ip, attempts := range l.attempts {
+			kept := attempts[:0]
+			for _, attempt := range attempts {
+				if attempt.After(window) {
+					kept = append(kept, attempt)
+				}
+			}
+			if len(kept) == 0 {
+				delete(l.attempts, ip)
+			} else {
+				l.attempts[ip] = kept
+			}
+		}
+		l.lastSweep = now
+	}
 	var kept []time.Time
 	for _, t := range l.attempts[key] {
 		if t.After(window) {
 			kept = append(kept, t)
 		}
 	}
-	l.attempts[key] = kept
+	if len(kept) == 0 {
+		delete(l.attempts, key)
+	} else {
+		l.attempts[key] = kept
+	}
 	return len(kept) < 10
 }
 
@@ -383,7 +445,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 	s.auth.MarkLogin(user.ID)
-	s.recordEvent("login", user.Username+" signed in from "+ip)
+	s.recordEventFor(user.ID, "login", user.Username+" signed in from "+ip)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "expires": expiry.UTC(), "username": user.Username, "role": user.Role,
 	})
@@ -401,8 +463,8 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	who := principal{}
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		if userID, ok := s.validSession(cookie.Value); ok {
-			if user, err := s.auth.UserByID(userID); err == nil && !user.Disabled {
-				who = principal{UserID: user.ID, Username: user.Username, Role: user.Role}
+			if user, err := s.auth.UserByID(userID); err == nil && !user.Disabled && (user.Email == "" || user.EmailVerified) {
+				who = principal{UserID: user.ID, Username: user.Username, Role: user.Role, MeshSlot: user.MeshSlot}
 			}
 		}
 	}
@@ -460,7 +522,7 @@ func (s *Server) handlePassword(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: s.signSession(user.ID, s.now().Add(12*time.Hour)),
 		Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
-	s.recordEvent("security", user.Username+" changed their password")
+	s.recordEventFor(user.ID, "security", user.Username+" changed their password")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -474,9 +536,12 @@ func (s *Server) handleAPITokens(w http.ResponseWriter, r *http.Request) {
 			Role store.Role `json:"role"`
 		}
 		_ = decodeJSON(r, &body)
+		if body.Role == "" {
+			body.Role = store.RoleAdmin
+		}
 		token, meta, err := s.auth.AddAPITokenWithRole(body.Name, body.Role)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, errBody(err.Error()))
+			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.recordEvent("security", "API token created: "+meta.ID)

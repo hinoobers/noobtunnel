@@ -1,0 +1,260 @@
+diff --git a/app.js b/app.js
+index b6abf18..c071376 100644
+--- a/app.js
++++ b/app.js
+@@ -18,6 +18,7 @@ const { createTargetResolver } = require("./util/resolve-target");
+ const { createRdapClient } = require("./util/rdap");
+ const { createRoutingRoleClient } = require("./util/routing-role");
+ const { createAbuseIpDbClient } = require("./util/abuseipdb");
++const { createLookupTimings, errorDetails } = require("./util/lookup-timings");
+ 
+ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+ const API_KEY_PATTERN = /^ipl_[A-Za-z0-9_-]{43}$/;
+@@ -241,6 +242,7 @@ function createApp({
+     })
+ }) {
+     const app = express();
++    const lookupTimings = createLookupTimings(path.join(__dirname, "logs", "ipapi"));
+ 
+     const resolver = targetResolver || createTargetResolver({
+         ttlMs: (config.dnsCacheSeconds || 300) * 1000,
+@@ -531,14 +533,26 @@ function createApp({
+                 return dataVersion.value;
+             }
+ 
+-            const [rows] = await database.query(`
+-                SELECT CONCAT(
+-                    COALESCE(UNIX_TIMESTAMP(MAX(imported_at)), 0),
+-                    '-',
+-                    COALESCE(SUM(generation), 0)
+-                ) AS version
+-                FROM data_snapshots
+-            `);
++            const versionStarted = Date.now();
++            const hadVersion = dataVersion.checkedAt > 0;
++            let rows;
++            try {
++                [rows] = await database.query(`
++                    SELECT CONCAT(
++                        COALESCE(UNIX_TIMESTAMP(MAX(imported_at)), 0),
++                        '-',
++                        COALESCE(SUM(generation), 0)
++                    ) AS version
++                    FROM data_snapshots
++                `);
++            } catch (error) {
++                lookupTimings.write({
++                    kind: "datasetVersionRefresh", at: new Date().toISOString(),
++                    durationMs: Date.now() - versionStarted, hadVersion,
++                    outcome: "error", error: errorDetails(error)
++                });
++                throw error;
++            }
+ 
+             const value = String(rows[0]?.version ?? "0");
+ 
+@@ -546,6 +560,11 @@ function createApp({
+                 value,
+                 checkedAt: Date.now()
+             };
++            lookupTimings.write({
++                kind: "datasetVersionRefresh", at: new Date().toISOString(),
++                durationMs: Date.now() - versionStarted, hadVersion,
++                outcome: "ok", version: value
++            });
+ 
+             return value;
+         });
+@@ -715,14 +734,18 @@ function createApp({
+ 
+     app.get(
+         "/checkip",
++        lookupTimings.middleware,
+         optionalIdentity,
+         lookupLimit,
+         asyncRoute(async (req, res) => {
++            const trace = req.lookupTiming;
++            trace.record.preHandlerMs = trace.elapsed();
+             let target;
+ 
+             try {
+-                target = await resolver.resolve(req.query.ip);
++                target = await trace.time("targetResolve", () => resolver.resolve(req.query.ip));
+             } catch (error) {
++                trace.record.error = errorDetails(error);
+                 return res.status(400).json({
+                     error: error.message
+                 });
+@@ -733,34 +756,54 @@ function createApp({
+                 resolution
+             } = target;
+ 
++            trace.record.targetIp = parsed.address;
++            trace.record.family = parsed.family;
++            trace.record.resolution = resolution || null;
+             const options = {};
+             for (const name of ["ports", "hostname", "registration"]) {
+                 const value = String(req.query[name] ?? "yes").toLowerCase();
+                 if (value !== "yes" && value !== "no") {
+-                    return res.status(400).json({ error: name + " must be yes or no" });
++                    trace.record.validationError = name + " must be yes or no";
++                    return res.status(400).json({ error: trace.record.validationError });
+                 }
+                 options[name] = value === "yes";
+             }
+ 
++            trace.record.options = options;
++
+             // Overlap independent enrichment with the local dataset read.
+             const hostnamePromise = options.hostname
+-                ? Promise.resolve(resolver.reverse?.(parsed.address)).catch(() => null)
++                ? trace.time("hostname", () => Promise.resolve(resolver.reverse?.(parsed.address)).catch((error) => {
++                    trace.record.hostnameError = errorDetails(error);
++                    return null;
++                }))
+                 : Promise.resolve(null);
+             const registrationPromise = options.registration
+-                ? rdapIpCoalescer.run(
++                ? trace.time("registration", () => rdapIpCoalescer.run(
+                     parsed.address,
+-                    () => settleWithin(rdapClient.lookupIp(parsed.address), 1200)
+-                )
++                    () => settleWithin(rdapClient.lookupIp(parsed.address).catch((error) => {
++                        trace.record.registrationError = errorDetails(error);
++                        throw error;
++                    }), 1200)
++                ))
+                 : Promise.resolve(null);
+-            const abusePromise = abuseIpCoalescer.run(
++            const abusePromise = trace.time("abuse", () => abuseIpCoalescer.run(
+                 parsed.address,
+-                () => settleWithin(abuseClient.lookupIp(parsed.address), 900)
+-            );
++                () => settleWithin(abuseClient.lookupIp(parsed.address, (detail) => {
++                    trace.record.abuseProvider = detail;
++                }).catch((error) => {
++                    trace.record.abuseError = errorDetails(error);
++                    throw error;
++                }), 900)
++            ));
+             const portsPromise = options.ports
+-                ? getStoredPortState(database, parsed, Boolean(config.portScan?.enabled))
++                ? trace.time("storedPorts", () => getStoredPortState(database, parsed, Boolean(config.portScan?.enabled)))
+                 : Promise.resolve(null);
+ 
+-            const version = await getDataVersion();
++            trace.record.versionMode = dataVersion.checkedAt === 0 ? "initial"
++                : dataVersion.checkedAt > Date.now() - 60_000 ? "cached" : "backgroundRefresh";
++            const version = await trace.time("datasetVersion", () => getDataVersion());
++            trace.record.version = version;
+ 
+             const cacheKey =
+                 `${version}:${parsed.family}:${parsed.buffer.toString("hex")}`;
+@@ -770,9 +813,11 @@ function createApp({
+              *
+              * This is still the cheapest path.
+              */
+-            let coreData = await cache.get(cacheKey);
++            let coreData = await trace.time("cacheRead", () => cache.get(cacheKey));
+ 
+             const cacheStatus = coreData ? "hit" : "miss";
++            trace.record.cache = cacheStatus;
++            trace.record.coreMode = coreData ? "cache" : "coalesced";
+ 
+             /*
+              * Cache miss:
+@@ -783,38 +828,42 @@ function createApp({
+              * happens.
+              */
+             if (!coreData) {
+-                coreData = await ipLookupCoalescer.run(
++                trace.record.pendingCoreLookups = ipLookupCoalescer.size();
++                coreData = await trace.time("coreLookup", () => ipLookupCoalescer.run(
+                     cacheKey,
+                     async () => {
++                        trace.record.coreMode = "database";
+                         /*
+                          * Re-check cache because another request may have
+                          * populated it while this request was waiting.
+                          */
+-                        const cachedAgain = await cache.get(cacheKey);
++                        const cachedAgain = await trace.time("cacheRecheck", () => cache.get(cacheKey));
+ 
+                         if (cachedAgain) {
++                            trace.record.coreMode = "cacheAfterJoin";
+                             return cachedAgain;
+                         }
+ 
+-                        const data = await lookupIp(
++                        const data = await trace.time("databaseLookup", () => lookupIp(
+                             database,
+-                            parsed
+-                        );
++                            parsed,
++                            (query) => { (trace.record.databaseQueries ||= []).push(query); }
++                        ));
+ 
+                         if (data) {
+                             /*
+                              * Do not make the response wait unnecessarily
+                              * longer than needed for cache persistence.
+                              */
+-                            await cache.set(
++                            await trace.time("cacheWrite", () => cache.set(
+                                 cacheKey,
+                                 data
+-                            );
++                            ));
+                         }
+ 
+                         return data;
+                     }
+-                );
++                ));
+             }
+ 
+             /*
+@@ -837,6 +886,7 @@ function createApp({
+                  *   - has a hard timeout
+                  *   - catches failures
+                  */
++                trace.record.portScanQueued = true;
+                 requestPortScan(parsed).catch(() => {});
+             }
+ 
+@@ -852,12 +902,25 @@ function createApp({
+                 hostname,
+                 registrationResult,
+                 abuse
+-            ] = await Promise.all([
++            ] = await trace.time("enrichmentJoin", () => Promise.all([
+                 portsPromise,
+                 hostnamePromise,
+                 registrationPromise,
+                 abusePromise
+-            ]);
++            ]));
++            trace.record.enrichment = {
++                abuse: abuse === OPTIONAL_LOOKUP_TIMEOUT ? "timeout" : abuse ? "ok" : "missing",
++                registration: !options.registration ? "skipped"
++                    : registrationResult === OPTIONAL_LOOKUP_TIMEOUT ? "timeout"
++                    : registrationResult ? "ok" : "missing",
++                hostname: !options.hostname ? "skipped" : hostname ? "ok" : "missing",
++                ports: !options.ports ? "skipped" : ports ? "ok" : "missing"
++            };
++            trace.record.countrySources = {
++                abuse: abuse?.country_code || "",
++                allocation: coreData?.allocation?.country_code || "",
++                asn: coreData?.asns?.[0]?.country_code || ""
++            };
+ 
+             const registration =
+                 registrationResult === OPTIONAL_LOOKUP_TIMEOUT
+@@ -1598,6 +1661,7 @@ function createApp({
+ 
+     app.use(
+         (error, _req, res, next) => {
++            if (_req.lookupTiming) _req.lookupTiming.record.error = errorDetails(error);
+             console.error(error);
+ 
+             if (res.headersSent) {

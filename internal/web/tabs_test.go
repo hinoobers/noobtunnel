@@ -27,7 +27,7 @@ func TestSettingsIsSplitIntoTabs(t *testing.T) {
 			t.Errorf("the settings panel still mentions %q", gone)
 		}
 	}
-	wanted := []string{"mesh", "geoip", "branding", "tokens"}
+	wanted := []string{"mesh", "users", "smtp", "geoip", "branding", "tokens"}
 	for _, view := range wanted {
 		if !queryMatches(root, `[data-tab="`+view+`"]`) {
 			t.Errorf("no Settings tab for %q", view)
@@ -38,48 +38,52 @@ func TestSettingsIsSplitIntoTabs(t *testing.T) {
 	}
 	// Only the first panel is visible on load, so the page is not a wall of forms.
 	section := viewSection(t, index, "settings")
+	usersSettings := panelMarkup(t, section, "users")
+	if !strings.Contains(usersSettings, `data-form="signup-settings"`) || !strings.Contains(usersSettings, `name="maxUsers"`) {
+		t.Error("the Users settings tab must contain signup controls and the registration limit")
+	}
 	panels := regexp.MustCompile(`<div class="[^"]*" data-tab-panel="([a-z]+)"[^>]*>`).FindAllStringSubmatch(section, -1)
 	if len(panels) != len(wanted) {
 		t.Fatalf("expected %d settings panels, found %d", len(wanted), len(panels))
 	}
-	for i, match := range panels {
+	for _, match := range panels {
 		line := match[0]
 		hidden := strings.Contains(line, "hidden")
-		if i == 0 && hidden {
-			t.Errorf("the first Settings panel should be visible: %s", line)
+		if match[1] == "mesh" && hidden {
+			t.Errorf("the mesh Settings panel should be visible: %s", line)
 		}
-		if i > 0 && !hidden {
+		if match[1] != "mesh" && !hidden {
 			t.Errorf("Settings panel %q should start hidden: %s", match[1], line)
 		}
 	}
 }
 
-// TestLogsTabsSitAtPageLevel mirrors Settings: the Logs tab row belongs to the
-// view itself, sitting above the cards instead of being buried inside one.
+// TestLogsTabsSitAtPageLevel checks that Logs subtabs are in the sidebar and
+// each still controls a panel in the Logs view.
 func TestLogsTabsSitAtPageLevel(t *testing.T) {
 	index := readAsset(t, "assets/index.html")
-	root, err := parseHTML(viewSection(t, index, "activity"))
+	root, err := parseHTML(index)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nav := findNode(root, func(n *htmlNode) bool { return n.Tag == "nav" && nodeMatches(n, ".tabs") })
+	nav := findNode(root, func(n *htmlNode) bool { return n.Tag == "nav" && nodeMatches(n, `[data-subnav="activity"]`) })
 	if nav == nil {
-		t.Fatal("the Logs view has no tab row")
+		t.Fatal("the sidebar has no Logs subnavigation")
 	}
-	if nav.Parent == nil || nav.Parent.Tag != "section" || !nodeMatches(nav.Parent, ".view") {
-		t.Fatalf("the Logs tab row should hang off the view section like Settings, found parent <%s>", nav.Parent.Tag)
+	if nav.Parent == nil || !nodeMatches(nav.Parent, ".sidebar-nav") {
+		t.Fatal("the Logs subnavigation should be inside the sidebar")
 	}
+	section := viewSection(t, index, "activity")
 	for _, panel := range []string{"requests", "statistics", "activity", "errors"} {
-		if !queryMatches(root, `[data-tab="`+panel+`"]`) {
+		if !queryMatches(nav, `[data-tab="`+panel+`"]`) {
 			t.Errorf("no Logs tab for %q", panel)
 		}
-		if !queryMatches(root, `[data-tab-panel="`+panel+`"]`) {
+		if !strings.Contains(section, `data-tab-panel="`+panel+`"`) {
 			t.Errorf("no panel for the %q Logs tab", panel)
 		}
 	}
 	// The request list and the charts are separate tabs now: the list is what the
 	// Requests tab is for, and the charts have their own.
-	section := viewSection(t, index, "activity")
 	requestsPanel := panelMarkup(t, section, "requests")
 	if !strings.Contains(requestsPanel, "data-request-table") {
 		t.Error("the Requests panel should hold the request list")
@@ -132,25 +136,22 @@ func findNode(root *htmlNode, want func(*htmlNode) bool) *htmlNode {
 	return nil
 }
 
-// TestTabsLookLikeTabs covers the styling complaint: the active tab must carry
-// the emphasis that hovering gives, so it reads as selected.
+// TestTabsLookLikeTabs checks active sidebar subtabs are visibly selected.
 func TestTabsLookLikeTabs(t *testing.T) {
 	css := readAsset(t, "assets/style.css")
-	tab := ruleBody(css, ".tab")
-	active := ruleBody(css, ".tab.is-active")
+	tab := ruleBody(css, ".sidebar-sublink")
+	active := ruleBody(css, ".sidebar-sublink.is-active")
 	if tab == "" || active == "" {
-		t.Fatal("the tab styles are missing")
+		t.Fatal("the sidebar subtab styles are missing")
 	}
-	if !strings.Contains(css, ".tab:hover") {
-		t.Error("tabs should react to hover")
+	if !strings.Contains(css, ".sidebar-sublink:hover") {
+		t.Error("sidebar subtabs should react to hover")
 	}
-	// The active tab has a background and, unlike the others, a visible border.
 	if !strings.Contains(active, "background") {
 		t.Errorf("the active tab should be highlighted, got %q", strings.TrimSpace(active))
 	}
-	// A baseline under the row makes the group read as tabs.
-	tabs := ruleBody(css, ".tabs")
-	if !strings.Contains(tabs, "border-bottom") {
-		t.Errorf("the tab row should have a baseline, got %q", strings.TrimSpace(tabs))
+	subnav := ruleBody(css, ".sidebar-subnav::before")
+	if !strings.Contains(subnav, "background") {
+		t.Errorf("the sidebar subtab group should have a guide line, got %q", strings.TrimSpace(subnav))
 	}
 }

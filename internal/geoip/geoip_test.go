@@ -51,6 +51,87 @@ func newFakeAPI(t *testing.T) *fakeAPI {
 	return fake
 }
 
+func TestSelectedAgentRouteUsesItsOwnPrivateAddress(t *testing.T) {
+	var hosts []string
+	serve := func(country string) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hosts = append(hosts, r.Host)
+			_, _ = w.Write([]byte(`{"data":{"allocation":{"country_code":"` + country + `"}}}`))
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	first, second := serve("EE"), serve("SE")
+	for _, tc := range []struct {
+		address string
+		country string
+	}{{first.Listener.Addr().String(), "EE"}, {second.Listener.Addr().String(), "SE"}} {
+		api := NewVia("http://172.18.0.1:4702", "", tc.address)
+		got, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1"))
+		if err != nil || got.Country != tc.country {
+			t.Fatalf("via %s: country %q, error %v", tc.address, got.Country, err)
+		}
+	}
+	for _, host := range hosts {
+		if host != "172.18.0.1:4702" {
+			t.Fatalf("request Host = %q, want the configured API address", host)
+		}
+	}
+}
+
+func TestPublicProviderUsesKeyedCountryAndAbuseVerdict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+			t.Errorf("public request = %s %s", r.Method, r.URL)
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload["q"] != "1.1.1.1" || payload["key"] != "test-key" {
+			t.Errorf("public payload = %+v", payload)
+		}
+		_, _ = w.Write([]byte(`{"ip":"1.1.1.1","location":{"country_code":"au"},"is_abuser":true,"is_tor":true,"is_datacenter":true,"asn":{"org":"Cloudflare"}}`))
+	}))
+	defer server.Close()
+	api := NewPublic("test-key")
+	api.Configure(server.URL, "test-key")
+	info, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Country != "AU" || info.AbuseScore != 100 || !info.IsTor || !info.Hosting || info.ASN != "Cloudflare" {
+		t.Fatalf("public lookup = %+v", info)
+	}
+}
+
+func TestPublicQuotaFallsBackToIpLog(t *testing.T) {
+	var publicCalls atomic.Int64
+	public := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		publicCalls.Add(1)
+		w.Header().Set("Retry-After", "3600")
+		http.Error(w, `{"error":"quota exceeded"}`, http.StatusTooManyRequests)
+	}))
+	defer public.Close()
+	self := newFakeAPI(t)
+	self.body = answer
+	api := NewPublic("public-key")
+	api.Configure(public.URL, "public-key")
+	api.SetFallback(New(self.server.URL, "iplog-key"))
+	for _, raw := range []string{"1.1.1.1", "1.1.1.2"} {
+		info, err := api.Lookup(context.Background(), netip.MustParseAddr(raw))
+		if err != nil || info.Country != "AU" || info.AbuseScore != 7 {
+			t.Fatalf("fallback for %s = %+v, %v", raw, info, err)
+		}
+	}
+	if publicCalls.Load() != 1 || self.calls.Load() != 2 {
+		t.Fatalf("requests: public %d, iplog %d", publicCalls.Load(), self.calls.Load())
+	}
+	if count, reason := api.FallbackStats(); count != 2 || !strings.Contains(reason, "temporarily unavailable") {
+		t.Fatalf("fallback status: %d, %q", count, reason)
+	}
+}
+
 // answer is the response the user's API returns, trimmed to what matters.
 const answer = `{
   "cache": "hit",
@@ -238,8 +319,7 @@ func TestFailuresAreReportedAndRemembered(t *testing.T) {
 	}
 }
 
-// TestNothingIsAskedWithoutAnAPI keeps country rules inert rather than chatty when
-// no API is configured.
+// TestNothingIsAskedWithoutAnAPI keeps an unconfigured client from making lookups.
 func TestNothingIsAskedWithoutAnAPI(t *testing.T) {
 	api := New("", "")
 	if api.Configured() || api.Ready() {
@@ -271,7 +351,8 @@ func TestHostNormalisation(t *testing.T) {
 	}
 }
 
-// TestTheRequestIsTheDocumentedOne pins the endpoint: <host>/checkip?ip=<address>.
+// TestTheRequestIsTheDocumentedOne pins the endpoint and the optional fields
+// omitted by noobtunnel's country and abuse decisions.
 func TestTheRequestIsTheDocumentedOne(t *testing.T) {
 	var got string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +368,7 @@ func TestTheRequestIsTheDocumentedOne(t *testing.T) {
 	if _, err := api.Lookup(context.Background(), netip.MustParseAddr("1.1.1.1")); err != nil {
 		t.Fatal(err)
 	}
-	if got != "/checkip?ip=1.1.1.1" {
-		t.Fatalf("the request was %q, want /checkip?ip=1.1.1.1", got)
+	if got != "/checkip?ip=1.1.1.1&ports=no&hostname=no&registration=no" {
+		t.Fatalf("the request was %q, want the documented /checkip options", got)
 	}
 }

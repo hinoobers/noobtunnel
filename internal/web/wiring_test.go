@@ -18,6 +18,7 @@ var builtinUI = map[string]bool{
 	"encodeURIComponent": true, "decodeURIComponent": true, "alert": true, "confirm": true,
 	"prompt": true, "queueMicrotask": true, "structuredClone": true, "requestAnimationFrame": true,
 	"MutationObserver": true, "IntersectionObserver": true, "crypto": true, "TextEncoder": true,
+	"URLSearchParams": true, "clearInterval": true,
 }
 
 var (

@@ -267,18 +267,21 @@ func (g *group) serveTCP(ln net.Listener, dialTimeout time.Duration) {
 			continue
 		}
 		go func(conn net.Conn, r *resource) {
+			started := time.Now()
 			decision := g.connectionDecision(r, conn.RemoteAddr(), "")
 			if !decision.Allow {
-				g.observeConnection(r, conn.RemoteAddr(), "", false, decision.Reason)
+				g.observeConnection(r, conn.RemoteAddr(), "", false, decision.Reason, started, time.Since(started).Milliseconds(), 0)
 				_ = conn.Close()
 				return
 			}
+			policyMs := time.Since(started).Milliseconds()
+			dialStarted := time.Now()
 			upstream, chosen, err := dialCandidates(r, dialTimeout)
 			if err != nil {
 				_ = conn.Close()
 				return
 			}
-			g.observeConnection(r, conn.RemoteAddr(), "", true, "")
+			g.observeConnection(r, conn.RemoteAddr(), "", true, "", started, policyMs, time.Since(dialStarted).Milliseconds())
 			if r.spec.ProxyProtocol != ProxyProtocolNone {
 				if err := writeProxyHeader(upstream, r.spec.ProxyProtocol, conn.RemoteAddr(), upstream.RemoteAddr()); err != nil {
 					r.stat.setError(err)
@@ -288,7 +291,7 @@ func (g *group) serveTCP(ln net.Listener, dialTimeout time.Duration) {
 				}
 			}
 			r.stat.setError(nil)
-			pipe(conn, upstream, &r.stat.set, &r.stat.targetFor(chosen.ID).set)
+			pipe(conn, upstream, r.traffic, &r.stat.set, &r.stat.targetFor(chosen.ID).set)
 		}(conn, target)
 	}
 }
@@ -307,6 +310,7 @@ func (g *group) serveTLSPassthrough(ln net.Listener, dialTimeout time.Duration) 
 			return
 		}
 		go func(conn net.Conn) {
+			started := time.Now()
 			_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
 			hello, err := peekClientHello(conn)
 			if err != nil {
@@ -324,16 +328,18 @@ func (g *group) serveTLSPassthrough(ln net.Listener, dialTimeout time.Duration) 
 			}
 			decision := g.connectionDecision(target, conn.RemoteAddr(), hello.ServerName)
 			if !decision.Allow {
-				g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, false, decision.Reason)
+				g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, false, decision.Reason, started, time.Since(started).Milliseconds(), 0)
 				_ = conn.Close()
 				return
 			}
+			policyMs := time.Since(started).Milliseconds()
+			dialStarted := time.Now()
 			upstream, chosen, err := dialCandidates(target, dialTimeout)
 			if err != nil {
 				_ = conn.Close()
 				return
 			}
-			g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, true, "")
+			g.observeConnection(target, conn.RemoteAddr(), hello.ServerName, true, "", started, policyMs, time.Since(dialStarted).Milliseconds())
 			if target.spec.ProxyProtocol != ProxyProtocolNone {
 				if err := writeProxyHeader(upstream, target.spec.ProxyProtocol, conn.RemoteAddr(), upstream.RemoteAddr()); err != nil {
 					target.stat.setError(err)
@@ -349,7 +355,7 @@ func (g *group) serveTLSPassthrough(ln net.Listener, dialTimeout time.Duration) 
 				_ = conn.Close()
 				return
 			}
-			pipe(conn, upstream, &target.stat.set, &target.stat.targetFor(chosen.ID).set)
+			pipe(conn, upstream, target.traffic, &target.stat.set, &target.stat.targetFor(chosen.ID).set)
 		}(conn)
 	}
 }
@@ -374,7 +380,10 @@ func (g *group) connectionDecision(r *resource, remote net.Addr, host string) ac
 	return access.Evaluate(r.spec.Rules, access.Request{IP: ip, Country: country, Host: host})
 }
 
-func (g *group) observeConnection(r *resource, remote net.Addr, host string, allowed bool, reason string) {
+func (g *group) observeConnection(r *resource, remote net.Addr, host string, allowed bool, reason string, started time.Time, policyMs, dialMs int64) {
+	if g.manager == nil {
+		return
+	}
 	if host == "" {
 		host = r.spec.Domain
 	}
@@ -386,13 +395,14 @@ func (g *group) observeConnection(r *resource, remote net.Addr, host string, all
 	g.manager.observe(RequestEvent{
 		ResourceID: r.spec.ID, Resource: r.spec.Name, Host: host, IP: ip, Country: country,
 		Protocol: string(r.spec.Protocol), Allowed: allowed, Reason: reason,
+		Time: started, DurationMs: elapsedMilliseconds(started), PolicyMs: policyMs, DialMs: dialMs,
 	})
 }
 
 // pipe copies traffic between a client and a backend, counting bytes into every
 // supplied counter set (the resource and the chosen target) and closing both ends
 // when either direction finishes.
-func pipe(client, upstream net.Conn, sets ...*counters) {
+func pipe(client, upstream net.Conn, traffic *trafficMeter, sets ...*counters) {
 	for _, set := range sets {
 		set.active.Add(1)
 		set.total.Add(1)
@@ -405,7 +415,7 @@ func pipe(client, upstream net.Conn, sets ...*counters) {
 
 	done := make(chan struct{}, 2)
 	go func() {
-		_, err := io.Copy(upstream, io.TeeReader(client, countWriter{sets}))
+		_, err := io.Copy(meteredWriter{Writer: upstream, meter: traffic}, io.TeeReader(client, countWriter{sets}))
 		if err != nil {
 			_ = client.Close()
 			_ = upstream.Close()
@@ -416,7 +426,7 @@ func pipe(client, upstream net.Conn, sets ...*counters) {
 		done <- struct{}{}
 	}()
 	go func() {
-		_, err := io.Copy(client, io.TeeReader(upstream, reverseWriter{sets}))
+		_, err := io.Copy(meteredWriter{Writer: client, meter: traffic}, io.TeeReader(upstream, reverseWriter{sets}))
 		if err != nil {
 			_ = client.Close()
 			_ = upstream.Close()

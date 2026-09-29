@@ -1,6 +1,8 @@
 package store
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -114,6 +116,8 @@ func NormaliseStrategy(raw string) (Strategy, error) {
 // Resource publishes a service that lives behind one or more agents.
 type Resource struct {
 	ID       uint32           `json:"id"`
+	OwnerID  string           `json:"ownerId,omitempty"`
+	MeshSlot uint16           `json:"meshSlot,omitempty"`
 	Name     string           `json:"name"`
 	Protocol Protocol         `json:"protocol"`
 	Targets  []ResourceTarget `json:"targets"`
@@ -138,6 +142,15 @@ type Resource struct {
 	// "login" shows a branded sign-in form backed by control-node accounts.
 	// Empty on an identity-controlled legacy resource means "basic".
 	IdentityMode string `json:"identityMode,omitempty"`
+	// IdentityEmails limits account login to these verified email addresses.
+	IdentityEmails      []string `json:"identityEmails,omitempty"`
+	Uncapped            bool     `json:"uncapped,omitempty"`
+	MonthlyQuotaBytes   uint64   `json:"monthlyQuotaBytes,omitempty"`
+	MonthlyRequestQuota uint64   `json:"monthlyRequestQuota,omitempty"`
+	SustainedBps        uint64   `json:"sustainedBps,omitempty"`
+	BurstBps            uint64   `json:"burstBps,omitempty"`
+	PeakBps             uint64   `json:"peakBps,omitempty"`
+	OverQuotaBps        uint64   `json:"overQuotaBps,omitempty"`
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool `json:"blockExploits,omitempty"`
 	// BlockHighRiskIPs rejects clients whose IP API abuse confidence is at least 80.
@@ -220,10 +233,14 @@ const (
 )
 
 type Domain struct {
-	Hostname  string     `json:"hostname"`
-	Kind      DomainKind `json:"kind,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
-	Notes     string     `json:"notes,omitempty"`
+	Hostname          string     `json:"hostname"`
+	Kind              DomainKind `json:"kind,omitempty"`
+	OwnerID           string     `json:"ownerId,omitempty"`
+	PublicPool        bool       `json:"publicPool,omitempty"`
+	Verified          bool       `json:"verified,omitempty"`
+	VerificationToken string     `json:"verificationToken,omitempty"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	Notes             string     `json:"notes,omitempty"`
 	// ProviderID is the DNS provider that manages this name, empty for manual.
 	ProviderID string `json:"providerId,omitempty"`
 	// Address is the last address the control node published for this name.
@@ -279,20 +296,33 @@ type ResourceTargetInput struct {
 }
 
 type ResourceInput struct {
-	Name             string
-	Protocol         Protocol
-	Targets          []ResourceTargetInput
-	Strategy         string
-	ExitNodeID       string
-	ListenPort       int
-	Domain           string
-	SRV              *SRVConfig
-	Enabled          *bool
-	ProxyProtocol    string
-	Identity         bool
-	IdentityMode     string
-	BlockExploits    bool
-	BlockHighRiskIPs bool
+	OwnerID     string
+	MeshSlot    uint16
+	AdminLimits bool
+	Uncapped    bool
+	// MaxOwnerResources applies only when creating a resource. Zero is unlimited.
+	MaxOwnerResources   int
+	Name                string
+	Protocol            Protocol
+	Targets             []ResourceTargetInput
+	Strategy            string
+	ExitNodeID          string
+	ListenPort          int
+	Domain              string
+	SRV                 *SRVConfig
+	Enabled             *bool
+	ProxyProtocol       string
+	Identity            bool
+	IdentityMode        string
+	IdentityEmails      []string
+	MonthlyQuotaBytes   uint64
+	MonthlyRequestQuota uint64
+	SustainedBps        uint64
+	BurstBps            uint64
+	PeakBps             uint64
+	OverQuotaBps        uint64
+	BlockExploits       bool
+	BlockHighRiskIPs    bool
 	// WebSockets is a pointer so "not mentioned" (nil) keeps the default, which
 	// is to allow upgrades.
 	WebSockets *bool
@@ -333,7 +363,11 @@ var (
 	ErrPortInUse = errors.New("store: that listen port is already used by another resource")
 	// ErrDomainInUse means a domain is still referenced by a resource.
 	ErrDomainInUse = errors.New("store: that domain is still used by a resource")
+	// ErrResourceLimit means an account has reached its resource allowance.
+	ErrResourceLimit = errors.New("store: resource limit reached")
 )
+
+const RegularResourceLimit = 5
 
 // PterodactylTargetHost asks the selected agent to resolve the host-side
 // pterodactyl0 bridge address locally. Panel allocations can say 127.0.0.1
@@ -392,6 +426,17 @@ func findResource(st *State, id uint32) *Resource {
 func (s *Store) AddResource(in ResourceInput) (Resource, error) {
 	var created Resource
 	err := s.Update(func(st *State) error {
+		if in.OwnerID != "" && in.MaxOwnerResources > 0 {
+			count := 0
+			for _, existing := range st.Resources {
+				if existing.OwnerID == in.OwnerID {
+					count++
+				}
+			}
+			if count >= in.MaxOwnerResources {
+				return fmt.Errorf("%w: accounts can create up to %d resources", ErrResourceLimit, in.MaxOwnerResources)
+			}
+		}
 		resource, err := s.buildResource(st, 0, in)
 		if err != nil {
 			return err
@@ -406,7 +451,7 @@ func (s *Store) AddResource(in ResourceInput) (Resource, error) {
 		}
 		st.NextResourceID++
 		st.Resources = append(st.Resources, &resource)
-		if resource.Domain != "" {
+		if resource.Domain != "" && resource.OwnerID == "" {
 			ensureDomainLocked(st, resource.Domain)
 		}
 		created = resource
@@ -423,6 +468,9 @@ func (s *Store) UpdateResource(id uint32, in ResourceInput) (Resource, error) {
 		if existing == nil {
 			return ErrNotFound
 		}
+		if in.OwnerID != existing.OwnerID || in.MeshSlot != existing.MeshSlot {
+			return fmt.Errorf("%w: resource ownership cannot change", ErrBadResource)
+		}
 		candidate, err := s.buildResource(st, id, in)
 		if err != nil {
 			return err
@@ -433,7 +481,7 @@ func (s *Store) UpdateResource(id uint32, in ResourceInput) (Resource, error) {
 			return err
 		}
 		*existing = candidate
-		if candidate.Domain != "" {
+		if candidate.Domain != "" && candidate.OwnerID == "" {
 			ensureDomainLocked(st, candidate.Domain)
 		}
 		updated = candidate
@@ -467,6 +515,17 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 	if !ValidProtocol(in.Protocol) {
 		return Resource{}, fmt.Errorf("%w: protocol must be http, https, tcp or udp", ErrBadResource)
 	}
+	if in.OwnerID != "" {
+		if in.MeshSlot == 0 {
+			return Resource{}, fmt.Errorf("%w: a private resource needs a mesh slot", ErrBadResource)
+		}
+		for _, target := range in.Targets {
+			agent := findAgent(st, target.AgentID)
+			if agent == nil || agent.OwnerID != in.OwnerID || agent.MeshSlot != in.MeshSlot {
+				return Resource{}, fmt.Errorf("%w: targets must belong to your mesh", ErrBadResource)
+			}
+		}
+	}
 	targets, err := buildTargets(st, in.Targets)
 	if err != nil {
 		return Resource{}, err
@@ -479,11 +538,48 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 	if err != nil {
 		return Resource{}, err
 	}
+	if in.OwnerID != "" {
+		node, ok := findExitNode(st, exitNodeID)
+		if !ok || !node.PublicPool {
+			return Resource{}, fmt.Errorf("%w: choose an exit node in the public pool", ErrBadResource)
+		}
+	}
 	domain := ""
 	if strings.TrimSpace(in.Domain) != "" {
 		domain, err = NormaliseHostname(in.Domain)
 		if err != nil {
 			return Resource{}, err
+		}
+	}
+	if domain != "" {
+		for _, other := range st.Resources {
+			if other.ID != id && other.Domain == domain && other.OwnerID != in.OwnerID {
+				return Resource{}, fmt.Errorf("%w: another account already uses this hostname", ErrDomainInUse)
+			}
+		}
+	}
+	for _, configured := range st.Domains {
+		if !configured.PublicPool || !configured.Covers(domain) {
+			continue
+		}
+		for _, other := range st.Resources {
+			if other.ID != id && configured.Covers(other.Domain) && other.ExitNodeID != exitNodeID {
+				return Resource{}, fmt.Errorf("%w: this wildcard already points to another exit node", ErrBadResource)
+			}
+		}
+	}
+	if in.OwnerID != "" && in.Protocol.ByName() && domain == "" {
+		return Resource{}, fmt.Errorf("%w: a domain is required for this resource", ErrBadResource)
+	}
+	if in.OwnerID != "" && domain != "" {
+		allowed := false
+		for _, configured := range st.Domains {
+			if configured.Covers(domain) && (configured.PublicPool || (configured.OwnerID == in.OwnerID && configured.Verified)) {
+				allowed = true
+			}
+		}
+		if !allowed {
+			return Resource{}, fmt.Errorf("%w: choose your own verified domain or a public pool subdomain", ErrBadResource)
 		}
 	}
 	if in.Protocol == ProtocolHTTPS && domain == "" {
@@ -500,6 +596,66 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		return Resource{}, fmt.Errorf("%w: identity control needs http or https, because %s cannot ask for a login",
 			ErrBadResource, in.Protocol)
 	}
+	if in.Uncapped && !in.AdminLimits {
+		return Resource{}, fmt.Errorf("%w: only administrators can remove resource limits", ErrBadResource)
+	}
+	quota, requests, sustained, burst, peak, overQuota := in.MonthlyQuotaBytes, in.MonthlyRequestQuota, in.SustainedBps, in.BurstBps, in.PeakBps, in.OverQuotaBps
+	if in.Uncapped {
+		quota, requests, sustained, burst, peak, overQuota = 0, 0, 0, 0, 0, 0
+	} else if in.Protocol == ProtocolTCP || in.Protocol == ProtocolUDP {
+		requests, peak = 0, 0
+		if in.OwnerID != "" && !in.AdminLimits {
+			if in.Protocol == ProtocolTCP {
+				quota, sustained, burst, overQuota = 250_000_000_000, 5_000_000, 30_000_000, 1_000_000
+			} else {
+				quota, sustained, burst, overQuota = 100_000_000_000, 3_000_000, 20_000_000, 512_000
+			}
+		} else {
+			if quota == 0 {
+				quota = 10_000_000_000_000
+			}
+			if sustained == 0 {
+				sustained = 100_000_000
+			}
+			if burst == 0 {
+				burst = 1_000_000_000
+			}
+			if overQuota == 0 {
+				overQuota = 10_000_000
+			}
+		}
+		if quota > 1_000_000_000_000_000 || sustained < 64_000 || burst < sustained || burst > 10_000_000_000 || overQuota < 64_000 || overQuota > burst {
+			return Resource{}, fmt.Errorf("%w: invalid monthly quota or speed", ErrBadResource)
+		}
+	} else if in.Protocol == ProtocolHTTP || in.Protocol == ProtocolHTTPS {
+		if in.OwnerID != "" && !in.AdminLimits {
+			quota, requests, sustained, burst, peak, overQuota = 100_000_000_000, 3_000_000, 15_000_000, 30_000_000, 100_000_000, 512_000
+		} else {
+			if quota == 0 {
+				quota = 100_000_000_000
+			}
+			if requests == 0 {
+				requests = 3_000_000
+			}
+			if sustained == 0 {
+				sustained = 15_000_000
+			}
+			if burst == 0 {
+				burst = 30_000_000
+			}
+			if peak == 0 {
+				peak = 100_000_000
+			}
+			if overQuota == 0 {
+				overQuota = 512_000
+			}
+		}
+		if quota > 1_000_000_000_000_000 || requests > 1_000_000_000_000 || sustained < 64_000 || burst < sustained || peak < burst || peak > 10_000_000_000 || overQuota < 64_000 || overQuota > burst {
+			return Resource{}, fmt.Errorf("%w: invalid monthly quota, request quota, or speed", ErrBadResource)
+		}
+	} else {
+		quota, requests, sustained, burst, peak, overQuota = 0, 0, 0, 0, 0, 0
+	}
 	identityMode := strings.ToLower(strings.TrimSpace(in.IdentityMode))
 	if !in.Identity {
 		identityMode = ""
@@ -507,6 +663,23 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		identityMode = IdentityModeBasic
 	} else if identityMode != IdentityModeBasic && identityMode != IdentityModeLogin {
 		return Resource{}, fmt.Errorf("%w: identity mode must be basic or login", ErrBadResource)
+	}
+	identityEmails := []string{}
+	if in.Identity && identityMode == IdentityModeLogin {
+		if len(in.IdentityEmails) > 64 {
+			return Resource{}, fmt.Errorf("%w: too many allowed accounts", ErrBadResource)
+		}
+		seen := map[string]bool{}
+		for _, raw := range in.IdentityEmails {
+			email := strings.ToLower(strings.TrimSpace(raw))
+			if email == "" || validateEmail(email) != nil {
+				return Resource{}, fmt.Errorf("%w: enter a valid allowed email", ErrBadResource)
+			}
+			if !seen[email] {
+				identityEmails = append(identityEmails, email)
+				seen[email] = true
+			}
+		}
 	}
 	if in.BlockExploits && !in.Protocol.ByName() {
 		return Resource{}, fmt.Errorf("%w: common exploit blocking needs http or https", ErrBadResource)
@@ -528,22 +701,32 @@ func (s *Store) buildResource(st *State, id uint32, in ResourceInput) (Resource,
 		}
 	}
 	resource := Resource{
-		Name:             strings.TrimSpace(in.Name),
-		Protocol:         in.Protocol,
-		Targets:          targets,
-		Strategy:         strategy,
-		ExitNodeID:       exitNodeID,
-		ListenPort:       in.ListenPort,
-		Domain:           domain,
-		SRV:              srv,
-		Enabled:          true,
-		Identity:         in.Identity,
-		IdentityMode:     identityMode,
-		BlockExploits:    in.BlockExploits,
-		BlockHighRiskIPs: in.BlockHighRiskIPs,
-		WebSockets:       websockets,
-		Rules:            rules,
-		Notes:            strings.TrimSpace(in.Notes),
+		OwnerID:             in.OwnerID,
+		MeshSlot:            in.MeshSlot,
+		Name:                strings.TrimSpace(in.Name),
+		Protocol:            in.Protocol,
+		Targets:             targets,
+		Strategy:            strategy,
+		ExitNodeID:          exitNodeID,
+		ListenPort:          in.ListenPort,
+		Domain:              domain,
+		SRV:                 srv,
+		Enabled:             true,
+		Identity:            in.Identity,
+		IdentityMode:        identityMode,
+		IdentityEmails:      identityEmails,
+		Uncapped:            in.Uncapped,
+		MonthlyQuotaBytes:   quota,
+		MonthlyRequestQuota: requests,
+		SustainedBps:        sustained,
+		BurstBps:            burst,
+		PeakBps:             peak,
+		OverQuotaBps:        overQuota,
+		BlockExploits:       in.BlockExploits,
+		BlockHighRiskIPs:    in.BlockHighRiskIPs,
+		WebSockets:          websockets,
+		Rules:               rules,
+		Notes:               strings.TrimSpace(in.Notes),
 	}
 	proxyProtocol, err := NormaliseProxyProtocol(in.ProxyProtocol)
 	if err != nil {
@@ -618,20 +801,26 @@ func buildTargets(st *State, inputs []ResourceTargetInput) ([]ResourceTarget, er
 	}
 	targets := make([]ResourceTarget, 0, len(inputs))
 	for index, in := range inputs {
-		agent := findAgent(st, in.AgentID)
-		if agent == nil {
-			return nil, fmt.Errorf("%w: target %d has no agent selected", ErrBadResource, index+1)
-		}
-		if agent.PublicKey == "" {
-			return nil, fmt.Errorf("%w: target %d uses %s, which has not enrolled yet",
-				ErrBadResource, index+1, agent.Name)
-		}
 		host, err := normaliseTargetHost(in.Host)
 		if err != nil {
 			return nil, fmt.Errorf("target %d: %w", index+1, err)
 		}
-		if err := checkTargetReachability(st, agent, host); err != nil {
-			return nil, fmt.Errorf("target %d: %w", index+1, err)
+		if in.AgentID == 0 {
+			if host != "127.0.0.1" {
+				return nil, fmt.Errorf("%w: control node targets must use 127.0.0.1", ErrBadResource)
+			}
+		} else {
+			agent := findAgent(st, in.AgentID)
+			if agent == nil {
+				return nil, fmt.Errorf("%w: target %d has no agent selected", ErrBadResource, index+1)
+			}
+			if agent.PublicKey == "" {
+				return nil, fmt.Errorf("%w: target %d uses %s, which has not enrolled yet",
+					ErrBadResource, index+1, agent.Name)
+			}
+			if err := checkTargetReachability(st, agent, host); err != nil {
+				return nil, fmt.Errorf("target %d: %w", index+1, err)
+			}
 		}
 		if in.Port < 1 || in.Port > 65535 {
 			return nil, fmt.Errorf("%w: target %d needs a port between 1 and 65535", ErrBadResource, index+1)
@@ -769,7 +958,7 @@ func normaliseTargetHost(raw string) (string, error) {
 
 // CarriedPrefixes lists the networks the mesh actually routes through an agent:
 // the claims that were accepted for it, after the same resolution the hub
-// programs, plus the single addresses a published resource pins to it. It can
+// programs. It can
 // differ from what the agent offered, because the operator can edit the list here
 // after the machine enrolled - and it is the control node's answer that the agent
 // has to forward for.
@@ -779,9 +968,6 @@ func (s *Store) CarriedPrefixes(agentID uint32) []string {
 	owners, _, _ := resolveAdvertise(s.st)
 	var out []string
 	for _, prefix := range owners[agentID] {
-		out = append(out, prefix.String())
-	}
-	for _, prefix := range pinnedHosts(s.st, agentID) {
 		out = append(out, prefix.String())
 	}
 	sort.Strings(out)
@@ -986,23 +1172,117 @@ func (s *Store) Domains() []Domain {
 
 // AddDomain registers a hostname.
 func (s *Store) AddDomain(hostname string) (Domain, error) {
+	return s.AddDomainWithOptions(hostname, "", false)
+}
+
+// AddDomainWithOptions registers a manual private domain or an admin-owned pool.
+func (s *Store) AddDomainWithOptions(hostname, ownerID string, publicPool bool) (Domain, error) {
 	host, kind, err := NormaliseDomainPattern(hostname)
 	if err != nil {
 		return Domain{}, err
 	}
+	if ownerID != "" && kind != DomainDirect {
+		return Domain{}, fmt.Errorf("%w: regular accounts can add exact hostnames only", ErrBadResource)
+	}
+	if publicPool && (ownerID != "" || kind != DomainWildcard) {
+		return Domain{}, fmt.Errorf("%w: only an admin wildcard can be a public pool", ErrBadResource)
+	}
+	challenge := ""
+	if ownerID != "" {
+		bytes := make([]byte, 24)
+		if _, err := rand.Read(bytes); err != nil {
+			return Domain{}, err
+		}
+		challenge = "noobtunnel=" + base64.RawURLEncoding.EncodeToString(bytes)
+	}
 	var created Domain
 	err = s.Update(func(st *State) error {
+		for _, resource := range st.Resources {
+			if kind == DomainDirect && resource.Domain == host && resource.OwnerID != ownerID {
+				return fmt.Errorf("%w: another account already uses this hostname", ErrDomainInUse)
+			}
+		}
 		for _, d := range st.Domains {
 			if d.Hostname == host {
 				return fmt.Errorf("store: %s is already configured", host)
 			}
+			if ownerID != "" && d.Kind == DomainWildcard && d.Covers(host) {
+				return fmt.Errorf("%w: this hostname is already covered by a wildcard", ErrBadResource)
+			}
+			if kind == DomainWildcard && d.OwnerID != "" && (host == d.Hostname || strings.HasSuffix(d.Hostname, "."+host)) {
+				return fmt.Errorf("%w: this wildcard overlaps another account's domain", ErrBadResource)
+			}
 		}
-		domain := Domain{Hostname: host, Kind: kind, CreatedAt: time.Now().UTC()}
+		domain := Domain{Hostname: host, Kind: kind, OwnerID: ownerID, PublicPool: publicPool, Verified: ownerID == "", VerificationToken: challenge, CreatedAt: time.Now().UTC()}
 		st.Domains = append(st.Domains, domain)
 		created = domain
 		return nil
 	})
 	return created, err
+}
+
+// MarkDomainVerified activates an account-owned hostname after its DNS proof.
+func (s *Store) MarkDomainVerified(hostname, ownerID, challenge string) error {
+	return s.Update(func(st *State) error {
+		for i := range st.Domains {
+			domain := &st.Domains[i]
+			if domain.Hostname == hostname && domain.OwnerID == ownerID && domain.VerificationToken == challenge {
+				domain.Verified = true
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+}
+
+// SetDomainPublicPool lets admins share or withdraw a wildcard suffix.
+func (s *Store) SetDomainPublicPool(hostname string, enabled bool) (Domain, error) {
+	host, err := NormaliseHostname(hostname)
+	if err != nil {
+		return Domain{}, err
+	}
+	var updated Domain
+	err = s.Update(func(st *State) error {
+		for i := range st.Domains {
+			domain := &st.Domains[i]
+			if domain.Hostname != host {
+				continue
+			}
+			if domain.OwnerID != "" || domain.Kind != DomainWildcard {
+				return fmt.Errorf("%w: only an admin wildcard can be a public pool", ErrBadResource)
+			}
+			if enabled {
+				placement := ""
+				placed := false
+				for _, resource := range st.Resources {
+					if !domain.Covers(resource.Domain) {
+						continue
+					}
+					if placed && resource.ExitNodeID != placement {
+						return fmt.Errorf("%w: this wildcard is used on multiple exit nodes", ErrBadResource)
+					}
+					placement, placed = resource.ExitNodeID, true
+				}
+				for _, other := range st.Domains {
+					if other.OwnerID != "" && domain.Covers(other.Hostname) {
+						return fmt.Errorf("%w: this wildcard overlaps another account's domain", ErrBadResource)
+					}
+				}
+			}
+			domain.PublicPool = enabled
+			if !enabled {
+				for _, resource := range st.Resources {
+					if resource.OwnerID != "" && domain.Covers(resource.Domain) {
+						resource.Enabled = false
+					}
+				}
+			}
+			updated = *domain
+			return nil
+		}
+		return ErrNotFound
+	})
+	return updated, err
 }
 
 // NormaliseDomainPattern accepts "example.com" or "*.example.com".
@@ -1029,8 +1309,18 @@ func (s *Store) RemoveDomain(hostname string) error {
 		return err
 	}
 	return s.Update(func(st *State) error {
+		var removing *Domain
+		for i := range st.Domains {
+			if st.Domains[i].Hostname == host {
+				removing = &st.Domains[i]
+				break
+			}
+		}
+		if removing == nil {
+			return ErrNotFound
+		}
 		for _, r := range st.Resources {
-			if r.Domain == host {
+			if removing.Covers(r.Domain) {
 				return fmt.Errorf("%w: %s is used by resource %q", ErrDomainInUse, host, r.Name)
 			}
 		}

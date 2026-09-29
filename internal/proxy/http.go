@@ -184,7 +184,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: fmt.Sprintf("IP API abuse confidence is %d", score),
 				Status: http.StatusForbidden, Path: r.URL.Path,
-				DurationMs: time.Since(started).Milliseconds(),
+				DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
 			})
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusForbidden)
@@ -199,7 +199,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: "common exploit filter: " + reason,
 				Status: http.StatusForbidden, Path: r.URL.Path,
-				DurationMs: time.Since(started).Milliseconds(),
+				DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
 			})
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -216,7 +216,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 					Country: h.countryForLog(r.RemoteAddr), Protocol: string(res.spec.Protocol), Allowed: false,
 					Reason: "identity required", Status: http.StatusUnauthorized, Path: r.URL.Path,
-					DurationMs: time.Since(started).Milliseconds(),
+					DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
 				})
 			}
 			return
@@ -250,7 +250,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 				Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: decision.Reason, Status: http.StatusForbidden, Path: r.URL.Path,
-				DurationMs: time.Since(started).Milliseconds(),
+				DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
 			})
 			res.stat.setError(fmt.Errorf("blocked: %s", decision.Reason))
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -258,6 +258,18 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(h.group.manager.brand() + ": access denied\n"))
 			return
 		}
+	}
+	if !res.traffic.allowRequest() {
+		h.group.manager.observe(RequestEvent{
+			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
+			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
+			Allowed: false, Reason: "monthly request quota reached", Status: http.StatusTooManyRequests,
+			Path: r.URL.Path, DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
+		})
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(h.group.manager.brand() + ": monthly request quota reached\n"))
+		return
 	}
 	// A protocol upgrade (WebSocket) becomes a tunnel between the client and the
 	// service, not a request and a response.
@@ -268,7 +280,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 				Allowed: false, Reason: "websockets are disabled for this resource",
 				Status: http.StatusNotImplemented, Path: r.URL.Path,
-				DurationMs: time.Since(started).Milliseconds(),
+				DurationMs: elapsedMilliseconds(started), PolicyMs: time.Since(started).Milliseconds(),
 			})
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusNotImplemented)
@@ -289,7 +301,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}))
 	}
 	if r.Body != nil {
-		r.Body = &countingBody{ReadCloser: r.Body, target: &res.stat.set}
+		r.Body = &countingBody{ReadCloser: r.Body, target: &res.stat.set, meter: res.traffic}
 	}
 
 	policyMs := time.Since(started).Milliseconds()
@@ -307,7 +319,7 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(), DialMs: timing.dialMs,
+			DurationMs: elapsedMilliseconds(started), DialMs: timing.dialMs,
 			PolicyMs: policyMs, QueueMs: timing.queueMs, BackendMs: timing.backendMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
@@ -328,8 +340,9 @@ func (h *httpResource) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).Flush()
 		dst = flushWriter{w}
 	}
+	dst = meteredWriter{Writer: dst, meter: res.traffic}
 	copyResponse(dst, response.Body)
-	totalMs := time.Since(started).Milliseconds()
+	totalMs := elapsedMilliseconds(started)
 	res.stat.targetFor(chosen.ID).set.total.Add(1)
 	h.group.manager.observe(RequestEvent{
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
@@ -377,7 +390,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: false, Reason: "no target answered", Status: http.StatusBadGateway, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(), DialMs: timing.dialMs,
+			DurationMs: elapsedMilliseconds(started), DialMs: timing.dialMs,
 		})
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte(h.group.manager.brand() + ": none of the targets answered\n"))
@@ -391,12 +404,12 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 	if response.StatusCode != http.StatusSwitchingProtocols {
 		copyHeader(w.Header(), response.Header)
 		w.WriteHeader(response.StatusCode)
-		_, _ = io.Copy(w, response.Body)
+		_, _ = io.Copy(meteredWriter{Writer: w, meter: res.traffic}, response.Body)
 		h.group.manager.observe(RequestEvent{
 			ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 			Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 			Allowed: true, Status: response.StatusCode, Path: r.URL.Path,
-			DurationMs: time.Since(started).Milliseconds(),
+			DurationMs: elapsedMilliseconds(started),
 		})
 		return
 	}
@@ -432,7 +445,7 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 		ResourceID: res.spec.ID, Resource: res.spec.Name, Host: r.Host, IP: clientIP(r.RemoteAddr),
 		Country: h.countryForLog(r.RemoteAddr), Account: accountOf(r), Protocol: string(res.spec.Protocol),
 		Allowed: true, Status: http.StatusSwitchingProtocols, Path: r.URL.Path,
-		DurationMs: time.Since(started).Milliseconds(),
+		DurationMs: elapsedMilliseconds(started),
 	})
 
 	// Count the bytes the same way a TCP resource does, so the counters stay
@@ -444,11 +457,11 @@ func (h *httpResource) serveUpgrade(w http.ResponseWriter, r *http.Request, res 
 	}
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, io.TeeReader(buffered, countWriter{sets}))
+		_, _ = io.Copy(meteredWriter{Writer: upstream, meter: res.traffic}, io.TeeReader(buffered, countWriter{sets}))
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(client, io.TeeReader(upstream, reverseWriter{sets}))
+		_, _ = io.Copy(meteredWriter{Writer: client, meter: res.traffic}, io.TeeReader(upstream, reverseWriter{sets}))
 		done <- struct{}{}
 	}()
 	<-done
@@ -520,7 +533,11 @@ func (h *httpResource) requireIdentity(w http.ResponseWriter, r *http.Request, r
 	if res.spec.IdentityMode != "login" {
 		username, _, ok := r.BasicAuth()
 		if ok && h.authorised(res, r) {
-			return username, false
+			if h.allowedIdentity(res, username) {
+				return username, false
+			}
+			http.Error(w, "this account is not allowed to access this resource", http.StatusForbidden)
+			return "", true
 		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="`+h.group.manager.brand()+`", charset="UTF-8"`)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -530,11 +547,15 @@ func (h *httpResource) requireIdentity(w http.ResponseWriter, r *http.Request, r
 	}
 
 	if r.URL.Path == identityLoginPath && r.Method == http.MethodPost {
-		return h.handleIdentityLogin(w, r)
+		return h.handleIdentityLogin(w, r, res)
 	}
 	if check := h.group.manager.IdentitySession; check != nil {
 		if account, ok := check(r); ok {
-			return account, false
+			if h.allowedIdentity(res, account) {
+				return account, false
+			}
+			http.Error(w, "this account is not allowed to access this resource", http.StatusForbidden)
+			return "", true
 		}
 	}
 	next := r.URL.RequestURI()
@@ -545,7 +566,7 @@ func (h *httpResource) requireIdentity(w http.ResponseWriter, r *http.Request, r
 	return "", true
 }
 
-func (h *httpResource) handleIdentityLogin(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (h *httpResource) handleIdentityLogin(w http.ResponseWriter, r *http.Request, res *resource) (string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	if err := r.ParseForm(); err != nil {
 		h.writeIdentityLogin(w, "/", "Could not read that sign-in request.")
@@ -565,8 +586,38 @@ func (h *httpResource) handleIdentityLogin(w http.ResponseWriter, r *http.Reques
 		h.writeIdentityLogin(w, next, err.Error())
 		return "", true
 	}
+	if !h.allowedIdentity(res, account) {
+		h.writeIdentityLogin(w, next, "This account is not allowed to access this resource.")
+		return "", true
+	}
 	http.Redirect(w, r, next, http.StatusSeeOther)
 	return account, true
+}
+
+func (h *httpResource) allowedIdentity(res *resource, username string) bool {
+	lookup := h.group.manager.IdentityAccount
+	if lookup == nil {
+		return res.spec.OwnerID == "" && len(res.spec.IdentityEmails) == 0
+	}
+	userID, email, slot, ok := lookup(username)
+	if !ok {
+		return false
+	}
+	if res.spec.OwnerID != "" && userID == res.spec.OwnerID {
+		return true
+	}
+	if res.spec.OwnerID == "" && slot == 0 {
+		return true
+	}
+	if len(res.spec.IdentityEmails) > 0 {
+		for _, allowed := range res.spec.IdentityEmails {
+			if strings.EqualFold(email, allowed) && email != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func safeIdentityNext(next string) bool {
@@ -848,11 +899,18 @@ type countingBody struct {
 	io.ReadCloser
 	target *counters
 	also   *counters
+	meter  *trafficMeter
 	read   bool
 }
 
 func (c *countingBody) Read(p []byte) (int, error) {
+	if c.meter != nil && len(p) > 16*1024 {
+		p = p[:16*1024]
+	}
 	n, err := c.ReadCloser.Read(p)
+	if n > 0 && c.meter != nil {
+		c.meter.take(n, true)
+	}
 	add := func(set *counters, bytes int) {
 		if set == nil {
 			return

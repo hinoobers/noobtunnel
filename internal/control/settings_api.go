@@ -35,6 +35,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if body.ControlListenAddr == "" {
 			body.ControlListenAddr = existing.ControlListenAddr
 		}
+		if s.hasPrivateMeshes() && (body.MeshCIDR != existing.MeshCIDR || body.Interface != existing.Interface) {
+			writeJSON(w, http.StatusConflict, errBody("address range and interface cannot change while private meshes exist"))
+			return
+		}
 		if body.PublicEndpoint == "" {
 			body.PublicEndpoint = existing.PublicEndpoint
 		}

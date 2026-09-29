@@ -38,11 +38,10 @@ func TestCountryRuleBlocksEveryoneElse(t *testing.T) {
 	if !strings.Contains(decision.Reason, "country") || !strings.Contains(decision.Reason, "BLOCK") {
 		t.Fatalf("the reason should be readable: %q", decision.Reason)
 	}
-	// Without a country database the rule cannot be judged, so it is skipped
-	// rather than blocking everybody.
+	// A missing country cannot satisfy the restriction, so access is denied.
 	decision = Evaluate(rules, Request{IP: mustAddr(t, "203.0.113.5")})
-	if !decision.Allow {
-		t.Fatalf("a missing country database must not block traffic: %+v", decision)
+	if decision.Allow {
+		t.Fatalf("a missing country must not bypass the rule: %+v", decision)
 	}
 }
 

@@ -3,6 +3,8 @@ package control
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"strconv"
@@ -48,8 +50,18 @@ type ResourceView struct {
 	// Rules are the access rules, in evaluation order.
 	Rules []access.Rule `json:"rules,omitempty"`
 	// Identity means a control node account is required to reach the resource.
-	Identity     bool   `json:"identity"`
-	IdentityMode string `json:"identityMode,omitempty"`
+	Identity            bool     `json:"identity"`
+	IdentityMode        string   `json:"identityMode,omitempty"`
+	IdentityEmails      []string `json:"identityEmails,omitempty"`
+	Uncapped            bool     `json:"uncapped"`
+	MonthlyQuotaBytes   uint64   `json:"monthlyQuotaBytes,omitempty"`
+	MonthlyRequestQuota uint64   `json:"monthlyRequestQuota,omitempty"`
+	SustainedBps        uint64   `json:"sustainedBps,omitempty"`
+	BurstBps            uint64   `json:"burstBps,omitempty"`
+	PeakBps             uint64   `json:"peakBps,omitempty"`
+	OverQuotaBps        uint64   `json:"overQuotaBps,omitempty"`
+	MonthlyUsedBytes    uint64   `json:"monthlyUsedBytes,omitempty"`
+	MonthlyUsedRequests uint64   `json:"monthlyUsedRequests,omitempty"`
 	// BlockExploits enables the resource's built-in common exploit filter.
 	BlockExploits    bool `json:"blockExploits"`
 	BlockHighRiskIPs bool `json:"blockHighRiskIps"`
@@ -64,7 +76,13 @@ type ResourceView struct {
 
 // DomainView is a hostname and what uses it.
 type DomainView struct {
-	Hostname string `json:"hostname"`
+	Hostname          string `json:"hostname"`
+	OwnerID           string `json:"ownerId,omitempty"`
+	PublicPool        bool   `json:"publicPool"`
+	SRVAvailable      bool   `json:"srvAvailable"`
+	Verified          bool   `json:"verified"`
+	VerificationName  string `json:"verificationName,omitempty"`
+	VerificationToken string `json:"verificationToken,omitempty"`
 	// Pattern is what the operator typed, e.g. *.example.com.
 	Pattern   string   `json:"pattern,omitempty"`
 	Kind      string   `json:"kind,omitempty"`
@@ -131,30 +149,40 @@ func (s *Server) resourceViews() []ResourceView {
 		}
 	}
 	stats := s.proxies.Stats()
-	publicHost := s.publicHost()
+	publicHost := s.controlNodeAddress()
 
 	out := make([]ResourceView, 0, len(resources))
 	for _, r := range resources {
 		view := ResourceView{
-			ID:               r.ID,
-			Name:             r.Name,
-			Protocol:         string(r.Protocol),
-			Targets:          []TargetView{},
-			Strategy:         string(r.Strategy),
-			ExitNodeID:       r.ExitNodeID,
-			ExitNodeName:     controlName,
-			ListenPort:       r.EffectiveListenPort(),
-			Domain:           r.Domain,
-			SRV:              r.SRV,
-			Enabled:          r.Enabled,
-			ProxyProtocol:    r.ProxyProtocol,
-			Rules:            r.Rules,
-			Identity:         r.Identity,
-			IdentityMode:     r.EffectiveIdentityMode(),
-			BlockExploits:    r.BlockExploits,
-			BlockHighRiskIPs: r.BlockHighRiskIPs,
-			WebSockets:       r.AllowsWebSockets(),
-			CreatedAt:        r.CreatedAt.UTC().Format(timeLayout),
+			ID:                  r.ID,
+			Name:                r.Name,
+			Protocol:            string(r.Protocol),
+			Targets:             []TargetView{},
+			Strategy:            string(r.Strategy),
+			ExitNodeID:          r.ExitNodeID,
+			ExitNodeName:        controlName,
+			ListenPort:          r.EffectiveListenPort(),
+			Domain:              r.Domain,
+			SRV:                 r.SRV,
+			Enabled:             r.Enabled,
+			ProxyProtocol:       r.ProxyProtocol,
+			Rules:               r.Rules,
+			Identity:            r.Identity,
+			IdentityMode:        r.EffectiveIdentityMode(),
+			IdentityEmails:      r.IdentityEmails,
+			Uncapped:            r.Uncapped,
+			MonthlyQuotaBytes:   r.MonthlyQuotaBytes,
+			MonthlyRequestQuota: r.MonthlyRequestQuota,
+			SustainedBps:        r.SustainedBps,
+			BurstBps:            r.BurstBps,
+			PeakBps:             r.PeakBps,
+			OverQuotaBps:        r.OverQuotaBps,
+			MonthlyUsedBytes:    s.proxies.TrafficUsage(r.ID),
+			MonthlyUsedRequests: s.proxies.TrafficRequests(r.ID),
+			BlockExploits:       r.BlockExploits,
+			BlockHighRiskIPs:    r.BlockHighRiskIPs,
+			WebSockets:          r.AllowsWebSockets(),
+			CreatedAt:           r.CreatedAt.UTC().Format(timeLayout),
 		}
 		if node, ok := nodes[r.ExitNodeID]; ok && node.Kind != store.ExitNodeControl {
 			view.ExitNodeName = node.Name
@@ -167,7 +195,9 @@ func (s *Server) resourceViews() []ResourceView {
 				Address: target.Target(),
 				Enabled: target.Enabled,
 			}
-			if agent := agents[target.AgentID]; agent != nil {
+			if target.AgentID == 0 {
+				targetView.AgentName = "Control node"
+			} else if agent := agents[target.AgentID]; agent != nil {
 				targetView.AgentName = agent.Name
 			}
 			if stat, ok := stats[r.ID]; ok {
@@ -256,20 +286,25 @@ func (s *Server) publicHost() string {
 // domainViews builds the UI representation of configured hostnames.
 func (s *Server) domainViews() []DomainView {
 	resources := s.store.Resources()
-	publicHost := s.publicHost()
+	publicHost := s.controlNodeAddress()
 	out := make([]DomainView, 0)
 	for _, d := range s.store.Domains() {
 		address, exitName := s.desiredDomainAddress(d)
 		view := DomainView{
-			Hostname:     d.Hostname,
-			Pattern:      d.Pattern(),
-			Kind:         string(d.KindOrDefault()),
-			CreatedAt:    d.CreatedAt.UTC().Format(timeLayout),
-			Resources:    []string{},
-			Address:      address,
-			ExitNodeName: exitName,
-			ProviderID:   d.ProviderID,
-			LastError:    d.LastError,
+			Hostname:          d.Hostname,
+			OwnerID:           d.OwnerID,
+			PublicPool:        d.PublicPool,
+			Verified:          d.OwnerID == "" || d.Verified,
+			VerificationName:  "_noobtunnel." + d.Hostname,
+			VerificationToken: d.VerificationToken,
+			Pattern:           d.Pattern(),
+			Kind:              string(d.KindOrDefault()),
+			CreatedAt:         d.CreatedAt.UTC().Format(timeLayout),
+			Resources:         []string{},
+			Address:           address,
+			ExitNodeName:      exitName,
+			ProviderID:        d.ProviderID,
+			LastError:         d.LastError,
 		}
 		if view.Address == "" {
 			view.Address = publicHost
@@ -281,6 +316,7 @@ func (s *Server) domainViews() []DomainView {
 		if d.ProviderID != "" {
 			if provider, err := s.store.DNSProvider(d.ProviderID); err == nil {
 				view.ProviderName = provider.Name
+				view.SRVAvailable = provider.Enabled && provider.Kind == store.DNSProviderCloudflare
 			}
 		}
 		switch {
@@ -323,9 +359,31 @@ func (s *Server) checkControlDomain(in store.ResourceInput) error {
 func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if email := strings.TrimSpace(r.URL.Query().Get("email")); email != "" {
+			if !principalFrom(r).canAdmin() {
+				writeJSON(w, http.StatusForbidden, errBody("only admins can look up another account's resources"))
+				return
+			}
+			if len(email) > 254 {
+				writeJSON(w, http.StatusBadRequest, errBody("email address is too long"))
+				return
+			}
+			for _, user := range s.auth.Users() {
+				if user.Email == "" || !strings.EqualFold(user.Email, email) {
+					continue
+				}
+				owner := principal{UserID: user.ID, Role: user.Role, MeshSlot: user.MeshSlot}
+				view := s.StateSnapshotFor(owner)
+				writeJSON(w, http.StatusOK, map[string]any{"matched": true, "own": user.ID == principalFrom(r).UserID, "resources": view.Resources, "agents": view.Agents, "domains": view.Domains})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"matched": false, "resources": []ResourceView{}})
+			return
+		}
+		view := s.StateSnapshotFor(principalFrom(r))
 		writeJSON(w, http.StatusOK, map[string]any{
-			"resources": s.resourceViews(),
-			"domains":   s.domainViews(),
+			"resources": view.Resources,
+			"domains":   view.Domains,
 		})
 	case http.MethodPost:
 		var body resourcePayload
@@ -334,6 +392,29 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input := body.input()
+		who := principalFrom(r)
+		input.AdminLimits = who.canAdmin()
+		if !who.canManageMesh() {
+			writeJSON(w, http.StatusForbidden, errBody("this account cannot publish resources"))
+			return
+		}
+		if !who.canAdmin() {
+			if err := checkRegularSRV(input); err != nil {
+				writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+				return
+			}
+			if input.Protocol == store.ProtocolTCP || input.Protocol == store.ProtocolUDP {
+				if input.ListenPort != 0 {
+					writeJSON(w, http.StatusBadRequest, errBody("the public port is assigned automatically"))
+					return
+				}
+			}
+			input.OwnerID, input.MeshSlot = who.UserID, who.MeshSlot
+			input.MaxOwnerResources = store.RegularResourceLimit
+		}
+		if who.canAdmin() && who.MeshSlot > 0 {
+			input.OwnerID, input.MeshSlot = who.UserID, who.MeshSlot
+		}
 		if err := s.checkControlDomain(input); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
@@ -342,22 +423,80 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		resource, err := s.store.AddResource(input)
+		var resource store.Resource
+		var err error
+		for attempt := 0; attempt < 20; attempt++ {
+			if !who.canAdmin() && (input.Protocol == store.ProtocolTCP || input.Protocol == store.ProtocolUDP) {
+				input.ListenPort, err = s.allocatePublicPort(input.ExitNodeID, input.Protocol)
+				if err != nil {
+					break
+				}
+			}
+			resource, err = s.store.AddResource(input)
+			if !errors.Is(err, store.ErrPortInUse) {
+				break
+			}
+		}
 		if err != nil {
+			if errors.Is(err, store.ErrResourceLimit) {
+				writeJSON(w, http.StatusConflict, errBody(err.Error()))
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
 		if err := s.syncResourceSRV(r.Context(), resource); err != nil {
-			s.recordError("dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
+			s.recordErrorFor(resource.OwnerID, "dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
 		}
-		s.recordEvent("resource", "published "+resource.Name+" ("+string(resource.Protocol)+")")
+		s.recordEventFor(who.UserID, "resource", "published "+resource.Name+" ("+string(resource.Protocol)+")")
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"resource": s.resourceView(resource.ID)})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("use GET or POST"))
 	}
+}
+
+// Automatic public ports use the dynamic/private range so common service ports
+// (including web, mail, and game defaults) are never assigned by chance.
+const autoPublicPortMin = 49152
+const autoPublicPortMax = 65535
+
+// allocatePublicPort checks a random candidate on the selected exit address.
+// Store.AddResource then atomically checks it against other resources.
+func (s *Server) allocatePublicPort(exitNodeID string, protocol store.Protocol) (int, error) {
+	node, err := s.store.ExitNode(exitNodeID)
+	if err != nil {
+		return 0, err
+	}
+	settings := s.store.Settings()
+	controlPort := 0
+	if _, raw, err := net.SplitHostPort(settings.ControlListenAddr); err == nil {
+		controlPort, _ = strconv.Atoi(raw)
+	}
+	for attempt := 0; attempt < 64; attempt++ {
+		port := autoPublicPortMin + rand.IntN(autoPublicPortMax-autoPublicPortMin+1)
+		if port == settings.WGListenPort || port == controlPort || port == 51820 {
+			continue
+		}
+		address := net.JoinHostPort(node.BindAddress(), strconv.Itoa(port))
+		if protocol == store.ProtocolUDP {
+			listener, err := net.ListenPacket("udp", address)
+			if err != nil {
+				continue
+			}
+			_ = listener.Close()
+		} else {
+			listener, err := net.Listen("tcp", address)
+			if err != nil {
+				continue
+			}
+			_ = listener.Close()
+		}
+		return port, nil
+	}
+	return 0, fmt.Errorf("could not find an available automatic public port")
 }
 
 // handleResourceItem reads, changes or deletes one published service.
@@ -374,7 +513,11 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
-	if _, err := s.store.Resource(id); err != nil {
+	existing, err := s.store.Resource(id)
+	who := principalFrom(r)
+	ownerAccess := err == nil && ownsMeshObject(who, existing.OwnerID, existing.MeshSlot)
+	adminEdit := who.canAdmin() && (r.Method == http.MethodGet || r.Method == http.MethodPatch)
+	if err != nil || (!ownerAccess && !adminEdit) {
 		writeJSON(w, http.StatusNotFound, errBody("no such resource"))
 		return
 	}
@@ -388,6 +531,28 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		input := body.input()
+		input.AdminLimits = who.canAdmin()
+		input.OwnerID, input.MeshSlot = existing.OwnerID, existing.MeshSlot
+		if !who.canAdmin() {
+			// A regular owner can edit the service without changing limits set by an admin.
+			input.Uncapped = existing.Uncapped
+			input.MonthlyQuotaBytes = existing.MonthlyQuotaBytes
+			input.MonthlyRequestQuota = existing.MonthlyRequestQuota
+			input.SustainedBps = existing.SustainedBps
+			input.BurstBps = existing.BurstBps
+			input.PeakBps = existing.PeakBps
+			input.OverQuotaBps = existing.OverQuotaBps
+			input.AdminLimits = true
+			if err := checkRegularSRV(input); err != nil {
+				writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
+				return
+			}
+			if input.ListenPort != 0 && input.ListenPort != existing.EffectiveListenPort() {
+				writeJSON(w, http.StatusBadRequest, errBody("the public port cannot be changed"))
+				return
+			}
+			input.ListenPort = existing.EffectiveListenPort()
+		}
 		if err := s.checkControlDomain(input); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
@@ -406,13 +571,13 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 		s.reconcileResources()
 		if previous.SRV != nil && (resource.SRV == nil || previous.SRV.RecordName(previous.Domain) != resource.SRV.RecordName(resource.Domain)) {
 			if err := s.deleteResourceSRV(r.Context(), previous); err != nil {
-				s.recordError("dns", "could not remove old SRV for "+resource.Name, err.Error(), "remove the old record manually if it remains")
+				s.recordErrorFor(resource.OwnerID, "dns", "could not remove old SRV for "+resource.Name, err.Error(), "remove the old record manually if it remains")
 			}
 		}
 		if err := s.syncResourceSRV(r.Context(), resource); err != nil {
-			s.recordError("dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
+			s.recordErrorFor(resource.OwnerID, "dns", "could not update SRV for "+resource.Name, err.Error(), "check the domain's DNS automation")
 		}
-		s.recordEvent("resource", "updated "+resource.Name)
+		s.recordEventFor(who.UserID, "resource", "updated "+resource.Name)
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"resource": s.resourceView(id)})
 	case action == "" && r.Method == http.MethodDelete:
@@ -420,7 +585,7 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 		if existing, err := s.store.Resource(id); err == nil {
 			name = existing.Name
 			if err := s.deleteResourceSRV(r.Context(), existing); err != nil {
-				s.recordError("dns", "could not remove SRV for "+existing.Name, err.Error(), "remove the record manually if it remains")
+				s.recordErrorFor(existing.OwnerID, "dns", "could not remove SRV for "+existing.Name, err.Error(), "remove the record manually if it remains")
 			}
 		}
 		if err := s.store.RemoveResource(id); err != nil {
@@ -429,11 +594,30 @@ func (s *Server) handleResourceItem(w http.ResponseWriter, r *http.Request) {
 		}
 		s.syncMeshAfterResourceChange()
 		s.reconcileResources()
-		s.recordEvent("resource", "removed "+name)
+		s.recordEventFor(principalFrom(r).UserID, "resource", "removed "+name)
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("unsupported operation"))
+	}
+}
+
+// checkRegularSRV keeps the simple preset picker authoritative on the server.
+// The resource protocol must carry the same transport advertised by DNS.
+func checkRegularSRV(in store.ResourceInput) error {
+	if in.SRV == nil {
+		return nil
+	}
+	service := strings.ToLower(strings.Trim(strings.TrimSpace(in.SRV.Service), "_"))
+	protocol := strings.ToLower(strings.Trim(strings.TrimSpace(in.SRV.Protocol), "_"))
+	if protocol != string(in.Protocol) || in.SRV.Priority != 0 || in.SRV.Weight != 0 {
+		return errors.New("choose an application preset for this resource type; SRV priority and weight are fixed at zero")
+	}
+	switch service + "/" + protocol {
+	case "minecraft/tcp", "mumble/tcp", "ts3/udp", "sip/udp", "sip/tcp", "xmpp-client/tcp", "xmpp-server/tcp", "ldap/tcp":
+		return nil
+	default:
+		return errors.New("choose a listed application preset for the SRV record")
 	}
 }
 
@@ -452,7 +636,7 @@ func (s *Server) checkSRVAutomation(in store.ResourceInput) error {
 			return errors.New("Create SRV record needs automatic DNS on the selected domain")
 		}
 		provider, err := s.store.DNSProvider(domain.ProviderID)
-		if err != nil || !provider.Enabled {
+		if err != nil || !provider.Enabled || provider.Kind != store.DNSProviderCloudflare {
 			return errors.New("Create SRV record needs an enabled DNS provider on the selected domain")
 		}
 		return nil
@@ -485,21 +669,29 @@ func (s *Server) resourceView(id uint32) ResourceView {
 
 // resourcePayload is the wire form of a resource.
 type resourcePayload struct {
-	Name             string           `json:"name"`
-	Protocol         string           `json:"protocol"`
-	Targets          []targetPayload  `json:"targets"`
-	Strategy         string           `json:"strategy"`
-	ExitNodeID       string           `json:"exitNodeId"`
-	ListenPort       int              `json:"listenPort"`
-	Domain           string           `json:"domain"`
-	SRV              *store.SRVConfig `json:"srv"`
-	Enabled          *bool            `json:"enabled"`
-	ProxyProtocol    string           `json:"proxyProtocol"`
-	Rules            []access.Rule    `json:"rules"`
-	Identity         bool             `json:"identity"`
-	IdentityMode     string           `json:"identityMode"`
-	BlockExploits    bool             `json:"blockExploits"`
-	BlockHighRiskIPs bool             `json:"blockHighRiskIps"`
+	Name                string           `json:"name"`
+	Protocol            string           `json:"protocol"`
+	Targets             []targetPayload  `json:"targets"`
+	Strategy            string           `json:"strategy"`
+	ExitNodeID          string           `json:"exitNodeId"`
+	ListenPort          int              `json:"listenPort"`
+	Domain              string           `json:"domain"`
+	SRV                 *store.SRVConfig `json:"srv"`
+	Enabled             *bool            `json:"enabled"`
+	ProxyProtocol       string           `json:"proxyProtocol"`
+	Rules               []access.Rule    `json:"rules"`
+	Identity            bool             `json:"identity"`
+	IdentityMode        string           `json:"identityMode"`
+	IdentityEmails      []string         `json:"identityEmails"`
+	Uncapped            bool             `json:"uncapped"`
+	MonthlyQuotaBytes   uint64           `json:"monthlyQuotaBytes"`
+	MonthlyRequestQuota uint64           `json:"monthlyRequestQuota"`
+	SustainedBps        uint64           `json:"sustainedBps"`
+	BurstBps            uint64           `json:"burstBps"`
+	PeakBps             uint64           `json:"peakBps"`
+	OverQuotaBps        uint64           `json:"overQuotaBps"`
+	BlockExploits       bool             `json:"blockExploits"`
+	BlockHighRiskIPs    bool             `json:"blockHighRiskIps"`
 	// WebSockets is a pointer: omitting it keeps the default, which allows
 	// protocol upgrades.
 	WebSockets *bool `json:"websockets"`
@@ -524,22 +716,30 @@ func (p resourcePayload) input() store.ResourceInput {
 		})
 	}
 	return store.ResourceInput{
-		Name:             p.Name,
-		Protocol:         store.Protocol(strings.ToLower(strings.TrimSpace(p.Protocol))),
-		Targets:          targets,
-		Strategy:         p.Strategy,
-		ExitNodeID:       strings.TrimSpace(p.ExitNodeID),
-		ListenPort:       p.ListenPort,
-		Domain:           p.Domain,
-		SRV:              p.SRV,
-		Enabled:          p.Enabled,
-		ProxyProtocol:    p.ProxyProtocol,
-		Rules:            p.Rules,
-		Identity:         p.Identity,
-		IdentityMode:     p.IdentityMode,
-		BlockExploits:    p.BlockExploits,
-		BlockHighRiskIPs: p.BlockHighRiskIPs,
-		WebSockets:       p.WebSockets,
+		Name:                p.Name,
+		Protocol:            store.Protocol(strings.ToLower(strings.TrimSpace(p.Protocol))),
+		Targets:             targets,
+		Strategy:            p.Strategy,
+		ExitNodeID:          strings.TrimSpace(p.ExitNodeID),
+		ListenPort:          p.ListenPort,
+		Domain:              p.Domain,
+		SRV:                 p.SRV,
+		Enabled:             p.Enabled,
+		ProxyProtocol:       p.ProxyProtocol,
+		Rules:               p.Rules,
+		Identity:            p.Identity,
+		IdentityMode:        p.IdentityMode,
+		IdentityEmails:      p.IdentityEmails,
+		Uncapped:            p.Uncapped,
+		MonthlyQuotaBytes:   p.MonthlyQuotaBytes,
+		MonthlyRequestQuota: p.MonthlyRequestQuota,
+		SustainedBps:        p.SustainedBps,
+		BurstBps:            p.BurstBps,
+		PeakBps:             p.PeakBps,
+		OverQuotaBps:        p.OverQuotaBps,
+		BlockExploits:       p.BlockExploits,
+		BlockHighRiskIPs:    p.BlockHighRiskIPs,
+		WebSockets:          p.WebSockets,
 	}
 }
 
@@ -547,23 +747,33 @@ func (p resourcePayload) input() store.ResourceInput {
 func (s *Server) handleDomains(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"domains": s.domainViews()})
+		writeJSON(w, http.StatusOK, map[string]any{"domains": s.StateSnapshotFor(principalFrom(r)).Domains})
 	case http.MethodPost:
 		var body struct {
-			Hostname string `json:"hostname"`
+			Hostname   string `json:"hostname"`
+			PublicPool bool   `json:"publicPool"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		domain, err := s.store.AddDomain(body.Hostname)
+		who := principalFrom(r)
+		ownerID := ""
+		if !who.canAdmin() {
+			ownerID = who.UserID
+			if body.PublicPool {
+				writeJSON(w, http.StatusForbidden, errBody("only admins can create public pools"))
+				return
+			}
+		}
+		domain, err := s.store.AddDomainWithOptions(body.Hostname, ownerID, body.PublicPool)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
 		s.recordEvent("domain", "added "+domain.Hostname)
 		s.broadcastState()
-		writeJSON(w, http.StatusOK, map[string]any{"hostname": domain.Hostname})
+		writeJSON(w, http.StatusOK, map[string]any{"hostname": domain.Hostname, "verificationName": "_noobtunnel." + domain.Hostname, "verificationToken": domain.VerificationToken})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("use GET or POST"))
 	}
@@ -578,15 +788,67 @@ func (s *Server) handleDomainItem(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
+	who := principalFrom(r)
+	var stored *store.Domain
+	for _, domain := range s.store.Domains() {
+		if domain.Hostname == hostname {
+			copy := domain
+			stored = &copy
+			break
+		}
+	}
+	if hostname != "sync" && (stored == nil || (!who.canAdmin() && stored.OwnerID != who.UserID)) {
+		writeJSON(w, http.StatusNotFound, errBody("no such domain"))
+		return
+	}
 	switch {
 	case hostname == "sync" && r.Method == http.MethodPost:
+		if !who.canAdmin() {
+			writeJSON(w, http.StatusForbidden, errBody("only admins can sync DNS"))
+			return
+		}
 		// "Sync every domain now" is reachable at /api/domains/sync.
 		s.syncDomains(r.Context())
 		writeJSON(w, http.StatusOK, map[string]any{"domains": s.domainViews()})
 	case action == "" && r.Method == http.MethodPatch:
+		if !who.canAdmin() {
+			writeJSON(w, http.StatusForbidden, errBody("only admins can change DNS automation"))
+			return
+		}
 		s.handleDomainPatch(w, r, hostname)
 	case action == "sync" && r.Method == http.MethodPost:
+		if !who.canAdmin() {
+			writeJSON(w, http.StatusForbidden, errBody("only admins can sync DNS"))
+			return
+		}
 		s.handleDomainSync(w, r, hostname)
+	case action == "verify" && r.Method == http.MethodPost:
+		if stored.OwnerID == "" {
+			writeJSON(w, http.StatusBadRequest, errBody("this domain needs no verification"))
+			return
+		}
+		entries, err := net.LookupTXT("_noobtunnel." + stored.Hostname)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, errBody("DNS TXT record was not found yet"))
+			return
+		}
+		matched := false
+		for _, entry := range entries {
+			if strings.TrimSpace(entry) == stored.VerificationToken {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			writeJSON(w, http.StatusBadRequest, errBody("DNS TXT record does not match the verification value"))
+			return
+		}
+		if err := s.store.MarkDomainVerified(stored.Hostname, stored.OwnerID, stored.VerificationToken); err != nil {
+			writeJSON(w, http.StatusInternalServerError, errBody("could not save domain verification"))
+			return
+		}
+		s.broadcastState()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case action == "" && r.Method == http.MethodDelete:
 		if err := s.store.RemoveDomain(hostname); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))

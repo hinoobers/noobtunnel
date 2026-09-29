@@ -71,6 +71,150 @@ func resourceBody(name, protocol string, agentID uint32, host string, port, list
 	return body
 }
 
+func TestAdminResourceEmailLookupIsExplicitAndExact(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	owner, err := h.server.Auth().AddUserWithEmail("lookupowner", "lookup@example.com", "private-password-123", store.RoleOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regular, err := h.server.Auth().AddUserWithEmail("otherowner", "", "private-password-123", store.RoleOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	regularSession := h.loginAs(t, regular.Username, "private-password-123")
+	if status, body, _ := h.api("PATCH", "/api/exitnodes/control", map[string]any{"publicPool": true}, admin); status != http.StatusOK {
+		t.Fatalf("enable public exit: %d %s", status, body)
+	}
+	for _, entry := range []struct {
+		name, ownerID string
+		slot          uint16
+	}{
+		{"admin-service", "", 0},
+		{"lookup-service", owner.ID, owner.MeshSlot},
+	} {
+		agent, err := h.server.Store().AddAgent(store.AddAgentParams{Name: entry.name + "-agent", OwnerID: entry.ownerID, MeshSlot: entry.slot})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.server.Store().UpdateAgent(agent.ID, func(a *store.Agent) error {
+			a.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_, err = h.server.Store().AddResource(store.ResourceInput{
+			OwnerID: entry.ownerID, MeshSlot: entry.slot, Name: entry.name,
+			Protocol: store.ProtocolTCP, ExitNodeID: "control", ListenPort: freePort(t),
+			Targets: []store.ResourceTargetInput{{AgentID: agent.ID, Host: agent.Address, Port: 8080}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status, body, _ := h.api("GET", "/api/resources", nil, admin); status != http.StatusOK || strings.Contains(string(body), "lookup-service") {
+		t.Fatalf("default admin list exposed another account: %d %s", status, body)
+	}
+	path := "/api/resources?email=LOOKUP%40EXAMPLE.COM"
+	if status, body, _ := h.api("GET", path, nil, admin); status != http.StatusOK || !strings.Contains(string(body), "lookup-service") || !strings.Contains(string(body), "lookup-service-agent") || strings.Contains(string(body), "admin-service") {
+		t.Fatalf("explicit lookup returned wrong resources: %d %s", status, body)
+	}
+	if status, _, _ := h.api("GET", path, nil, regularSession); status != http.StatusForbidden {
+		t.Fatalf("regular account looked up resources: %d", status)
+	}
+}
+
+func TestAdminCanCreateUncappedResource(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	status, body, _ := h.api("POST", "/api/resources", resourceBody(
+		"unlimited", "tcp", 0, "127.0.0.1", 8080, freePort(t), map[string]any{"uncapped": true}), admin)
+	if status != http.StatusOK {
+		t.Fatalf("create uncapped resource: %d %s", status, body)
+	}
+	var created struct {
+		Resource struct {
+			Uncapped bool   `json:"uncapped"`
+			Quota    uint64 `json:"monthlyQuotaBytes"`
+			Speed    uint64 `json:"sustainedBps"`
+		} `json:"resource"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	if !created.Resource.Uncapped || created.Resource.Quota != 0 || created.Resource.Speed != 0 {
+		t.Fatalf("uncapped limits were not saved: %+v", created.Resource)
+	}
+}
+
+func TestRegularResourceLimit(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	if status, body, _ := h.api("PATCH", "/api/exitnodes/control", map[string]any{"publicPool": true}, admin); status != http.StatusOK {
+		t.Fatalf("enable public exit node: %d %s", status, body)
+	}
+	owner, err := h.server.Auth().AddUserWithEmail("resourceowner", "", "private-password-123", store.RoleOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := h.loginAs(t, owner.Username, "private-password-123")
+	agent, err := h.server.Store().AddAgent(store.AddAgentParams{Name: "private target", OwnerID: owner.ID, MeshSlot: owner.MeshSlot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.Store().UpdateAgent(agent.ID, func(a *store.Agent) error {
+		a.PublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var firstID uint32
+	for i := 0; i < store.RegularResourceLimit; i++ {
+		protocol := "tcp"
+		if i == 1 {
+			protocol = "udp"
+		}
+		status, body, _ := h.api("POST", "/api/resources", resourceBody(
+			fmt.Sprintf("private-%d", i), protocol, agent.ID, agent.Address, 8080, 0, nil), user)
+		if status != http.StatusOK {
+			t.Fatalf("resource %d: %d %s", i+1, status, body)
+		}
+		var created struct {
+			Resource struct {
+				ID         uint32 `json:"id"`
+				ListenPort int    `json:"listenPort"`
+			} `json:"resource"`
+		}
+		if err := json.Unmarshal(body, &created); err != nil {
+			t.Fatal(err)
+		}
+		if created.Resource.ListenPort < 49152 || created.Resource.ListenPort > 65535 || created.Resource.ListenPort == 51820 {
+			t.Fatalf("automatic %s port is outside the safe range: %d", protocol, created.Resource.ListenPort)
+		}
+		if i == 0 {
+			firstID = created.Resource.ID
+		}
+	}
+	if status, body, _ := h.api("POST", "/api/resources", resourceBody(
+		"sixth", "tcp", agent.ID, agent.Address, 8080, 0, nil), user); status != http.StatusConflict || !strings.Contains(string(body), "up to 5 resources") {
+		t.Fatalf("sixth resource: %d %s", status, body)
+	}
+	if status, body, _ := h.api("DELETE", fmt.Sprintf("/api/resources/%d", firstID), nil, user); status != http.StatusOK {
+		t.Fatalf("delete resource: %d %s", status, body)
+	}
+	if status, body, _ := h.api("POST", "/api/resources", resourceBody(
+		"replacement", "tcp", agent.ID, agent.Address, 8080, 0, nil), user); status != http.StatusOK {
+		t.Fatalf("replacement resource: %d %s", status, body)
+	}
+	for i := 0; i < store.RegularResourceLimit+1; i++ {
+		status, body, _ := h.api("POST", "/api/resources", resourceBody(
+			fmt.Sprintf("admin-%d", i), "tcp", 0, "127.0.0.1", 8080, freePort(t), nil), admin)
+		if status != http.StatusOK {
+			t.Fatalf("admin resource %d: %d %s", i+1, status, body)
+		}
+	}
+}
+
 func TestWildcardDomainListsResourcesItCovers(t *testing.T) {
 	h := newHarness(t, true)
 	admin := h.login(t)
@@ -310,17 +454,17 @@ func TestViewersCannotManageResources(t *testing.T) {
 	viewer := h.loginAs(t, "reader", "viewer-password-1")
 
 	if status, _, _ := h.api("GET", "/api/resources", nil, viewer); status != http.StatusOK {
-		t.Fatalf("a viewer should be able to read resources: %d", status)
+		t.Fatalf("a separate account read global resources: %d", status)
 	}
 	status, body, _ := h.api("POST", "/api/resources",
 		resourceBody("sneaky", "tcp", agent.id, h.agentAddress(t, agent.id), 22, freePort(t), nil), viewer)
-	if status != http.StatusForbidden {
+	if status != http.StatusBadRequest {
 		t.Fatalf("a viewer created a resource: %d %s", status, body)
 	}
-	if status, _, _ := h.api("POST", "/api/domains", map[string]any{"hostname": "x.example.com"}, viewer); status != http.StatusForbidden {
+	if status, _, _ := h.api("POST", "/api/domains", map[string]any{"hostname": "x.example.com"}, viewer); status != http.StatusOK {
 		t.Fatalf("a viewer added a domain: %d", status)
 	}
-	if status, _, _ := h.api("DELETE", "/api/resources/1", nil, viewer); status != http.StatusForbidden {
+	if status, _, _ := h.api("DELETE", "/api/resources/1", nil, viewer); status != http.StatusNotFound {
 		t.Fatalf("a viewer deleted a resource: %d", status)
 	}
 }
@@ -339,73 +483,35 @@ func TestDomainLifecycleThroughTheAPI(t *testing.T) {
 	}
 }
 
-// TestPublishedServiceForwardsTraffic is the feature end to end: a service behind
-// an agent is published through the control node's API and real traffic flows
-// through the proxy the control node runs.
-func TestPublishedServiceForwardsTraffic(t *testing.T) {
-	targetHost, targetPort := tcpEchoService(t)
+// TestPublishedServiceUsesAgentForward checks the API, listener and selected
+// agent mapping. Fake WireGuard devices do not create OS mesh addresses, so
+// packet forwarding itself is covered by the agent and proxy tests.
+func TestPublishedServiceUsesAgentForward(t *testing.T) {
 	listenPort := freePort(t)
-
 	h := newHarness(t, true)
 	admin := h.login(t)
 	agent := h.enrolledAgent(t, "homelab")
-	// The agent routes loopback, which stands in for a homelab LAN.
-	h.advertise(t, agent.id, targetHost+"/32")
-
 	status, body, _ := h.api("POST", "/api/resources",
-		resourceBody("tcp echo", "tcp", agent.id, targetHost, targetPort, listenPort, nil), admin)
+		resourceBody("tcp echo", "tcp", agent.id, "192.168.4.2", 8080, listenPort, nil), admin)
 	if status != http.StatusOK {
 		t.Fatalf("publishing returned %d: %s", status, body)
 	}
-
-	// Connect to the published port and talk to the service.
-	var conn net.Conn
-	var err error
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err = net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", listenPort), time.Second)
-		if err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	forwards := h.server.Forwards(agent.id)
+	if len(forwards) != 1 || forwards[0].Target != "192.168.4.2:8080" {
+		t.Fatalf("agent forwards = %+v", forwards)
 	}
-	if err != nil {
-		t.Fatalf("the published port never accepted connections: %v", err)
+	specs := h.server.ResourceSpecs()
+	if len(specs) != 1 || len(specs[0].Targets) != 1 ||
+		specs[0].Targets[0].Address() != net.JoinHostPort(h.agentAddress(t, agent.id), strconv.Itoa(forwards[0].Port)) {
+		t.Fatalf("proxy specs = %+v", specs)
 	}
-	defer conn.Close()
-	if _, err := conn.Write([]byte("ping")); err != nil {
-		t.Fatal(err)
-	}
-	buf := make([]byte, 64)
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("no answer through the tunnel: %v", err)
-	}
-	if got := string(buf[:n]); got != "service:ping" {
-		t.Fatalf("forwarded %q, want %q", got, "service:ping")
-	}
-
-	// The dashboard must show the published resource as listening with traffic.
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	waitFor(t, "resource to listen", 5*time.Second, func() bool {
 		status, body, _ = h.api("GET", "/api/state", nil, admin)
 		var view struct {
 			Resources []struct {
-				Listening bool   `json:"listening"`
-				Total     uint64 `json:"total"`
-				Public    string `json:"public"`
+				Listening bool `json:"listening"`
 			} `json:"resources"`
 		}
-		if status == http.StatusOK && json.Unmarshal(body, &view) == nil && len(view.Resources) == 1 {
-			if view.Resources[0].Listening && view.Resources[0].Total >= 1 {
-				if !strings.Contains(view.Resources[0].Public, strconv.Itoa(listenPort)) {
-					t.Fatalf("public address %q should mention the port", view.Resources[0].Public)
-				}
-				return
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("the resource was never reported as listening: %s", body)
+		return status == http.StatusOK && json.Unmarshal(body, &view) == nil && len(view.Resources) == 1 && view.Resources[0].Listening
+	})
 }

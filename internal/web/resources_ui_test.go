@@ -84,17 +84,16 @@ func TestProxyProtocolOptions(t *testing.T) {
 	}
 }
 
-// TestSingleAddResourceButton covers the duplicated button the user reported:
-// the header button stays for a populated list, the empty state owns it when
-// there is nothing to show.
+// TestSingleAddResourceButton keeps the only add button beside the account
+// filter, including when the list is empty.
 func TestSingleAddResourceButton(t *testing.T) {
 	js := readAsset(t, "assets/resources_api.js")
 	render := functionBody(js, "renderResources")
-	if !strings.Contains(render, "shell.resourcesAdd.hidden = !canAdmin() || resources.length === 0") {
-		t.Fatal("the header button must be hidden when no resources exist")
+	if !strings.Contains(render, "shell.resourcesAdd.hidden = !canManageMesh()") {
+		t.Fatal("the header button should stay beside the account filter")
 	}
-	if !strings.Contains(render, "'data-action': 'add-resource'") {
-		t.Fatal("the empty state should offer the add button")
+	if strings.Contains(render, "'data-action': 'add-resource'") {
+		t.Fatal("the empty state should not duplicate the header button")
 	}
 	html := readAsset(t, "assets/index.html")
 	if strings.Count(html, `data-action="add-resource"`) != 1 {
@@ -134,7 +133,7 @@ func TestPublishPageIsSplitIntoSteps(t *testing.T) {
 	if !strings.Contains(page, "stepTitles") || !strings.Contains(page, "function showStep") {
 		t.Fatal("the publish form should be split into steps")
 	}
-	for _, want := range []string{"'Service'", "'Targets'", "'Publishing'", "'Security'", "'Next'", "'Back'"} {
+	for _, want := range []string{"'Service'", "'Targets'", "'Publishing'", "'Limits'", "'Security'", "'Next'", "'Back'"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("the step navigation is missing %s", want)
 		}

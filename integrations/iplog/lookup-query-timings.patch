@@ -1,0 +1,51 @@
+diff --git a/util/lookup.js b/util/lookup.js
+index ee56bfe..dac0713 100644
+--- a/util/lookup.js
++++ b/util/lookup.js
+@@ -1,5 +1,20 @@
+-async function lookupIp(database, parsedIp) {
+-    const [routeRows] = await database.query(`
++const { performance } = require("node:perf_hooks");
++
++async function lookupIp(database, parsedIp, onQuery) {
++    async function timedQuery(stage, sql, params) {
++        const started = performance.now();
++        try {
++            const result = await database.query(sql, params);
++            onQuery?.({ stage, durationMs: Math.round((performance.now() - started) * 10) / 10,
++                rows: result[0]?.length ?? null });
++            return result;
++        } catch (error) {
++            onQuery?.({ stage, durationMs: Math.round((performance.now() - started) * 10) / 10,
++                error: { code: error?.code || null, message: String(error?.message || error).slice(0, 500) } });
++            throw error;
++        }
++    }
++    const [routeRows] = await timedQuery("routes", `
+         SELECT
+             route.prefix,
+             route.prefix_length,
+@@ -21,7 +36,7 @@ async function lookupIp(database, parsedIp) {
+         ? []
+         : routeRows.filter((row) => row.prefix_length === longestPrefixLength);
+ 
+-    const [allocationRows] = await database.query(`
++    const [allocationRows] = await timedQuery("allocation", `
+         SELECT registry, country_code, status, allocated_at
+         FROM rir_allocations
+         WHERE family = ?
+@@ -31,12 +46,12 @@ async function lookupIp(database, parsedIp) {
+         LIMIT 1
+     `, [parsedIp.family, parsedIp.buffer, parsedIp.buffer]);
+ 
+-    const [torRows] = await database.query(
++    const [torRows] = await timedQuery("tor", 
+         "SELECT 1 FROM tor_relays WHERE ip = ? LIMIT 1",
+         [parsedIp.buffer]
+     );
+ 
+-    const [snapshots] = await database.query(
++    const [snapshots] = await timedQuery("snapshots", 
+         "SELECT source_name, record_count, imported_at FROM data_snapshots"
+     );
+ 

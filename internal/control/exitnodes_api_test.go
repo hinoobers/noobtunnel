@@ -258,8 +258,8 @@ func TestViewersCannotManageExitNodes(t *testing.T) {
 	h.createViewer(t, admin, "reader")
 	viewer := h.loginAs(t, "reader", "viewer-password-1")
 
-	if status, _, _ := h.api("GET", "/api/exitnodes", nil, viewer); status != http.StatusOK {
-		t.Fatalf("a viewer should be able to read exit nodes: %d", status)
+	if status, body, _ := h.api("GET", "/api/exitnodes", nil, viewer); status != http.StatusOK || strings.Contains(string(body), "Control node") {
+		t.Fatalf("a separate account read global exit nodes: %d", status)
 	}
 	if status, _, _ := h.api("POST", "/api/exitnodes", map[string]any{
 		"name": "sneaky", "kind": "address", "address": "203.0.113.90",

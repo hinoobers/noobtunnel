@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/noobtunnel/noobtunnel/internal/store"
+	"github.com/noobtunnel/noobtunnel/internal/wg"
 )
 
 // fakeCloudflare is a small stand-in for the Cloudflare API.
@@ -72,6 +75,125 @@ func (f *fakeCloudflare) address(name string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.records[name]
+}
+
+func TestRegularAccountCanCreateSRVOnPublicPool(t *testing.T) {
+	fake := &fakeCloudflare{records: map[string]string{}, comments: map[string]string{}}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	h := newHarnessWithDNS(t, server.URL)
+	admin := h.login(t)
+	providerID := h.addDNSProvider(t, "public DNS", admin)
+	if status, body, _ := h.api("POST", "/api/domains", map[string]any{"hostname": "*.test.example.com", "publicPool": true}, admin); status != http.StatusOK {
+		t.Fatalf("add public domain returned %d: %s", status, body)
+	}
+	if status, body, _ := h.api("PATCH", "/api/domains/test.example.com", map[string]any{"providerId": providerID}, admin); status != http.StatusOK {
+		t.Fatalf("attach provider returned %d: %s", status, body)
+	}
+	if status, body, _ := h.api("PATCH", "/api/exitnodes/control", map[string]any{"publicPool": true}, admin); status != http.StatusOK {
+		t.Fatalf("enable public exit node returned %d: %s", status, body)
+	}
+	owner, err := h.server.Auth().AddUserWithEmail("srvuser", "", "private-password-123", store.RoleOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := h.loginAs(t, owner.Username, "private-password-123")
+	status, body, _ := h.api("GET", "/api/state", nil, user)
+	if status != http.StatusOK {
+		t.Fatalf("user state returned %d: %s", status, body)
+	}
+	var state struct {
+		Domains []struct {
+			Hostname, ProviderID string
+			SRVAvailable         bool `json:"srvAvailable"`
+		} `json:"domains"`
+	}
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Domains) != 1 || !state.Domains[0].SRVAvailable || state.Domains[0].ProviderID != "" {
+		t.Fatalf("public domain SRV availability or provider privacy is wrong: %+v", state.Domains)
+	}
+	agent, err := h.server.Store().AddAgent(store.AddAgentParams{Name: "srv target", OwnerID: owner.ID, MeshSlot: owner.MeshSlot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := wg.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.server.Store().UpdateAgent(agent.ID, func(a *store.Agent) error { a.PublicKey = key.Public; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	resource := resourceBody("game", "tcp", agent.ID, agent.Address, 25565, 0, map[string]any{
+		"domain": "game.test.example.com", "srv": map[string]any{"service": "minecraft", "protocol": "tcp", "priority": 0, "weight": 0},
+	})
+	for _, srv := range []map[string]any{
+		{"service": "custom-game", "protocol": "tcp"},
+		{"service": "minecraft", "protocol": "tcp", "priority": 1},
+		{"service": "minecraft", "protocol": "udp"},
+	} {
+		resource["srv"] = srv
+		if status, body, _ := h.api("POST", "/api/resources", resource, user); status != http.StatusBadRequest {
+			t.Fatalf("regular user bypassed the SRV preset: %d %s", status, body)
+		}
+	}
+	resource["srv"] = map[string]any{"service": "minecraft", "protocol": "tcp"}
+	status, body, _ = h.api("POST", "/api/resources", resource, user)
+	if status != http.StatusOK {
+		t.Fatalf("regular user SRV create returned %d: %s", status, body)
+	}
+	var created struct {
+		Resource struct {
+			ID uint32 `json:"id"`
+		} `json:"resource"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	_, srvCreated := fake.records["_minecraft._tcp.game.test.example.com"]
+	fake.mu.Unlock()
+	if !srvCreated {
+		t.Fatal("SRV record was not sent to the provider")
+	}
+	adminCustom := resourceBody("custom SRV", "tcp", 0, "127.0.0.1", 8080, freePort(t), map[string]any{
+		"domain": "custom.test.example.com", "srv": map[string]any{"service": "mygame", "protocol": "tcp"},
+	})
+	if status, body, _ := h.api("POST", "/api/resources", adminCustom, admin); status != http.StatusOK {
+		t.Fatalf("admin custom SRV create returned %d: %s", status, body)
+	}
+	resource["srv"] = map[string]any{"service": "custom-game", "protocol": "tcp"}
+	if status, body, _ := h.api("PATCH", fmt.Sprintf("/api/resources/%d", created.Resource.ID), resource, user); status != http.StatusBadRequest {
+		t.Fatalf("regular user changed SRV to a custom service: %d %s", status, body)
+	}
+	resource["srv"] = map[string]any{"service": "minecraft", "protocol": "tcp"}
+	resource["name"] = "game updated"
+	status, body, _ = h.api("PATCH", fmt.Sprintf("/api/resources/%d", created.Resource.ID), resource, user)
+	if status != http.StatusOK {
+		t.Fatalf("regular user SRV edit returned %d: %s", status, body)
+	}
+	fake.mu.Lock()
+	fake.fail = true
+	fake.mu.Unlock()
+	if status, body, _ := h.api("PATCH", fmt.Sprintf("/api/resources/%d", created.Resource.ID), resource, user); status != http.StatusOK {
+		t.Fatalf("resource edit with a DNS failure returned %d: %s", status, body)
+	}
+	status, body, _ = h.api("GET", "/api/errors", nil, user)
+	if status != http.StatusOK || !strings.Contains(string(body), "could not update SRV for game updated") || strings.Contains(string(body), "ownerId") {
+		t.Fatalf("owner did not receive their scoped DNS error: %d %s", status, body)
+	}
+	other, err := h.server.Auth().AddUserWithEmail("anotheruser", "", "other-password-123", store.RoleOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSession := h.loginAs(t, other.Username, "other-password-123")
+	if status, body, _ := h.api("GET", "/api/errors", nil, otherSession); status != http.StatusOK || strings.Contains(string(body), "game updated") || strings.Contains(string(body), "token is broken") {
+		t.Fatalf("another account saw someone else's DNS error: %d %s", status, body)
+	}
+	if status, body, _ := h.api("GET", "/api/state", nil, user); status != http.StatusOK || !strings.Contains(string(body), "could not update SRV for game updated") {
+		t.Fatalf("owner state omitted their error: %d %s", status, body)
+	}
 }
 
 func TestDNSAutomationUpdatesTheRecord(t *testing.T) {
@@ -253,8 +375,8 @@ func TestDNSProviderValidation(t *testing.T) {
 	}
 	h.createViewer(t, admin, "reader")
 	viewer := h.loginAs(t, "reader", "viewer-password-1")
-	if status, _, _ := h.api("GET", "/api/dns/providers", nil, viewer); status != http.StatusOK {
-		t.Fatalf("a viewer should be able to read providers: %d", status)
+	if status, _, _ := h.api("GET", "/api/dns/providers", nil, viewer); status != http.StatusForbidden {
+		t.Fatalf("a separate account read global DNS providers: %d", status)
 	}
 	if status, _, _ := h.api("POST", "/api/dns/providers", map[string]any{
 		"name": "sneaky", "kind": "cloudflare", "token": "t",

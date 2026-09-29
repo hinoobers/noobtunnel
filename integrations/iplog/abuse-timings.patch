@@ -1,0 +1,65 @@
+diff --git a/util/abuseipdb.js b/util/abuseipdb.js
+index 60549c6..1f1dde9 100644
+--- a/util/abuseipdb.js
++++ b/util/abuseipdb.js
+@@ -1,12 +1,23 @@
++const { performance } = require("node:perf_hooks");
++
+ const API_URL = "https://api.abuseipdb.com/api/v2/check";
+ 
+ function createAbuseIpDbClient({ apiKey, maxAgeInDays = 30, cacheTtlSeconds = 3600 } = {}) {
+     const cache = new Map();
+ 
+-    async function lookupIp(address) {
+-        if (!apiKey) return null;
++    async function lookupIp(address, onResult) {
++        const started = performance.now();
++        const report = (outcome, details = {}) => {
++            try {
++                onResult?.({ outcome, durationMs: Math.round((performance.now() - started) * 10) / 10, ...details });
++            } catch { /* Metrics must never change a lookup result. */ }
++        };
++        if (!apiKey) { report("notConfigured"); return null; }
+         const cached = cache.get(address);
+-        if (cached && cached.expiresAt > Date.now()) return cached.value;
++        if (cached && cached.expiresAt > Date.now()) {
++            report("cache", { cacheAgeMs: cacheTtlSeconds * 1000 - (cached.expiresAt - Date.now()) });
++            return cached.value;
++        }
+         if (cached) cache.delete(address);
+ 
+         const url = new URL(API_URL);
+@@ -20,10 +31,17 @@ function createAbuseIpDbClient({ apiKey, maxAgeInDays = 30, cacheTtlSeconds = 36
+                 headers: { Key: apiKey, Accept: "application/json" },
+                 signal: controller.signal
+             });
+-            if (!response.ok) return null;
++            if (!response.ok) {
++                report("httpError", { httpStatus: response.status,
++                    rateLimitRemaining: response.headers.get("X-RateLimit-Remaining") });
++                return null;
++            }
+             const payload = await response.json();
+             const data = payload?.data;
+-            if (!data || typeof data !== "object") return null;
++            if (!data || typeof data !== "object") {
++                report("invalidResponse", { httpStatus: response.status });
++                return null;
++            }
+             const value = {
+                 abuse_confidence_score: Number.isFinite(data.abuseConfidenceScore)
+                     ? data.abuseConfidenceScore
+@@ -40,8 +58,12 @@ function createAbuseIpDbClient({ apiKey, maxAgeInDays = 30, cacheTtlSeconds = 36
+                 is_tor: data.isTor === true
+             };
+             cache.set(address, { value, expiresAt: Date.now() + cacheTtlSeconds * 1000 });
++            report("network", { httpStatus: response.status,
++                rateLimitRemaining: response.headers.get("X-RateLimit-Remaining") });
+             return value;
+-        } catch {
++        } catch (error) {
++            report("error", { error: { name: error?.name || "Error",
++                code: error?.code || null, message: String(error?.message || error).slice(0, 500) } });
+             return null;
+         } finally {
+             clearTimeout(timer);

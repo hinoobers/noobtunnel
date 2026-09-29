@@ -40,14 +40,14 @@ func userUsage() string {
   list          list accounts
   add           create an account (fails if the name is taken)
   set-password  set an account's password, creating it if needed
-  role          change an account's role (admin or viewer)
+  role          change an account's role (admin or regular)
   remove        delete an account
 
 flags:
   --state-dir DIR   control node state directory (default ` + defaultStateDir() + `)
   --username NAME   account name
   --password PW     password; omit to have one generated and printed
-  --role ROLE       admin or viewer (default viewer for add, admin for bootstrap)
+  --role ROLE       admin or regular (default regular for add, admin for bootstrap)
 `
 }
 
@@ -88,7 +88,7 @@ func userMutate(sub string, args []string) error {
 	stateDir := fs.String("state-dir", env("NOOBTUNNEL_STATE_DIR", defaultStateDir()), "")
 	username := fs.String("username", "", "account name")
 	password := fs.String("password", "", "password (omit to generate one)")
-	role := fs.String("role", "", "admin or viewer")
+	role := fs.String("role", "", "admin or regular")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func userMutate(sub string, args []string) error {
 	}
 	targetRole := store.Role(*role)
 	if targetRole != "" && !store.ValidRole(targetRole) {
-		return fmt.Errorf("--role must be admin or viewer")
+		return fmt.Errorf("--role must be admin or regular")
 	}
 
 	switch sub {
@@ -118,7 +118,7 @@ func userMutate(sub string, args []string) error {
 
 	case "role":
 		if targetRole == "" {
-			return fmt.Errorf("--role is required (admin or viewer)")
+			return fmt.Errorf("--role is required (admin or regular)")
 		}
 		user, err := auth.FindByUsername(*username)
 		if err != nil {
@@ -162,7 +162,7 @@ func userMutate(sub string, args []string) error {
 				targetRole = store.RoleAdmin
 			}
 		} else {
-			targetRole = store.RoleViewer
+			targetRole = store.RoleRegular
 		}
 	}
 	user, created, err := auth.UpsertUser(*username, *password, targetRole)

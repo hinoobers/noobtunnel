@@ -49,7 +49,8 @@ function renderExitNodes(node, subNode, nodes) {
         h('span', { class: 'dot ' + (exitNode.status === 'ready' ? 'dot-on' : exitNode.status === 'disabled' ? 'dot-off' : 'dot-warn') }),
         h('span', null, exitNode.name),
         exitNode.kind === 'control' ? h('span', { class: 'chip chip-quiet', title: 'built in, always available' }, 'default') : null,
-        exitNode.kind === 'gre' ? h('span', { class: 'chip chip-relay' }, 'GRE') : null)),
+        exitNode.kind === 'gre' ? h('span', { class: 'chip chip-relay' }, 'GRE') : null,
+        exitNode.publicPool ? h('span', { class: 'chip chip-direct' }, 'public pool') : null)),
       h('td', null, h('div', { class: 'mono tiny', text: exitNode.public || '—' }),
         h('div', { class: 'muted tiny', text: exitNode.statusDetail || '' })),
       h('td', null, exitStatusChip(exitNode)),
@@ -57,6 +58,7 @@ function renderExitNodes(node, subNode, nodes) {
         ? exitNode.resources.map((name) => h('span', { class: 'chip chip-quiet' }, name))
         : h('span', { class: 'muted tiny' }, 'nothing yet')),
       h('td', null, canAdmin() ? h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        h('button', { class: 'btn btn-sm', 'data-action': 'exitnode-pool', 'data-id': exitNode.id, 'data-enabled': exitNode.publicPool ? 'false' : 'true' }, exitNode.publicPool ? 'Remove from public pool' : 'Add to public pool'),
         h('button', {
           class: 'btn btn-sm',
           'data-action': 'exitnode-toggle',
@@ -165,15 +167,16 @@ function showExitNodeSetup(exitNode) {
   const body = h('div', { class: 'stack' });
   if (setup.local && setup.local.length) {
     body.append(h('div', { class: 'cmd', text: setup.local.join('\n') }),
-      h('div', { class: 'cmd-actions' }, copyButton(setup.local.join('\n'), 'Copy for this host')));
+      h('div', { class: 'cmd-actions' }, copyButton(setup.local.join('\n'), 'Copy command')));
   }
   if (setup.remote && setup.remote.length) {
     body.append(h('strong', null, 'On the other host'),
       h('div', { class: 'cmd', text: setup.remote.join('\n') }),
-      h('div', { class: 'cmd-actions' }, copyButton(setup.remote.join('\n'), 'Copy for the other host')));
+      h('div', { class: 'cmd-actions' }, copyButton(setup.remote.join('\n'), 'Copy command')));
   }
   if (setup.notes) body.append(h('p', { class: 'muted tiny', text: setup.notes }));
-  modal('Setup: ' + exitNode.name, exitNode.public, body);
+  modal('Setup: ' + exitNode.name, exitNode.public, body, null,
+    { preventPassiveDismiss: !!((setup.local && setup.local.length) || (setup.remote && setup.remote.length)) });
 }
 
 async function applyExitNode(id) {
@@ -214,4 +217,12 @@ async function toggleExitNode(id, name, enabled) {
   } catch (err) {
     toast(err.message, 'fail');
   }
+}
+
+async function toggleExitNodePool(id, enabled) {
+  try {
+    await api('/api/exitnodes/' + id, { method: 'PATCH', body: { publicPool: enabled } });
+    await refresh();
+    toast(enabled ? 'Exit node added to public pool' : 'Exit node removed from public pool', 'ok');
+  } catch (err) { toast(err.message, 'fail'); }
 }

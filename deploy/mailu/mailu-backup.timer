@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up Mailu every six hours
+
+[Timer]
+OnCalendar=*-*-* 02,08,14,20:20:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=mailu-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -67,6 +67,8 @@ function fakeEl(tag = 'div') {
     appendChild(kid) { const node = asNode(kid); node.parentElement = el; el.childNodes.push(node); return node; },
     replaceChildren(...kids) { el.childNodes = kids.flat().map(asNode); el.childNodes.forEach((k) => { k.parentElement = el; }); },
     remove() {}, focus() {}, blur() {}, select() {}, reset() {},
+    setPointerCapture() {},
+    getBoundingClientRect() { return { left: 0, top: 0, width: 960, height: 470 }; },
     // Attributes are recorded: the tests check the classes the renderers set.
     attrs: {},
     setAttribute(name, value) { el.attrs[name] = String(value); if (name === 'class') el.className = String(value); },
@@ -128,7 +130,7 @@ const ctx = {
   fetch: async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({}) }),
   FormData: FakeFormData, MutationObserver: FakeObserver, EventSource: FakeEventSource,
   navigator: { clipboard: null }, location: windowShim.location, history: windowShim.history,
-  URL, Date, JSON, Math, Object, Array, String, Number, Boolean, Promise, Error, RegExp, Map, Set,
+  URL, URLSearchParams, Date, JSON, Math, Object, Array, String, Number, Boolean, Promise, Error, RegExp, Map, Set,
   encodeURIComponent, decodeURIComponent, parseInt, parseFloat, isNaN, structuredClone,
   requestAnimationFrame: (fn) => fn(), queueMicrotask: (fn) => fn(),
   addEventListener() {}, removeEventListener() {},
@@ -223,6 +225,21 @@ const node = document.createElement('div');
 renderStats(node, state.data.summary, state.data.settings, state.data.server);
 renderHealth(node, state.data.health);
 renderTopology(node, node, state.data.agents, state.data.summary);
+const findTopologyNode = (parent) => {
+  if (parent.className === 'node') return parent;
+  for (const child of parent.childNodes || []) {
+    const found = findTopologyNode(child);
+    if (found) return found;
+  }
+  return null;
+};
+const movable = findTopologyNode(node);
+if (!movable) throw new Error('topology has no draggable agent node');
+const startingPosition = movable.getAttribute('transform');
+movable.dispatchEvent({ type: 'pointerdown', button: 0, pointerId: 7, clientX: 480, clientY: 100 });
+movable.dispatchEvent({ type: 'pointermove', pointerId: 7, clientX: 540, clientY: 150 });
+movable.dispatchEvent({ type: 'pointerup', pointerId: 7 });
+if (movable.getAttribute('transform') === startingPosition) throw new Error('dragging did not move the topology node');
 renderAgentGrid(node, state.data.agents, state.data.summary);
 renderEvents(node, state.data.events);
 
@@ -256,15 +273,30 @@ renderResources(node, node, state.data.resources);
 renderDomains(node, node, state.data.domains);
 renderExitNodes(node, node, state.data.exitNodes);
 renderCharts(node, { total: 3, allowed: 2, blocked: 1, countries: [{ country: 'EE', total: 2, blocked: 1 }], hosts: [] });
-renderRequests(node, [{ time: new Date().toISOString(), host: 'a.example.com', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' }]);
+const decisionPie = node.childNodes[0];
+const decisionVisual = decisionPie.childNodes[1].childNodes[0];
+const allowedSlice = decisionVisual.childNodes[0].childNodes[0];
+if (decisionPie.getAttribute('class') !== 'chart pie-chart' ||
+    allowedSlice.getAttribute('aria-label') !== 'Allowed: 2 requests') {
+  throw new Error('Statistics should show a decision pie chart');
+}
+allowedSlice.dispatchEvent({ type: 'pointerenter' });
+if (decisionVisual.childNodes[1].childNodes[0].textContent !== '2') {
+  throw new Error('hovering a pie slice should show its exact request count');
+}
+const requestResult = { page: 1, total: 1, retained: 1, requests: [{ time: new Date().toISOString(), host: 'a.example.com', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' }] };
+renderRequests(node, requestResult);
+const stableTable = node.childNodes[0];
+renderRequests(node, JSON.parse(JSON.stringify(requestResult)));
+if (node.childNodes[0] !== stableTable) throw new Error('an unchanged request update replaced the table');
 
 // The Requests table: timestamps rather than "2m ago", the resource before the
 // decision, and the decision said in the row colour rather than in a pill.
 const requestsNode = document.createElement('div');
-renderRequests(requestsNode, [
+renderRequests(requestsNode, { page: 1, total: 2, retained: 2, requests: [
   { time: new Date().toISOString(), host: 'a.example.com', path: '/checkip', protocol: 'https', ip: '203.0.113.1', country: 'EE', allowed: true, resource: 'web' },
   { time: new Date().toISOString(), host: 'b.example.com', ip: '203.0.113.2', country: 'RU', allowed: false, reason: 'country rule', resource: 'web' },
-]);
+] });
 const requestsTable = requestsNode.childNodes[0];
 const headers = textsOf(requestsTable.childNodes[0]).join(',');
 if (headers !== 'Timestamp,Took,Host,Path,Client,Country,Resource,Decision') {
@@ -280,8 +312,8 @@ if (rowClasses[0] !== 'is-allowed' || rowClasses[1] !== 'is-blocked') {
 }
 const decisionCells = requestsTable.childNodes[1].childNodes.map((row) => row.childNodes[7]);
 const decisionText = decisionCells.map((cell) => textsOf(cell).join(''));
-if (decisionText[0] !== 'allowed' || decisionText[1] !== 'blocked') {
-  throw new Error('the decision should be plain text: ' + decisionText.join(', '));
+if (decisionText[0] !== 'allowed' || !decisionText[1].startsWith('blocked') || !decisionText[1].includes('country rule')) {
+  throw new Error('a blocked decision should include its reason: ' + decisionText.join(', '));
 }
 if (decisionCells.some((cell) => cell.childNodes.some((kid) =>
   typeof kid.getAttribute === 'function' && (kid.getAttribute('class') || '').includes('chip')))) {
@@ -305,6 +337,16 @@ const filtered = sortAndFilterRequests(sorted);
 if (filtered.length !== 1 || filtered[0].country !== 'EE') throw new Error('country filtering did not apply');
 requestFilters.country = new Set();
 requestSort = { key: 'time', direction: 'desc' };
+if (hasRequestFilters()) throw new Error('the default request sort should not show Clear filters');
+requestSort = { key: 'durationMs', direction: 'asc' };
+if (!hasRequestFilters()) throw new Error('Fastest first should show Clear filters');
+state.authenticated = false;
+clearRequestFilters();
+if (hasRequestFilters() || requestSort.key !== 'time' || requestSort.direction !== 'desc' ||
+    requestPageURL().includes('sort=')) {
+  throw new Error('Clear filters should restore the default request sort');
+}
+state.authenticated = true;
 
 // The chart keeps the whole label and lets the stylesheet clip it; a hostname
 // used to run into its own bar.
@@ -317,6 +359,54 @@ installTabs(node);
 drawerBody(agent);
 resourceEditorPage(null);
 resourceEditorPage(resource);
+const srvResource = { ...resource, protocol: 'tcp', listenPort: 25565,
+  domain: 'game.example.com', srv: { service: 'minecraft', protocol: 'tcp', priority: 0, weight: 0 } };
+function namedElement(root, name) {
+  if (root.getAttribute?.('name') === name) return root;
+  for (const child of root.childNodes || []) {
+    const found = namedElement(child, name);
+    if (found) return found;
+  }
+  return null;
+}
+const adminSRVForm = resourceEditorPage(srvResource);
+if (!namedElement(adminSRVForm, 'srvPreset').options.some((option) => option.getAttribute('value') === 'custom')) {
+  throw new Error('admin lost the custom SRV option');
+}
+state.session = { username: 'regular', role: 'regular', canAdmin: false };
+const regularSRVForm = resourceEditorPage(srvResource);
+const regularPresets = namedElement(regularSRVForm, 'srvPreset').options;
+if (regularPresets.some((option) => option.getAttribute('value') === 'custom')) {
+  throw new Error('regular account can choose a custom SRV service');
+}
+if (!regularPresets.some((option) => option.getAttribute('value') === 'minecraft' && option.getAttribute('selected') !== null)) {
+  throw new Error('editing an SRV record did not select its application preset');
+}
+if (namedElement(regularSRVForm, 'srvPriority') || namedElement(regularSRVForm, 'srvWeight')) {
+  throw new Error('SRV priority and weight are still editable');
+}
+if (!namedElement(regularSRVForm, 'srvService').parentElement.parentElement.hidden) {
+  throw new Error('regular account can edit the preset service name');
+}
+const unnamedTCP = { ...srvResource, domain: '', srv: null };
+const unnamedForm = resourceEditorPage(unnamedTCP);
+const unnamedDomain = namedElement(unnamedForm, 'domain');
+const subdomainField = namedElement(unnamedForm, 'subdomain').parentElement;
+const srvField = namedElement(unnamedForm, 'createSrv').parentElement.parentElement;
+if (!subdomainField.hidden || !srvField.hidden) {
+  throw new Error('no-name resource still shows subdomain or SRV controls');
+}
+unnamedDomain.value = 'example.com';
+unnamedDomain.dispatchEvent({ type: 'change' });
+if (subdomainField.hidden || srvField.hidden) {
+  throw new Error('selecting a wildcard domain did not restore subdomain and SRV controls');
+}
+unnamedDomain.value = '';
+unnamedDomain.dispatchEvent({ type: 'change' });
+if (!subdomainField.hidden || !srvField.hidden) {
+  throw new Error('switching back to no name did not hide subdomain and SRV controls');
+}
+state.session = { username: 'admin', role: 'admin', canAdmin: true };
 openResourceEditor(null);
 
 // Requests: thirty per page, with a way to walk the rest. A country the API did
@@ -328,14 +418,14 @@ for (let i = 0; i < 35; i++) {
     country: i % 2 ? 'EE' : '', allowed: true, resource: 'web', durationMs: 12,
   });
 }
-requestPage = 1;
+state.requestPage = 1;
 const pagedNode = document.createElement('div');
-renderRequests(pagedNode, manyRequests);
+renderRequests(pagedNode, { page: 1, total: 35, retained: 35, requests: manyRequests.slice(0, 30) });
 const pageRows = pagedNode.childNodes[0].childNodes[1].childNodes;
 if (pageRows.length !== 30) {
   throw new Error('the requests table should show thirty rows, it shows ' + pageRows.length);
 }
-if (textsOf(pagedNode).join(' | ').indexOf('Page 1 of 2') === -1) {
+if (textsOf(pagedNode).join(' | ').indexOf('Showing 1-30 of 35') === -1) {
   throw new Error('the requests table needs a pager: ' + textsOf(pagedNode).join(' | '));
 }
 // The list is only the list: the charts moved to their own tab, and the note about
@@ -343,13 +433,13 @@ if (textsOf(pagedNode).join(' | ').indexOf('Page 1 of 2') === -1) {
 if (textsOf(pagedNode).join(' ').indexOf('have no country') !== -1) {
   throw new Error('the country note should not be under the requests table');
 }
-requestPage = 2;
+state.requestPage = 2;
 const secondPage = document.createElement('div');
-renderRequests(secondPage, manyRequests);
+renderRequests(secondPage, { page: 2, total: 35, retained: 35, requests: manyRequests.slice(30) });
 if (secondPage.childNodes[0].childNodes[1].childNodes.length !== 5) {
   throw new Error('the second page should hold the remaining five rows');
 }
-requestPage = 1;
+state.requestPage = 1;
 
 // Resources: the dot next to the name says whether it is healthy, so there is no
 // separate status column, and the diagnosis is only offered when something is
@@ -499,6 +589,65 @@ state.brandName = 'acme';
 if (brandName() !== 'acme') throw new Error('the brand name ignored the signed in session');
 state.brandName = 'noobtunnel';
 ` + "`" + `, ctx, { filename: 'render.mjs' });
+
+await vm.runInContext(` + "`" + `
+(async () => {
+  state.view = 'activity';
+  state.logTab = 'requests';
+  state.requestPage = 1;
+  state.requestPageLoading = false;
+  const first = { page: 1, total: 1, retained: 1,
+    summary: { total: 1, allowed: 1, blocked: 0, countries: [], hosts: [] },
+    requests: [{ time: '2026-09-24T12:00:00Z', host: 'a.example.com', allowed: true }] };
+  state.data.server.requests = { summary: first.summary, recent: [] };
+  state.requestPageData = first;
+  shell = { requestTable: document.createElement('div'), requestsSub: document.createElement('p') };
+  renderRequests(shell.requestTable, first);
+  const oldTable = shell.requestTable.childNodes[0];
+  api = async () => JSON.parse(JSON.stringify(first));
+  await loadRequestPage(true);
+  if (shell.requestTable.childNodes[0] !== oldTable || state.requestPageLoading) {
+    throw new Error('a quiet request check should leave unchanged rows mounted');
+  }
+  api = async () => ({ ...first, total: 2, summary: { ...first.summary, total: 2, allowed: 2 },
+    requests: [{ time: '2026-09-24T12:01:00Z', host: 'b.example.com', allowed: true }, ...first.requests] });
+  await loadRequestPage(true);
+  if (shell.requestTable.childNodes[0] === oldTable || shell.requestsSub.textContent.indexOf('2 requests') < 0) {
+    throw new Error('a new request should appear without a loading state');
+  }
+})()
+` + "`" + `, ctx, { filename: 'live-requests.mjs' });
+
+await vm.runInContext(` + "`" + `
+(async () => {
+  const oldInterval = setInterval;
+  const oldRefresh = refresh;
+  const oldAPI = api;
+  const current = state.data.agents[0];
+  const oldEnrolled = current.enrolledAt;
+  const oldOnline = current.online;
+  let tick;
+  let keepalives = 0;
+  try {
+    current.enrolledAt = null;
+    current.online = false;
+    setInterval = (callback) => { tick = callback; return 1; };
+    refresh = async () => {};
+    api = async (path) => { if (path.endsWith('/keepalive')) keepalives++; return {}; };
+    showCreated(current, 'install command');
+    modalSession.node.childNodes[1].isConnected = true;
+    await tick();
+    if (keepalives !== 1) throw new Error('the install modal did not renew its enrollment deadline');
+  } finally {
+    closeModal();
+    setInterval = oldInterval;
+    refresh = oldRefresh;
+    api = oldAPI;
+    current.enrolledAt = oldEnrolled;
+    current.online = oldOnline;
+  }
+})()
+` + "`" + `, ctx, { filename: 'agent-install-wait.mjs' });
 
 console.log('every render function completed');
 `

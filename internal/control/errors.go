@@ -10,6 +10,7 @@ import (
 // domain is not updating, a certificate is missing or a listener is not up.
 type ErrorEntry struct {
 	Time    time.Time `json:"time"`
+	OwnerID string    `json:"-"`
 	Source  string    `json:"source"`
 	Message string    `json:"message"`
 	Detail  string    `json:"detail,omitempty"`
@@ -30,6 +31,10 @@ func newErrorLog() *errorLog { return &errorLog{} }
 // record adds an error. Consecutive duplicates are collapsed so a retry loop
 // cannot fill the list with the same line.
 func (l *errorLog) record(source, message, detail, hint string) {
+	l.recordOwned("", source, message, detail, hint)
+}
+
+func (l *errorLog) recordOwned(ownerID, source, message, detail, hint string) {
 	if l == nil {
 		return
 	}
@@ -38,7 +43,7 @@ func (l *errorLog) record(source, message, detail, hint string) {
 	// The same failure happening again moves its entry back to the top with a
 	// fresh time instead of stacking up: a retrying sync should not fill the list.
 	for i, existing := range l.entries {
-		if existing.Source != source || existing.Message != message || existing.Detail != detail {
+		if existing.OwnerID != ownerID || existing.Source != source || existing.Message != message || existing.Detail != detail {
 			continue
 		}
 		existing.Time = time.Now().UTC()
@@ -52,6 +57,7 @@ func (l *errorLog) record(source, message, detail, hint string) {
 	}
 	entry := ErrorEntry{
 		Time:    time.Now().UTC(),
+		OwnerID: ownerID,
 		Source:  source,
 		Message: message,
 		Detail:  detail,
@@ -102,5 +108,5 @@ func (l *errorLog) remove(fingerprints map[string]bool) {
 }
 
 func errorFingerprint(entry ErrorEntry) string {
-	return entry.Source + "\x00" + entry.Message + "\x00" + entry.Detail
+	return entry.OwnerID + "\x00" + entry.Source + "\x00" + entry.Message + "\x00" + entry.Detail
 }

@@ -285,12 +285,8 @@ type AgentInput struct {
 
 // BuildAgentConfig renders the WireGuard configuration for an agent.
 func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
-	// An agent carries exactly one thing for the rest of the mesh: its own mesh
-	// address. Networks a machine offers are reachable by the *control node*,
-	// which is the node that dials published targets and routes them - agents do
-	// not need each other's LANs, and not installing them here is what keeps two
-	// machines with the same private range from having to fight over it.
-	var rejected []Rejected
+	// Resolve claims at the receiver as well, so every shared prefix has one owner.
+	owners, rejected := in.Mesh.ResolveAdvertise(in.Peers)
 	cfg := wg.Config{
 		Interface: wg.InterfaceConfig{
 			PrivateKey: in.PrivateKey,
@@ -303,6 +299,11 @@ func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
 	meshRoute := in.Mesh.CIDR.String()
 	cfg.Routes = append(cfg.Routes, meshRoute)
 	seenRoute := map[string]bool{meshRoute: true}
+	if !in.Mesh.CIDR.Contains(in.Hub.Address) {
+		hubRoute := netip.PrefixFrom(in.Hub.Address, 32).String()
+		cfg.Routes = append(cfg.Routes, hubRoute)
+		seenRoute[hubRoute] = true
+	}
 
 	var relayed []string
 	ordered := append([]Member(nil), in.Peers...)
@@ -316,6 +317,7 @@ func BuildAgentConfig(in AgentInput) (wg.Config, []Rejected) {
 		if peer.Address.IsValid() {
 			owned = append(owned, netip.PrefixFrom(peer.Address, 32))
 		}
+		owned = append(owned, owners[peer.ID]...)
 		// Kernel routes always point at the WireGuard interface; WireGuard then
 		// decides whether the packet leaves directly or through the hub.
 		for _, p := range owned {

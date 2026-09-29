@@ -59,6 +59,9 @@ func TestWebSocketUpgradePassesThrough(t *testing.T) {
 	spec := testSpec(1, ProtoHTTP, host, port, listenPort)
 	spec.Domain = "chat.example.com"
 	spec.WebSockets = true
+	spec.MonthlyRequestQuota = 3_000_000
+	spec.MonthlyQuotaBytes = 100_000_000_000
+	spec.SustainedBps, spec.BurstBps, spec.PeakBps, spec.OverQuotaBps = 15_000_000, 30_000_000, 100_000_000, 512_000
 	m.Reconcile([]Spec{spec})
 
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", listenPort), 5*time.Second)
@@ -112,6 +115,12 @@ func TestWebSocketUpgradePassesThrough(t *testing.T) {
 	}
 	if string(again) != "more" {
 		t.Fatalf("the tunnel echoed %q on the second frame", again)
+	}
+	if got := m.TrafficRequests(1); got != 1 {
+		t.Fatalf("upgraded request count = %d", got)
+	}
+	if got := m.TrafficUsage(1); got < uint64(2*(len("ping-over-websocket")+len("more"))) {
+		t.Fatalf("upgraded traffic counted only %d bytes", got)
 	}
 }
 

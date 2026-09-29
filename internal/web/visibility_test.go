@@ -56,7 +56,7 @@ func TestViewPanelSwitchingIsWired(t *testing.T) {
 	if !strings.Contains(app, "panel.hidden = !active") {
 		t.Error("renderShell must set panel.hidden when switching views")
 	}
-	if !strings.Contains(app, "setView(tab.dataset.view)") {
+	if !strings.Contains(app, "setView(view)") {
 		t.Error("clicking a tab must switch the view through setView")
 	}
 	if !strings.Contains(app, "renderShell()") {

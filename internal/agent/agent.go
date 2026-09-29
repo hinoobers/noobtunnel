@@ -194,11 +194,9 @@ func (a *Agent) setConnected(v bool) {
 	a.connectedMu.Lock()
 	a.connected = v
 	a.connectedMu.Unlock()
-	if !v {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		a.saveRuntime(ctx)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	a.saveRuntime(ctx)
 }
 
 // saveRuntime records what this agent knows locally, so `noobtunnel status`
@@ -296,15 +294,15 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
+		a.setLastError(err.Error())
+		a.saveRuntime(ctx)
 		switch {
 		case errors.Is(err, errRevoked), errors.Is(err, errTokenRejected):
-			a.setLastError(err.Error())
 			return err
 		case errors.Is(err, errShutdown):
 			a.log.Info("stopping on control node request")
 			return nil
 		}
-		a.setLastError(err.Error())
 		a.log.Warn("control connection ended, retrying", "error", err, "in", backoff.Round(time.Second))
 		if time.Since(start) > 60*time.Second {
 			backoff = minBackoff
@@ -538,6 +536,10 @@ func (a *Agent) handleFirstMessage(msg rawMessage) error {
 		if err := a.applyDevice(context.Background(), true); err != nil {
 			return err
 		}
+		a.syncMeshDNS()
+		if runtime.GOOS == "windows" {
+			a.syncWindowsCarriedForwarding(context.Background())
+		}
 		// Only now does the interface have the mesh address a forward has to bind
 		// on: before that, listening on it fails with "cannot assign requested
 		// address".
@@ -562,7 +564,8 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 		if err := json.Unmarshal(msg.raw, &p); err != nil {
 			return err
 		}
-		a.updatePeers(p.Generation, p.Peers)
+		a.updatePeers(p.Generation, p.Peers, p.SelfMeshDNS)
+		a.syncMeshDNS()
 		// The membership message carries what the mesh routes through this agent,
 		// which changes when the operator edits its networks.
 		if a.setCarry(p.Carry) && runtime.GOOS == "linux" {
@@ -572,6 +575,9 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 		a.setForwards(p.Forwards)
 		if err := a.reconcile(context.Background()); err != nil {
 			return err
+		}
+		if runtime.GOOS == "windows" {
+			a.syncWindowsCarriedForwarding(context.Background())
 		}
 		a.syncForwards(context.Background())
 		return nil
@@ -619,7 +625,7 @@ func (a *Agent) handleMessage(msg rawMessage, writer *connWriter) error {
 	}
 }
 
-func (a *Agent) updatePeers(generation uint64, peers []proto.Peer) {
+func (a *Agent) updatePeers(generation uint64, peers []proto.Peer, selfMeshDNS string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.session == nil {
@@ -630,6 +636,7 @@ func (a *Agent) updatePeers(generation uint64, peers []proto.Peer) {
 		a.session.peers[p.ID] = p
 	}
 	a.session.generation = generation
+	a.session.welcome.MeshDNS = selfMeshDNS
 }
 
 // setCarry records what the mesh routes through this agent and reports whether it
@@ -891,6 +898,7 @@ func (a *Agent) collectStats(ctx context.Context) proto.Stats {
 		T:         proto.TStats,
 		UptimeSec: int64(time.Since(a.startedAt).Seconds()),
 		Backend:   a.backend.Name(),
+		Networks:  localNetworkCandidates(a.opts.Interface),
 		LastError: a.lastError(),
 	}
 	if ok {
@@ -935,6 +943,7 @@ func (a *Agent) collectStats(ctx context.Context) proto.Stats {
 }
 
 func (a *Agent) shutdown() {
+	a.clearMeshDNS()
 	if a.opts.KeepInterface {
 		return
 	}

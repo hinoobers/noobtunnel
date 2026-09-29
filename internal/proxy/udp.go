@@ -61,6 +61,8 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 			g.log.Debug("udp read failed", "port", g.port, "error", err)
 			return
 		}
+		started := time.Now()
+		policyMs, dialMs := int64(0), int64(0)
 		target, ok := g.currentSingle()
 		if !ok {
 			continue
@@ -79,13 +81,17 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 		}
 		if !exists {
 			decision := g.connectionDecision(target, clientAddr, "")
+			policyMs = time.Since(started).Milliseconds()
 			if !decision.Allow {
 				mu.Lock()
 				denied[key] = time.Now()
 				mu.Unlock()
-				g.observeConnection(target, clientAddr, "", false, decision.Reason)
+				g.observeConnection(target, clientAddr, "", false, decision.Reason, started, policyMs, 0)
 				continue
 			}
+		}
+		if target.traffic != nil && !target.traffic.take(n, false) {
+			continue
 		}
 		mu.Lock()
 		session, exists := sessions[key]
@@ -103,7 +109,9 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 				continue
 			}
 			chosen := candidates[0]
+			dialStarted := time.Now()
 			upstream, err := net.DialTimeout("udp", chosen.Address(), dialTimeout)
+			dialMs = time.Since(dialStarted).Milliseconds()
 			if err != nil {
 				mu.Unlock()
 				target.stat.targetFor(chosen.ID).setError(err)
@@ -116,6 +124,7 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 				packet:   pc,
 				stat:     target.stat,
 				target:   target.stat.targetFor(chosen.ID),
+				traffic:  target.traffic,
 			}
 			sessions[key] = session
 			created = true
@@ -127,7 +136,7 @@ func (g *group) serveUDP(pc net.PacketConn, dialTimeout time.Duration) {
 		}
 		mu.Unlock()
 		if created {
-			g.observeConnection(target, clientAddr, "", true, "")
+			g.observeConnection(target, clientAddr, "", true, "", started, policyMs, dialMs)
 		}
 
 		session.touch()
@@ -154,6 +163,7 @@ type udpSession struct {
 	packet   net.PacketConn
 	stat     *resourceStats
 	target   *targetStats
+	traffic  *trafficMeter
 
 	mu        sync.Mutex
 	last      time.Time
@@ -200,6 +210,9 @@ func (s *udpSession) readLoop() {
 		n, err := s.upstream.Read(buf)
 		if err != nil {
 			return
+		}
+		if s.traffic != nil && !s.traffic.take(n, false) {
+			continue
 		}
 		if _, err := s.packet.WriteTo(buf[:n], s.client); err != nil {
 			return

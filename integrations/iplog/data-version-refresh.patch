@@ -1,0 +1,32 @@
+diff --git a/app.js b/app.js
+index 8c64bf5..b6abf18 100644
+--- a/app.js
++++ b/app.js
+@@ -520,7 +520,7 @@ function createApp({
+             return dataVersion.value;
+         }
+ 
+-        return dataVersionCoalescer.run("data-version", async () => {
++        const refresh = dataVersionCoalescer.run("data-version", async () => {
+             /*
+              * Re-check after joining the coalesced operation. Another
+              * request may have refreshed it while this one was waiting.
+@@ -549,6 +549,18 @@ function createApp({
+ 
+             return value;
+         });
++
++        // After the first successful read, keep serving the last known version
++        // while the database is checked in the background. A slow refresh must
++        // not hold up an IP lookup or turn a transient DB outage into HTTP 500.
++        if (dataVersion.checkedAt) {
++            refresh.catch((error) => {
++                dataVersion.checkedAt = Date.now();
++                console.warn("IP dataset version refresh failed:", error);
++            });
++            return dataVersion.value;
++        }
++        return refresh;
+     }
+ 
+     /*

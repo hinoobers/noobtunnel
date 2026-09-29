@@ -18,6 +18,7 @@ type ExitNodeView struct {
 	Address     string `json:"address,omitempty"`
 	BindAddress string `json:"bindAddress,omitempty"`
 	Enabled     bool   `json:"enabled"`
+	PublicPool  bool   `json:"publicPool"`
 	Deletable   bool   `json:"deletable"`
 	// Status is ready, not-configured or disabled.
 	Status       string   `json:"status"`
@@ -72,7 +73,7 @@ func (s *Server) exitNodeViews() []ExitNodeView {
 		return false
 	}
 	resources := s.store.Resources()
-	public := s.publicHost()
+	public := s.controlNodeAddress()
 
 	out := make([]ExitNodeView, 0)
 	for _, node := range s.store.ExitNodes() {
@@ -83,6 +84,7 @@ func (s *Server) exitNodeViews() []ExitNodeView {
 			Address:         node.Address,
 			BindAddress:     node.BindAddress(),
 			Enabled:         node.Enabled,
+			PublicPool:      node.PublicPool,
 			Deletable:       node.Deletable(),
 			Resources:       []string{},
 			TunnelInterface: node.TunnelInterface,
@@ -167,6 +169,11 @@ func exitNodeSetup(node store.ExitNode, public string) SetupCommands {
 func (s *Server) handleExitNodes(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		who := principalFrom(r)
+		if !who.canAdmin() {
+			writeJSON(w, http.StatusOK, map[string]any{"exitNodes": s.StateSnapshotFor(who).ExitNodes, "localAddresses": []string{}})
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"exitNodes":      s.exitNodeViews(),
 			"localAddresses": localAddresses(),
@@ -208,6 +215,20 @@ func (s *Server) handleExitNodeItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("no such exit node"))
 		return
 	}
+	if !principalFrom(r).canAdmin() {
+		if r.Method != http.MethodGet || action != "" {
+			writeJSON(w, http.StatusForbidden, errBody("only admins can manage exit nodes"))
+			return
+		}
+		for _, node := range s.StateSnapshotFor(principalFrom(r)).ExitNodes {
+			if node.ID == id {
+				writeJSON(w, http.StatusOK, map[string]any{"exitNode": node})
+				return
+			}
+		}
+		writeJSON(w, http.StatusNotFound, errBody("no such exit node"))
+		return
+	}
 	switch {
 	case action == "" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{"exitNode": s.exitNodeView(id)})
@@ -242,7 +263,7 @@ func (s *Server) handleExitNodeItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errBody("the control node exit node needs no setup"))
 			return
 		}
-		output, err := s.applyExitNode(r.Context(), node, s.publicHost())
+		output, err := s.applyExitNode(r.Context(), node, s.controlNodeAddress())
 		if err != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "output": output, "error": err.Error()})
 			return
@@ -314,6 +335,7 @@ type exitNodePayload struct {
 	PeerTunnelAddr  string `json:"peerTunnelAddress"`
 	TunnelInterface string `json:"tunnelInterface"`
 	Enabled         *bool  `json:"enabled"`
+	PublicPool      *bool  `json:"publicPool"`
 }
 
 func (p exitNodePayload) input() store.ExitNodeInput {
@@ -328,5 +350,6 @@ func (p exitNodePayload) input() store.ExitNodeInput {
 		PeerTunnelAddr:  p.PeerTunnelAddr,
 		TunnelInterface: p.TunnelInterface,
 		Enabled:         p.Enabled,
+		PublicPool:      p.PublicPool,
 	}
 }

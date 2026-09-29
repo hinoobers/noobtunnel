@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -83,4 +84,83 @@ func TestTheRequestLogSeparatesConnectingFromWaiting(t *testing.T) {
 		t.Fatal("no request was observed")
 	}
 
+}
+
+func TestStreamAndDatagramConnectionsRecordSetupTiming(t *testing.T) {
+	for _, protocol := range []string{ProtoTCP, ProtoUDP} {
+		t.Run(protocol, func(t *testing.T) {
+			var backend string
+			if protocol == ProtoTCP {
+				addr, stop := echoServer(t)
+				defer stop()
+				backend = addr
+			} else {
+				pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pc.Close()
+				backend = pc.LocalAddr().String()
+			}
+			host, port := hostPort(backend)
+			listenPort := freePort(t)
+			events := make(chan RequestEvent, 4)
+			m := New(quiet())
+			defer m.Close()
+			m.OnRequest = func(event RequestEvent) { events <- event }
+			m.Reconcile([]Spec{testSpec(1, protocol, host, port, listenPort)})
+			conn, err := net.DialTimeout(protocol, fmt.Sprintf("127.0.0.1:%d", listenPort), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if _, err := conn.Write([]byte("hello")); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case event := <-events:
+				if !event.Allowed || event.Protocol != protocol || event.DurationMs <= 0 || event.Time.IsZero() {
+					t.Fatalf("open connection must have measured setup timing: %+v", event)
+				}
+				if event.DialMs < 0 || event.DialMs > event.DurationMs || event.PolicyMs > event.DurationMs {
+					t.Fatalf("invalid connection timing phases: %+v", event)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("setup event must appear while the connection is still open")
+			}
+		})
+	}
+}
+
+func TestBlockedRequestAttributesLookupWaitToPolicy(t *testing.T) {
+	backend := httptestServer(t, "unused")
+	host, port := hostPort(backend)
+	listenPort := freePort(t)
+	events := make(chan RequestEvent, 1)
+	m := New(quiet())
+	defer m.Close()
+	m.OnRequest = func(event RequestEvent) { events <- event }
+	m.AbuseScoreOf = func(netip.Addr) int {
+		time.Sleep(30 * time.Millisecond)
+		return 100
+	}
+	spec := testSpec(1, ProtoHTTP, host, port, listenPort)
+	spec.BlockHighRiskIPs = true
+	m.Reconcile([]Spec{spec})
+	response, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", listenPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("status=%d", response.StatusCode)
+	}
+	select {
+	case event := <-events:
+		if event.Allowed || event.PolicyMs < 25 || event.DurationMs < event.PolicyMs || event.BackendMs != 0 || event.Target != "" {
+			t.Fatalf("IP lookup delay must belong to policy: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing blocked request event")
+	}
 }

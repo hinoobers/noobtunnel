@@ -32,6 +32,7 @@ func TestAReportDoesNotBlameTheListenersItNeverStarted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	agent, err := server.Store().AddAgent(store.AddAgentParams{Name: "homelab", Advertise: []string{"10.10.0.0/16"}})
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +76,7 @@ func TestResourceSpecsCarrySecurityControls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
 	agent, err := server.Store().AddAgent(store.AddAgentParams{Name: "web"})
 	if err != nil {
 		t.Fatal(err)

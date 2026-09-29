@@ -61,7 +61,7 @@ func TestIPAPISettingsAreStoredAndUsed(t *testing.T) {
 	})
 	admin := h.login(t)
 
-	// Nothing configured yet: country rules are inert.
+	// Nothing configured yet: the panel reports no country lookup service.
 	status, body, _ := h.api("GET", "/api/geoip", nil, admin)
 	if status != http.StatusOK {
 		t.Fatalf("GET /api/geoip returned %d", status)
@@ -143,6 +143,56 @@ func TestIPAPISettingsAreStoredAndUsed(t *testing.T) {
 	}
 }
 
+func TestPublicIPAPISelectionMakesIpLogFallbackOptional(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	status, body, _ := h.api("POST", "/api/geoip", map[string]any{
+		"host": "http://127.0.0.1:4702", "token": "iplog-key",
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("saving iplog: %d %s", status, body)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{"provider": "ipapi"}, admin)
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "API key") {
+		t.Fatalf("keyless public provider: %d %s", status, body)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
+		"provider": "ipapi", "publicToken": "test-key",
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("saving public provider: %d %s", status, body)
+	}
+	cfg := h.server.Store().GeoIP()
+	if cfg.Provider != "ipapi" || cfg.Host != "http://127.0.0.1:4702" || cfg.Token != "iplog-key" || cfg.PublicToken != "test-key" || cfg.FallbackEnabled {
+		t.Fatalf("public settings = %+v", cfg)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{"provider": "ipapi", "fallbackEnabled": true}, admin)
+	if status != http.StatusOK || !h.server.Store().GeoIP().FallbackEnabled {
+		t.Fatalf("enabling configured iplog fallback: %d %s", status, body)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{"provider": "ipapi", "fallbackEnabled": false}, admin)
+	if status != http.StatusOK || h.server.Store().GeoIP().PublicToken != "test-key" || h.server.Store().GeoIP().FallbackEnabled {
+		t.Fatalf("saving public provider again: %d %s", status, body)
+	}
+}
+
+func TestPublicIPAPIFallbackNeedsConfiguredIpLog(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	status, body, _ := h.api("POST", "/api/geoip", map[string]any{
+		"provider": "ipapi", "publicToken": "test-key", "fallbackEnabled": true,
+	}, admin)
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "configure iplog") {
+		t.Fatalf("fallback without iplog: %d %s", status, body)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
+		"provider": "ipapi", "publicToken": "test-key", "fallbackEnabled": false,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("public API without fallback: %d %s", status, body)
+	}
+}
+
 // TestTheIPAPIFlagsWorkWithoutThePanel keeps a control node started with
 // --ipapi-host working before anyone opens the settings tab.
 func TestTheIPAPIFlagsWorkWithoutThePanel(t *testing.T) {
@@ -161,5 +211,53 @@ func TestTheIPAPIFlagsWorkWithoutThePanel(t *testing.T) {
 	}
 	if got := h.server.GeoIPLookupForTest("203.0.113.9"); got != "SE" {
 		t.Fatalf("country lookup = %q, want SE", got)
+	}
+}
+
+func TestIPAPIForwardFollowsTheSelectedAgent(t *testing.T) {
+	h := newHarness(t, true)
+	admin := h.login(t)
+	first := h.enrolledAgent(t, "first")
+	second := h.enrolledAgent(t, "second")
+	status, body, _ := h.api("POST", "/api/geoip", map[string]any{
+		"host": "http://172.18.0.1:4702", "agentId": second.id,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("saving IP API agent returned %d: %s", status, body)
+	}
+	if len(h.server.Forwards(first.id)) != 0 {
+		t.Fatal("the other agent received the IP API forward")
+	}
+	forwards := h.server.Forwards(second.id)
+	if len(forwards) != 1 || forwards[0].Target != "172.18.0.1:4702" || forwards[0].Protocol != "tcp" {
+		t.Fatalf("selected agent forwards = %+v", forwards)
+	}
+	if got := h.server.Store().GeoIP().AgentID; got != second.id {
+		t.Fatalf("stored agent ID = %d, want %d", got, second.id)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
+		"provider": "ipapi", "publicToken": "test-key", "agentId": second.id,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("saving public API returned %d: %s", status, body)
+	}
+	if forwards := h.server.Forwards(second.id); len(forwards) != 0 {
+		t.Fatalf("iplog was forwarded with fallback disabled: %+v", forwards)
+	}
+	status, body, _ = h.api("POST", "/api/geoip", map[string]any{
+		"provider": "ipapi", "fallbackEnabled": true, "agentId": second.id,
+	}, admin)
+	if status != http.StatusOK {
+		t.Fatalf("enabling public API fallback returned %d: %s", status, body)
+	}
+	forwards = h.server.Forwards(second.id)
+	if len(forwards) != 1 || forwards[0].Target != "172.18.0.1:4702" {
+		t.Fatalf("iplog fallback forward = %+v", forwards)
+	}
+	status, _, _ = h.api("POST", "/api/geoip", map[string]any{
+		"host": "http://172.18.0.1:4702", "agentId": 999999,
+	}, admin)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unknown agent returned %d, want 400", status)
 	}
 }

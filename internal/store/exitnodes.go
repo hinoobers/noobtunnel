@@ -38,11 +38,12 @@ func ValidExitNodeKind(k ExitNodeKind) bool {
 
 // ExitNode is a public address that resources can be published on.
 type ExitNode struct {
-	ID      string       `json:"id"`
-	Name    string       `json:"name"`
-	Kind    ExitNodeKind `json:"kind"`
-	Address string       `json:"address,omitempty"`
-	Enabled bool         `json:"enabled"`
+	ID         string       `json:"id"`
+	Name       string       `json:"name"`
+	Kind       ExitNodeKind `json:"kind"`
+	Address    string       `json:"address,omitempty"`
+	Enabled    bool         `json:"enabled"`
+	PublicPool bool         `json:"publicPool,omitempty"`
 	// Interface is where the address lives, for example "lo" for a secondary
 	// address.
 	Interface string `json:"interface,omitempty"`
@@ -81,6 +82,7 @@ type ExitNodeInput struct {
 	PeerTunnelAddr  string
 	TunnelInterface string
 	Enabled         *bool
+	PublicPool      *bool
 }
 
 var (
@@ -175,7 +177,7 @@ func (s *Store) UpdateExitNode(id string, in ExitNodeInput) (ExitNode, error) {
 		if st.ExitNodes[index].Kind == ExitNodeControl {
 			// The built-in node cannot be renamed or moved, but it can be
 			// switched off so resources have to live on real exit nodes.
-			if in.Enabled == nil {
+			if in.Enabled == nil && in.PublicPool == nil {
 				return ErrControlExitNode
 			}
 			name := strings.TrimSpace(in.Name)
@@ -186,8 +188,16 @@ func (s *Store) UpdateExitNode(id string, in ExitNodeInput) (ExitNode, error) {
 				return ErrControlExitNode
 			}
 			control := st.ExitNodes[index]
-			control.Enabled = *in.Enabled
+			if in.Enabled != nil {
+				control.Enabled = *in.Enabled
+			}
+			if in.PublicPool != nil {
+				control.PublicPool = *in.PublicPool
+			}
 			st.ExitNodes[index] = control
+			if !control.PublicPool {
+				disablePrivateResourcesOnExit(st, control.ID)
+			}
 			updated = control
 			return nil
 		}
@@ -197,15 +207,32 @@ func (s *Store) UpdateExitNode(id string, in ExitNodeInput) (ExitNode, error) {
 		}
 		node.ID = id
 		node.CreatedAt = st.ExitNodes[index].CreatedAt
+		if in.PublicPool == nil {
+			node.PublicPool = st.ExitNodes[index].PublicPool
+		}
 		fillExitNodeDefaults(st, &node, id)
 		if err := checkExitNodeClashes(st, node, id); err != nil {
 			return err
 		}
 		st.ExitNodes[index] = node
+		if !node.PublicPool {
+			disablePrivateResourcesOnExit(st, node.ID)
+		}
 		updated = node
 		return nil
 	})
 	return updated, err
+}
+
+func disablePrivateResourcesOnExit(st *State, nodeID string) {
+	for _, resource := range st.Resources {
+		if resource.OwnerID == "" {
+			continue
+		}
+		if resource.ExitNodeID == nodeID || (nodeID == ControlExitNodeID && resource.ExitNodeID == "") {
+			resource.Enabled = false
+		}
+	}
 }
 
 // checkExitNodeClashes rejects duplicate names and addresses.
@@ -268,6 +295,9 @@ func buildExitNode(in ExitNodeInput) (ExitNode, error) {
 		return ExitNode{}, fmt.Errorf("%w: the kind must be address or gre", ErrBadResource)
 	}
 	node := ExitNode{Name: name, Kind: kind, Enabled: true}
+	if in.PublicPool != nil {
+		node.PublicPool = *in.PublicPool
+	}
 	if in.Enabled != nil {
 		node.Enabled = *in.Enabled
 	}

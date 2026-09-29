@@ -54,10 +54,11 @@ func (s *Server) handleDiagnose(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("no such resource"))
 		return
 	}
-	address, agentID, found := "", uint32(0), false
+	var selected store.ResourceTarget
+	found := false
 	for _, target := range resource.Targets {
 		if target.ID == body.TargetID {
-			address, agentID, found = target.Target(), target.AgentID, true
+			selected, found = target, true
 			break
 		}
 	}
@@ -65,13 +66,15 @@ func (s *Server) handleDiagnose(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("no such target"))
 		return
 	}
-	writeJSON(w, http.StatusOK, s.diagnoseTarget(r.Context(), resource, agentID, address))
+	writeJSON(w, http.StatusOK, s.diagnoseTarget(r.Context(), resource, selected))
 }
 
 // diagnoseTarget walks the path a connection takes: the control node's own
 // WireGuard device, its route and handshake with the agent that hosts the target,
 // and finally a real TCP connection attempt.
-func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, agentID uint32, address string) DiagnoseResult {
+func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, target store.ResourceTarget) DiagnoseResult {
+	agentID, address := target.AgentID, target.Target()
+	dialAddress := s.DialAddress(resource.ID, target)
 	result := DiagnoseResult{Target: address, Resource: resource.Name, Steps: []DiagnoseStep{}}
 	add := func(name, status, detail, hint string) {
 		result.Steps = append(result.Steps, DiagnoseStep{Name: name, Status: status, Detail: detail, Hint: hint})
@@ -140,8 +143,8 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	// `ip route get` wants an address, not host:port: passing the target as the
 	// operator types it makes it answer "any valid prefix is expected rather
 	// than "10.0.0.5:4702"".
-	routeTarget := address
-	if host, _, splitErr := net.SplitHostPort(address); splitErr == nil && host != "" {
+	routeTarget := dialAddress
+	if host, _, splitErr := net.SplitHostPort(dialAddress); splitErr == nil && host != "" {
 		routeTarget = host
 	}
 	if out, err := s.runner().Run(ctx, "ip", "route", "get", routeTarget); err != nil {
@@ -156,14 +159,8 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		add("Route from the control node", "ok", firstLine(strings.TrimSpace(out)), "")
 	}
 
-	// A loopback target is carried by its agent: `127.0.0.1` means the machine
-	// that dials it, so the control node reaches the agent's mesh address instead
-	// and the agent passes the connection to the service on its own loopback.
-	if target, ok := loopbackTargetOf(s, agentID, address); ok {
-		add("Loopback target", "ok",
-			address+" is carried by "+agentName+": the control node dials "+target,
-			"")
-		address = target
+	if dialAddress != address {
+		add("Agent forward", "ok", address+" is carried by "+agentName+" at "+dialAddress, "")
 	}
 
 	if resource.Protocol == store.ProtocolUDP {
@@ -177,7 +174,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		return result
 	}
 
-	host := routeTarget
+	host := target.Host
 	// The agent's firewall counters, taken around the connection attempt below: a
 	// firewall that drops silently leaves nothing in a capture and nothing in a
 	// log, while the counter of the rule that matched always moves.
@@ -202,7 +199,7 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 		// range work at once, and the one thing a capture on that machine cannot
 		// show.
 		add("Mesh routing", "ok",
-			host+"/32 is delivered to "+agent.Name+", the agent this target names",
+			dialAddress+" reaches "+agent.Name+", the agent this target names",
 			"")
 	}
 	// Anything that already failed before the connection attempt is the cause,
@@ -223,10 +220,10 @@ func (s *Server) diagnoseTarget(ctx context.Context, resource store.Resource, ag
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", address)
+	conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", dialAddress)
 	switch {
 	case dialErr != nil:
-		add("Connect to the target", "fail", dialErr.Error(), dialHint(dialErr, address, host))
+		add("Connect to the target", "fail", dialErr.Error(), dialHint(dialErr, dialAddress, host))
 		result.Verdict = "the control node cannot open a connection to " + address
 		result.VerdictStatus = "fail"
 		// The control node can see the tunnel and its own route, but not what

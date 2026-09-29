@@ -41,6 +41,7 @@ func worthReporting(name string, err error) bool {
 // controlled ones.
 func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEvents *requestLog, errorEvents *errorLog) *proxy.Manager {
 	manager := proxy.New(opts.Logger)
+	manager.SetTrafficStateFile(filepath.Join(opts.StateDir, "traffic-quotas.json"))
 	// The name on a published service's error pages follows the operator's brand.
 	manager.SetBrandName(st.Settings().BrandName)
 	selfSigned := proxy.NewSelfSignedProvider()
@@ -84,7 +85,14 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 				if worthReporting(name, err) {
 					opts.Logger.Warn("could not obtain a managed certificate, serving a self-signed one",
 						"domain", name, "error", err)
-					errorEvents.record("certificate", "no managed certificate for "+name, err.Error(),
+					ownerID := ""
+					for _, resource := range st.Resources() {
+						if resource.Domain == name && resource.Protocol == store.ProtocolHTTPS {
+							ownerID = resource.OwnerID
+							break
+						}
+					}
+					errorEvents.recordOwned(ownerID, "certificate", "no managed certificate for "+name, err.Error(),
 						"check that the name resolves here and that port 80 is reachable for the ACME challenge")
 					return
 				}
@@ -111,6 +119,13 @@ func newProxyManager(opts Options, st *store.Store, auth *store.Auth, requestEve
 		_, err := auth.Authenticate(username, password)
 		return err
 	}
+	manager.IdentityAccount = func(username string) (string, string, uint16, bool) {
+		user, err := auth.FindByUsername(username)
+		if err != nil || user.Disabled || (user.Email != "" && !user.EmailVerified) {
+			return "", "", 0, false
+		}
+		return user.ID, user.Email, user.MeshSlot, true
+	}
 	// How long a connection to a published target may take. Tests shorten it so a
 	// target that cannot be reached fails quickly.
 	if opts.ProxyDialTimeout > 0 {
@@ -133,7 +148,7 @@ func (s *Server) wireCountryLookup(api *geoip.API) {
 	// A decision waits, briefly, for an answer; the request log never waits, and
 	// starts a lookup in the background instead.
 	s.proxies.CountryOf = func(addr netip.Addr) string {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), geoip.DecisionTimeout)
 		defer cancel()
 		return api.CountryForDecision(ctx, addr)
 	}

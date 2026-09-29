@@ -73,6 +73,7 @@ func (t TargetSpec) Published() string {
 // Spec is one resource the manager should publish.
 type Spec struct {
 	ID       uint32
+	OwnerID  string
 	Name     string
 	Protocol string
 	Targets  []TargetSpec
@@ -85,8 +86,16 @@ type Spec struct {
 	// ProxyProtocol is "", "v1" or "v2" and adds a header to forwarded streams.
 	ProxyProtocol string
 	// Identity requires a control node account before a request is forwarded.
-	Identity     bool
-	IdentityMode string
+	Identity            bool
+	IdentityMode        string
+	IdentityEmails      []string
+	Uncapped            bool
+	MonthlyQuotaBytes   uint64
+	MonthlyRequestQuota uint64
+	SustainedBps        uint64
+	BurstBps            uint64
+	PeakBps             uint64
+	OverQuotaBps        uint64
 	// BlockExploits rejects high-confidence commodity web attack signatures.
 	BlockExploits bool
 	// BlockHighRiskIPs uses the configured IP API's abuse confidence score.
@@ -221,8 +230,9 @@ func (s *resourceStats) snapshot() Stats {
 
 // resource is a spec plus its counters.
 type resource struct {
-	spec Spec
-	stat *resourceStats
+	spec    Spec
+	stat    *resourceStats
+	traffic *trafficMeter
 	// rotation spreads round-robin over the targets.
 	rotation atomic.Uint64
 }
@@ -253,6 +263,8 @@ type Manager struct {
 	// IdentityCheck validates a control node account for identity controlled
 	// resources. Returning nil allows the request.
 	IdentityCheck func(username, password string) error
+	// IdentityAccount resolves a signed-in account for resource-specific access.
+	IdentityAccount func(username string) (userID, email string, meshSlot uint16, ok bool)
 	// IdentitySession validates a signed control-node browser session presented
 	// on a resource hostname. IdentityLogin authenticates a form submission and
 	// issues that hostname's signed session cookie.
@@ -294,10 +306,13 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu     sync.Mutex
-	groups map[string]*group
-	stats  map[uint32]*resourceStats
-	closed bool
+	mu            sync.Mutex
+	groups        map[string]*group
+	stats         map[uint32]*resourceStats
+	meters        map[uint32]*trafficMeter
+	trafficFile   string
+	trafficSaveMu sync.Mutex
+	closed        bool
 	// started records that the first reconcile has run, so a caller can tell
 	// "nothing is listening" from "the listeners were never started in this
 	// process" - which is what a short-lived report looks like.
@@ -314,6 +329,7 @@ func New(log *slog.Logger) *Manager {
 		log:         log,
 		groups:      map[string]*group{},
 		stats:       map[uint32]*resourceStats{},
+		meters:      map[uint32]*trafficMeter{},
 		ctx:         ctx,
 		cancel:      cancel,
 		DialTimeout: 10 * time.Second,
@@ -375,13 +391,17 @@ func (m *Manager) Reconcile(specs []Spec) {
 	for _, spec := range specs {
 		present[spec.ID] = true
 		stat := m.statForLocked(spec.ID)
+		var traffic *trafficMeter
+		if spec.Protocol == ProtoTCP || spec.Protocol == ProtoUDP || spec.Protocol == ProtoHTTP || spec.Protocol == ProtoHTTPS {
+			traffic = m.meterForLocked(spec)
+		}
 		if !spec.Enabled || len(spec.Targets) == 0 {
 			stat.listening.Store(false)
 			stat.setError(nil)
 			continue
 		}
 		key := groupKey(spec.Protocol, spec.BindAddr, spec.ListenPort)
-		desired[key] = append(desired[key], &resource{spec: spec, stat: stat})
+		desired[key] = append(desired[key], &resource{spec: spec, stat: stat, traffic: traffic})
 	}
 	// The control node's own route is appended last so it owns the hostname it is
 	// published on, even if a resource claims the same name by mistake.
@@ -548,4 +568,5 @@ func (m *Manager) Close() {
 	for _, g := range groups {
 		g.close()
 	}
+	m.saveTraffic()
 }

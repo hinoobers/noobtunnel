@@ -41,20 +41,31 @@ type APIToken struct {
 
 // EffectiveRole returns the token's role, defaulting to admin.
 func (t APIToken) EffectiveRole() Role {
+	if t.Role == "viewer" || t.Role == "owner" {
+		return RoleRegular
+	}
+	if t.Role == "" {
+		return RoleAdmin
+	}
 	if ValidRole(t.Role) {
 		return t.Role
 	}
-	return RoleAdmin
+	return ""
 }
 
 // AuthState is persisted separately from mesh state so it can be rotated on its own.
 type AuthState struct {
 	// PasswordHash is the pre-users admin password. It is migrated into an
 	// "admin" account on load and left empty afterwards.
-	PasswordHash string     `json:"passwordHash,omitempty"`
-	SessionKey   string     `json:"sessionKey"`
-	APITokens    []APIToken `json:"apiTokens,omitempty"`
-	Users        []User     `json:"users,omitempty"`
+	PasswordHash   string       `json:"passwordHash,omitempty"`
+	SessionKey     string       `json:"sessionKey"`
+	APITokens      []APIToken   `json:"apiTokens,omitempty"`
+	Users          []User       `json:"users,omitempty"`
+	SMTP           SMTPConfig   `json:"smtp,omitempty"`
+	EmailTokens    []EmailToken `json:"emailTokens,omitempty"`
+	SignupEnabled  bool         `json:"signupEnabled,omitempty"`
+	SignupMaxUsers int          `json:"signupMaxUsers,omitempty"`
+	NextMeshSlot   uint16       `json:"nextMeshSlot,omitempty"`
 }
 
 // Auth holds the control node's administrative credentials.
@@ -89,6 +100,12 @@ func OpenAuth(dir string) (*Auth, error) {
 		}
 	}
 	if err := a.migrateLegacyPassword(); err != nil {
+		return nil, err
+	}
+	if err := a.migrateRoles(); err != nil {
+		return nil, err
+	}
+	if err := a.migrateMeshSlots(); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -191,8 +208,8 @@ func (a *Auth) AddAPIToken(name string) (string, APIToken, error) {
 
 // AddAPITokenWithRole mints an API token with an explicit role.
 func (a *Auth) AddAPITokenWithRole(name string, role Role) (string, APIToken, error) {
-	if !ValidRole(role) {
-		role = RoleAdmin
+	if role != RoleAdmin {
+		return "", APIToken{}, fmt.Errorf("store: API tokens require admin role")
 	}
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
@@ -230,7 +247,9 @@ func (a *Auth) VerifyAPIToken(plaintext string) (Role, bool) {
 	a.mu.RUnlock()
 	for _, t := range tokens {
 		if verifySecret(t.Hash, plaintext) == nil {
-			return t.EffectiveRole(), true
+			// Bearer tokens have no account identity or mesh slot. Only admin
+			// tokens can safely act without a tenant scope.
+			return RoleAdmin, t.EffectiveRole() == RoleAdmin
 		}
 	}
 	return "", false

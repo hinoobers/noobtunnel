@@ -1,0 +1,69 @@
+diff --git a/util/lookup.js b/util/lookup.js
+index dac0713..885e0e9 100644
+--- a/util/lookup.js
++++ b/util/lookup.js
+@@ -1,4 +1,5 @@
+ const { performance } = require("node:perf_hooks");
++const { buildRouteLookup } = require("./prefix-lookup");
+ 
+ async function lookupIp(database, parsedIp, onQuery) {
+     async function timedQuery(stage, sql, params) {
+@@ -14,29 +15,10 @@ async function lookupIp(database, parsedIp, onQuery) {
+             throw error;
+         }
+     }
+-    const [routeRows] = await timedQuery("routes", `
+-        SELECT
+-            route.prefix,
+-            route.prefix_length,
+-            route.asn,
+-            COALESCE(names.name, route.description) AS as_name,
+-            names.country_code AS as_country_code,
+-            route.visibility
+-        FROM bgp_prefixes AS route
+-        LEFT JOIN as_names AS names ON names.asn = route.asn
+-        WHERE route.family = ?
+-          AND route.start_ip <= ?
+-          AND route.end_ip >= ?
+-        ORDER BY route.prefix_length DESC, route.visibility DESC
+-        LIMIT 16
+-    `, [parsedIp.family, parsedIp.buffer, parsedIp.buffer]);
+-
+-    const longestPrefixLength = routeRows[0]?.prefix_length;
+-    const routes = longestPrefixLength === undefined
+-        ? []
+-        : routeRows.filter((row) => row.prefix_length === longestPrefixLength);
++    const routeQuery = buildRouteLookup(parsedIp);
++    const routePromise = timedQuery("routes", routeQuery.sql, routeQuery.params);
+ 
+-    const [allocationRows] = await timedQuery("allocation", `
++    const allocationPromise = timedQuery("allocation", `
+         SELECT registry, country_code, status, allocated_at
+         FROM rir_allocations
+         WHERE family = ?
+@@ -46,15 +28,23 @@ async function lookupIp(database, parsedIp, onQuery) {
+         LIMIT 1
+     `, [parsedIp.family, parsedIp.buffer, parsedIp.buffer]);
+ 
+-    const [torRows] = await timedQuery("tor", 
++    const torPromise = timedQuery("tor", 
+         "SELECT 1 FROM tor_relays WHERE ip = ? LIMIT 1",
+         [parsedIp.buffer]
+     );
+ 
+-    const [snapshots] = await timedQuery("snapshots", 
++    const snapshotsPromise = timedQuery("snapshots", 
+         "SELECT source_name, record_count, imported_at FROM data_snapshots"
+     );
+ 
++    const [[routeRows], [allocationRows], [torRows], [snapshots]] = await Promise.all([
++        routePromise, allocationPromise, torPromise, snapshotsPromise
++    ]);
++    const longestPrefixLength = routeRows[0]?.prefix_length;
++    const routes = longestPrefixLength === undefined
++        ? []
++        : routeRows.filter((row) => row.prefix_length === longestPrefixLength);
++
+     const allocation = allocationRows[0] || null;
+     return {
+         ip: parsedIp.address,

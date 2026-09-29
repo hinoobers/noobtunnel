@@ -25,6 +25,7 @@ DIRECT="1"
 KEEP="0"
 UNINSTALL="0"
 PURGE="0"
+REMOVE_REMOTE=""
 UPDATE="0"
 METHOD=""
 SYSCTL_DIR="${NOOBTUNNEL_SYSCTL_DIR:-/etc/sysctl.d}"
@@ -33,6 +34,7 @@ CONF_DIR="/etc/noobtunnel"
 BIN="/usr/local/bin/noobtunnel"
 SERVICE="noobtunnel-agent"
 UNIT="/etc/systemd/system/${SERVICE}.service"
+COMPOSE_DIR_FILE="${CONF_DIR}/docker-compose-dir"
 
 # The files this script writes in the current directory belong to the person who
 # ran it, not to root, so they can edit the compose file and run docker compose
@@ -209,6 +211,7 @@ noobtunnel agent installer
   --keep-interface       leave the WireGuard device up when the agent stops
   --uninstall            remove the agent
   --purge                with --uninstall, also remove the machine identity
+  --remove-remote ID     with --uninstall, revoke this agent on the control node
   --docker               run the agent as a Docker container instead of a
                          systemd service; the compose files are written to the
                          current directory
@@ -238,6 +241,7 @@ while [ "$#" -gt 0 ]; do
 		--keep-interface) KEEP="1"; shift ;;
 		--uninstall)   UNINSTALL="1"; shift ;;
 		--purge)       PURGE="1"; shift ;;
+		--remove-remote) arg_value "$@"; REMOVE_REMOTE="$2"; shift 2 ;;
 		--docker)      METHOD="docker"; shift ;;
 		--service)     METHOD="service"; shift ;;
 		--update)      UPDATE="1"; shift ;;
@@ -246,6 +250,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
+[ -z "$REMOVE_REMOTE" ] || [ "$UNINSTALL" = "1" ] || die "--remove-remote requires --uninstall"
 [ "$(id -u)" = "0" ] || die "please run as root, for example: curl ... | sudo sh -s -- ..."
 
 stop_service() {
@@ -258,8 +263,99 @@ stop_service() {
 	fi
 }
 
+remember_compose_dir() {
+	mkdir -p "$CONF_DIR"
+	printf '%s\n' "$1" > "$COMPOSE_DIR_FILE"
+	chmod 0600 "$COMPOSE_DIR_FILE"
+}
+
+find_compose_dir() {
+	if [ -f "${PWD}/docker-compose.yml" ] && [ -f "${PWD}/.env" ]; then
+		remember_compose_dir "$PWD"
+		printf '%s\n' "$PWD"
+		return 0
+	fi
+	if [ -f "$COMPOSE_DIR_FILE" ]; then
+		candidate="$(cat "$COMPOSE_DIR_FILE")"
+		if [ -f "${candidate}/docker-compose.yml" ] && [ -f "${candidate}/.env" ]; then
+			remember_compose_dir "$candidate"
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	fi
+	if command -v docker >/dev/null 2>&1; then
+		candidate="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' noobtunnel-agent 2>/dev/null || true)"
+		if [ -f "${candidate}/docker-compose.yml" ] && [ -f "${candidate}/.env" ]; then
+			remember_compose_dir "$candidate"
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	fi
+	[ "${1:-}" = "quick" ] && return 1
+	# Someone may have moved the compose directory after installing. Search for
+	# the files this installer generated, but bound the search so deletion cannot
+	# hang on a large machine. Multiple matches are ambiguous and are not used.
+	if command -v timeout >/dev/null 2>&1; then
+		matches="$(timeout 20 find / \( -path /proc -o -path /sys -o -path /dev -o -path /run \) -prune -o -type f -name docker-compose.yml -print 2>/dev/null |
+			while IFS= read -r compose_file; do
+				candidate="${compose_file%/*}"
+				[ -f "${candidate}/.env" ] || continue
+				grep -q 'container_name: noobtunnel-agent' "$compose_file" || continue
+				printf '%s\n' "$candidate"
+			done)"
+		if [ -n "$matches" ] && [ "$(printf '%s\n' "$matches" | wc -l)" -eq 1 ]; then
+			remember_compose_dir "$matches"
+			printf '%s\n' "$matches"
+			return 0
+		fi
+	fi
+	return 1
+}
+
 if [ "$UNINSTALL" = "1" ]; then
 	log "removing the noobtunnel agent"
+	if [ -z "$METHOD" ]; then
+		if DOCKER_DIR="$(find_compose_dir quick)"; then
+			METHOD="docker"
+		elif [ -f "${CONF_DIR}/agent.env" ] || [ -f "$UNIT" ]; then
+			METHOD="service"
+		elif DOCKER_DIR="$(find_compose_dir)"; then
+			METHOD="docker"
+		else
+			die "no noobtunnel agent found here" "for a Docker agent, run this command from its compose directory"
+		fi
+	fi
+	if [ "$METHOD" = "docker" ]; then
+		DOCKER_DIR="$(find_compose_dir)" ||
+			die "could not locate the agent's Docker compose directory"
+		cd "$DOCKER_DIR"
+		TOKEN="$(sed -n 's/^NOOBTUNNEL_TOKEN=//p' "${PWD}/.env" | tail -n1)"
+	else
+		TOKEN=""
+		if [ -f "${CONF_DIR}/agent.env" ]; then
+			TOKEN="$(sed -n 's/^NOOBTUNNEL_TOKEN=//p' "${CONF_DIR}/agent.env" | tail -n1)"
+		fi
+	fi
+	if [ -n "$REMOVE_REMOTE" ]; then
+		case "$REMOVE_REMOTE" in *[!0-9]*|"") die "invalid agent ID" ;; esac
+		[ -n "$SERVER" ] && [ -n "$PIN" ] && [ -n "$TOKEN" ] || die "server, pin, and local token are required to remove the control node record"
+		log "removing agent ${REMOVE_REMOTE} from the control node"
+		printf 'header = "Authorization: Bearer %s"\n' "$TOKEN" |
+		curl -fsSLk --connect-timeout 15 --pinnedpubkey "sha256//$PIN" --config - \
+			-X POST \
+			"https://${SERVER}/api/agent-uninstall/${REMOVE_REMOTE}" >/dev/null ||
+			die "control node removal failed; local agent was kept so you can retry"
+	fi
+	if [ "$METHOD" = "docker" ]; then
+		compose_run down || die "could not stop the agent container"
+		rm -f "${PWD}/Dockerfile" "${PWD}/docker-compose.yml" "${PWD}/.env" "${PWD}/noobtunnel"
+		if [ "$PURGE" = "1" ]; then
+			rm -rf "${PWD}/noobtunnel-state"
+		fi
+		rm -f "$COMPOSE_DIR_FILE"
+		log "done"
+		exit 0
+	fi
 	stop_service
 	rm -f "$UNIT"
 	if command -v systemctl >/dev/null 2>&1; then
@@ -324,12 +420,18 @@ file_value() {
 # systemd service. The identity, the address and the configuration stay as they
 # are, so no enrollment token is needed.
 update_agent() {
-	if [ -f "${PWD}/docker-compose.yml" ] || [ -f "${PWD}/compose.yaml" ]; then
+	if DOCKER_DIR="$(find_compose_dir quick)"; then
+		cd "$DOCKER_DIR"
 		update_container
 		return 0
 	fi
 	if [ -f "${CONF_DIR}/agent.env" ] || [ -f "$UNIT" ]; then
 		update_service
+		return 0
+	fi
+	if DOCKER_DIR="$(find_compose_dir)"; then
+		cd "$DOCKER_DIR"
+		update_container
 		return 0
 	fi
 	die "there is no noobtunnel agent here to update" \
@@ -353,6 +455,11 @@ update_container() {
 	log "downloaded the newest agent binary"
 
 	ensure_docker
+	# Older Docker installs need the host's hosts file mounted before mesh DNS
+	# names can resolve on the host, not just inside the agent container.
+	if ! grep -q '/etc/hosts:/run/noobtunnel/host-hosts' "${DIR}/docker-compose.yml"; then
+		sed -i '/^      - \/lib\/modules:\/lib\/modules:ro$/a\      - /etc/hosts:/run/noobtunnel/host-hosts' "${DIR}/docker-compose.yml"
+	fi
 	compose_run up -d --build ||
 		die "docker compose could not restart the container" "read the output above, then run: docker compose up -d --build"
 	sleep 3
@@ -361,6 +468,7 @@ update_container() {
 		compose_run logs --tail 20 noobtunnel-agent 2>/dev/null | sed 's/^/    /' || true
 		die "the agent container did not come back up" "read the log lines above"
 	fi
+	remember_compose_dir "$DIR"
 	log "the agent container is running the new build"
 	cat <<EOF
 
@@ -504,6 +612,7 @@ services:
     volumes:
       - ./noobtunnel-state:/var/lib/noobtunnel
       - /lib/modules:/lib/modules:ro
+      - /etc/hosts:/run/noobtunnel/host-hosts
     env_file:
       - .env
 COMPOSE
@@ -543,6 +652,7 @@ COMPOSE_TAIL
 		compose_run logs --tail 20 noobtunnel-agent 2>/dev/null | sed 's/^/    /' || true
 		die "the agent container did not stay up" "read the log lines above, then run: docker compose up -d"
 	fi
+	remember_compose_dir "$DIR"
 
 	# The container writes its identity as root into the bind mount, and the files
 	# were written by root because the installer ran under sudo: hand both to the

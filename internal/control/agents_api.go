@@ -15,35 +15,58 @@ import (
 )
 
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
+	who := principalFrom(r)
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, s.StateSnapshot())
+		writeJSON(w, http.StatusOK, s.StateSnapshotFor(who))
 	case http.MethodPost:
+		if !who.canManageMesh() {
+			writeJSON(w, http.StatusForbidden, errBody("this account cannot add agents"))
+			return
+		}
+		if who.MeshSlot > 0 {
+			if !s.tenantFirewallReady.Load() || s.syncTenantFirewall(r.Context()) != nil {
+				writeJSON(w, http.StatusServiceUnavailable, errBody("private mesh firewall is unavailable"))
+				return
+			}
+		}
 		var body struct {
 			Name         string   `json:"name"`
+			MeshDNS      string   `json:"meshDns"`
 			Advertise    []string `json:"advertise"`
-			TTLHours     int      `json:"ttlHours"`
 			AdvertiseAll bool     `json:"advertiseAll"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
+		method := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("method")))
+		if method == "" {
+			method = "service"
+		}
+		if method != "service" && method != "docker" && method != "windows" {
+			writeJSON(w, http.StatusBadRequest, errBody("choose Linux, Docker, or Windows"))
+			return
+		}
 		agent, err := s.store.AddAgent(store.AddAgentParams{
-			Name:         body.Name,
-			Advertise:    body.Advertise,
-			TTL:          time.Duration(body.TTLHours) * time.Hour,
-			AdvertiseAll: body.AdvertiseAll,
+			Name:          body.Name,
+			MeshDNS:       body.MeshDNS,
+			InstallMethod: method,
+			OwnerID:       who.UserID,
+			MeshSlot:      who.MeshSlot,
+			Advertise:     body.Advertise,
+			TTL:           15 * time.Minute,
+			AdvertiseAll:  body.AdvertiseAll,
 		})
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 			return
 		}
-		s.recordEvent("enrollment", "enrollment token created for "+agent.Name)
+		s.recordEventFor(agent.OwnerID, "enrollment", "enrollment token created for "+agent.Name)
 		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"agent":          s.agentView(agent, r),
-			"installCommand": s.InstallCommand(agent, s.installOptions(r)),
+			"installCommand": s.InstallCommand(agent, s.installOptionsForAgent(r, agent)),
 		})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, errBody("use GET or POST"))
@@ -68,6 +91,10 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, errBody("no such agent"))
 		return
 	}
+	if !ownsAgent(principalFrom(r), agent) {
+		writeJSON(w, http.StatusNotFound, errBody("no such agent"))
+		return
+	}
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
@@ -77,20 +104,48 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 	case action == "" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{
 			"agent":          s.agentView(agent, r),
-			"installCommand": s.InstallCommand(agent, s.installOptions(r)),
+			"installCommand": s.InstallCommand(agent, s.installOptionsForAgent(r, agent)),
 		})
 	case action == "" && r.Method == http.MethodPatch:
 		s.patchAgent(w, r, id, agent)
+	case action == "keepalive" && r.Method == http.MethodPost:
+		if agent.EnrolledAt != nil {
+			writeJSON(w, http.StatusConflict, errBody("agent is already enrolled"))
+			return
+		}
+		expires := s.now().UTC().Add(15 * time.Minute)
+		if err := s.store.UpdateAgent(id, func(a *store.Agent) error {
+			if a.EnrolledAt != nil {
+				return errors.New("agent is already enrolled")
+			}
+			a.ExpiresAt = &expires
+			return nil
+		}); err != nil {
+			writeJSON(w, http.StatusConflict, errBody(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"expiresAt": expires})
 	case action == "" && r.Method == http.MethodDelete:
-		if err := s.store.RemoveAgent(id); err != nil {
+		if err := s.removeAgent(r, agent, "agent removed by owner"); err != nil {
 			writeJSON(w, http.StatusNotFound, errBody("no such agent"))
 			return
 		}
-		s.Revoke(r.Context(), id, "agent removed by administrator")
-		s.recordEvent("enrollment", "agent "+agent.Name+" removed")
-		s.broadcastState()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case action == "uninstall" && r.Method == http.MethodGet:
+		opts := s.installOptions(r)
+		method := agent.InstallMethod
+		if method == "" && agent.OS == "windows" {
+			method = "windows"
+		}
+		if method == "" {
+			method = "auto"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"method":  method,
+			"command": s.UninstallCommand(id, opts, method),
+		})
 	case action == "rotate" && r.Method == http.MethodPost:
+		expires := s.now().UTC().Add(15 * time.Minute)
 		err := s.store.UpdateAgent(id, func(a *store.Agent) error {
 			token, err := store.NewToken()
 			if err != nil {
@@ -104,6 +159,7 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 			a.HubPresharedKey = psk
 			a.PublicKey = ""
 			a.EnrolledAt = nil
+			a.ExpiresAt = &expires
 			return nil
 		})
 		if err != nil {
@@ -111,11 +167,11 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Revoke(r.Context(), id, "token rotated by administrator")
-		s.recordEvent("enrollment", "token rotated for "+agent.Name)
+		s.recordEventFor(agent.OwnerID, "enrollment", "token rotated for "+agent.Name)
 		rotated, _ := s.store.Agent(id)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"agent":          s.agentView(rotated, r),
-			"installCommand": s.InstallCommand(rotated, s.installOptions(r)),
+			"installCommand": s.InstallCommand(rotated, s.installOptionsForAgent(r, rotated)),
 		})
 	case action == "ping" && r.Method == http.MethodPost:
 		rtt, err := s.Ping(r.Context(), id)
@@ -136,7 +192,7 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		s.recordEvent("command", agent.Name+" <- "+body.Action)
+		s.recordEventFor(agent.OwnerID, "command", agent.Name+" <- "+body.Action)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case action == "config" && r.Method == http.MethodGet:
 		cfg, err := s.AgentConfigPreview(id)
@@ -147,7 +203,7 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"config": cfg})
 	case action == "install" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string]any{
-			"installCommand": s.InstallCommand(agent, s.installOptions(r)),
+			"installCommand": s.InstallCommand(agent, s.installOptionsForAgent(r, agent)),
 			"token":          agent.Token,
 		})
 	default:
@@ -155,9 +211,24 @@ func (s *Server) handleAgentItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func ownsAgent(who principal, agent *store.Agent) bool {
+	return ownsMeshObject(who, agent.OwnerID, agent.MeshSlot)
+}
+
+func ownsMeshObject(who principal, ownerID string, meshSlot uint16) bool {
+	if who.UserID == "" || meshSlot != who.MeshSlot {
+		return false
+	}
+	if ownerID == who.UserID {
+		return true
+	}
+	return ownerID == "" && meshSlot == 0 && who.canAdmin()
+}
+
 func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request, id uint32, agent *store.Agent) {
 	var body struct {
 		Name         *string   `json:"name"`
+		MeshDNS      *string   `json:"meshDns"`
 		Advertise    *[]string `json:"advertise"`
 		Enabled      *bool     `json:"enabled"`
 		Notes        *string   `json:"notes"`
@@ -167,7 +238,43 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request, id uint32, a
 		writeJSON(w, http.StatusBadRequest, errBody(err.Error()))
 		return
 	}
-	err := s.store.UpdateAgent(id, func(a *store.Agent) error {
+	var presentNetworks []string
+	s.mu.Lock()
+	session := s.sessions[id]
+	s.mu.Unlock()
+	if session != nil {
+		stats, _, _, _, _ := session.snapshot()
+		for _, network := range stats.Networks {
+			presentNetworks = append(presentNetworks, network.Prefix)
+		}
+	}
+	err := s.store.Update(func(st *store.State) error {
+		var a *store.Agent
+		for _, candidate := range st.Agents {
+			if candidate.ID == id {
+				a = candidate
+				break
+			}
+		}
+		if a == nil {
+			return store.ErrNotFound
+		}
+		var advertise []string
+		if body.Advertise != nil {
+			var err error
+			advertise, err = store.NormalisePrefixes(*body.Advertise)
+			if err != nil {
+				return err
+			}
+			if a.MeshSlot > 0 {
+				if err := store.ValidateTenantAdvertise(advertise); err != nil {
+					return err
+				}
+			}
+			if err := store.ValidateAdvertise(st, id, advertise); err != nil {
+				return err
+			}
+		}
 		if body.Name != nil {
 			name := strings.TrimSpace(*body.Name)
 			if name == "" {
@@ -175,11 +282,17 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request, id uint32, a
 			}
 			a.Name = name
 		}
-		if body.Advertise != nil {
-			advertise, err := store.NormalisePrefixes(*body.Advertise)
+		if body.MeshDNS != nil {
+			name, err := store.NormaliseMeshDNS(*body.MeshDNS)
 			if err != nil {
 				return err
 			}
+			if err := store.ValidateMeshDNSUnique(st, id, a.OwnerID, a.MeshSlot, name); err != nil {
+				return err
+			}
+			a.MeshDNS = name
+		}
+		if body.Advertise != nil {
 			a.Advertise = advertise
 		}
 		if body.Enabled != nil {
@@ -189,6 +302,11 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request, id uint32, a
 			a.Notes = *body.Notes
 		}
 		if body.AdvertiseAll != nil {
+			if *body.AdvertiseAll && !a.AdvertiseAll {
+				a.AutoSeen, _ = store.NormalisePrefixes(presentNetworks)
+			} else if !*body.AdvertiseAll {
+				a.AutoSeen = nil
+			}
 			a.AdvertiseAll = *body.AdvertiseAll
 		}
 		return nil
@@ -201,6 +319,8 @@ func (s *Server) patchAgent(w http.ResponseWriter, r *http.Request, id uint32, a
 		s.Revoke(r.Context(), id, "agent disabled by administrator")
 	} else if err := s.Sync(r.Context()); err != nil {
 		s.log.Warn("failed to apply agent change", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, errBody("the agent change was saved but could not be applied to the mesh yet"))
+		return
 	}
 	s.broadcastState()
 	updated, err := s.store.Agent(id)
@@ -222,8 +342,16 @@ func (s *Server) AgentConfigPreview(id uint32) (string, error) {
 		return "", errors.New("this agent has not connected yet, so it has no public key")
 	}
 	settings := s.store.Settings()
+	subnet, err := store.TenantPrefix(settings.MeshCIDR, agent.MeshSlot)
+	if err != nil {
+		if agent.MeshSlot > 0 {
+			return "", err
+		}
+	} else {
+		settings.MeshCIDR = subnet.String()
+	}
 	st := s.store.View()
-	pool, err := ipam.New(settings.MeshCIDR)
+	pool, err := ipam.New(st.Settings.MeshCIDR)
 	if err != nil {
 		return "", err
 	}
@@ -284,16 +412,17 @@ func (s *Server) agentView(agent *store.Agent, r *http.Request) AgentView {
 	state := s.StateSnapshot()
 	for _, av := range state.Agents {
 		if av.ID == agent.ID {
-			av.InstallCommand = s.InstallCommand(agent, s.installOptions(r))
+			av.InstallCommand = s.InstallCommand(agent, s.installOptionsForAgent(r, agent))
 			return av
 		}
 	}
 	prefix, _ := agent.AddressPrefix()
 	return AgentView{
-		ID: agent.ID, Name: agent.Name, Address: agent.Address, Prefix: prefix.String(),
+		ID: agent.ID, Name: agent.Name, MeshDNS: agent.MeshDNS, Address: agent.Address, Prefix: prefix.String(),
 		PublicKey: agent.PublicKey, Advertise: agent.Advertise, Enabled: agent.Enabled,
 		CreatedAt: agent.CreatedAt, Token: agent.Token,
-		InstallCommand: s.InstallCommand(agent, s.installOptions(r)),
+		InstallMethod:  agent.InstallMethod,
+		InstallCommand: s.InstallCommand(agent, s.installOptionsForAgent(r, agent)),
 		Links:          []LinkView{},
 	}
 }
